@@ -102,16 +102,122 @@ MYSQL_DATABASE=${mysql_database}
 EOF
 }
 
+# 尝试读取 aaPanel 保存的 MySQL root 密码
+get_aapanel_mysql_root() {
+	local py="" pass=""
+
+	for py in /www/server/panel/pyenv/bin/python3 /usr/bin/python3 python3; do
+		[[ -x "$py" ]] || continue
+		[[ -f /www/server/panel/data/default.db ]] || continue
+		pass="$("$py" - <<'PY' 2>/dev/null || true
+import sqlite3
+try:
+    conn = sqlite3.connect('/www/server/panel/data/default.db')
+    cur = conn.cursor()
+    cur.execute('SELECT mysql_root FROM config WHERE id=1')
+    row = cur.fetchone()
+    if row and row[0]:
+        print(row[0])
+except Exception:
+    pass
+PY
+)"
+		[[ -n "$pass" ]] && { echo "$pass"; return 0; }
+	done
+
+	# 部分环境 root 可通过 socket 免密登录
+	if mysql -uroot -e "SELECT 1" >/dev/null 2>&1; then
+		echo ""
+		return 0
+	fi
+
+	echo ""
+	return 1
+}
+
+mysql_root_exec() {
+	local sql="$1"
+	local root_pass="${MYSQL_ROOT_PASSWORD:-}"
+
+	if [[ -z "$root_pass" ]]; then
+		root_pass="$(get_aapanel_mysql_root 2>/dev/null || true)"
+	fi
+
+	# socket 免密
+	if mysql -uroot -e "SELECT 1" >/dev/null 2>&1; then
+		mysql -uroot -e "$sql"
+		return $?
+	fi
+
+	# 使用 root 密码
+	if [[ -n "$root_pass" ]]; then
+		MYSQL_PWD="$root_pass" mysql -uroot -h"${MYSQL_HOST:-127.0.0.1}" -P"${MYSQL_PORT:-3306}" -e "$sql"
+		return $?
+	fi
+
+	return 1
+}
+
+# 自动创建数据库与用户（aaPanel 环境）
+create_mysql_database_and_user() {
+	local mysql_host="$1"
+	local mysql_port="$2"
+	local mysql_user="$3"
+	local mysql_password="$4"
+	local mysql_database="$5"
+
+	require_cmd mysql
+	log "创建 MySQL 数据库与用户..."
+
+	if ! mysql_root_exec "SELECT 1" >/dev/null 2>&1; then
+		if [[ "${NON_INTERACTIVE:-0}" == "1" ]]; then
+			die "无法以 root 连接 MySQL，请设置 MYSQL_ROOT_PASSWORD 或先在 aaPanel 安装 MySQL"
+		fi
+		warn "无法自动获取 MySQL root 权限"
+		read -r -s -p "请输入 MySQL root 密码: " MYSQL_ROOT_PASSWORD
+		echo ""
+		mysql_root_exec "SELECT 1" >/dev/null 2>&1 || die "MySQL root 连接失败，请检查密码"
+	fi
+
+	# 转义 SQL 中的单引号
+	local esc_pass="${mysql_password//\'/\'\'}"
+
+	mysql_root_exec "
+CREATE DATABASE IF NOT EXISTS \`${mysql_database}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${mysql_user}'@'localhost' IDENTIFIED BY '${esc_pass}';
+CREATE USER IF NOT EXISTS '${mysql_user}'@'127.0.0.1' IDENTIFIED BY '${esc_pass}';
+ALTER USER '${mysql_user}'@'localhost' IDENTIFIED BY '${esc_pass}';
+ALTER USER '${mysql_user}'@'127.0.0.1' IDENTIFIED BY '${esc_pass}';
+GRANT ALL PRIVILEGES ON \`${mysql_database}\`.* TO '${mysql_user}'@'localhost';
+GRANT ALL PRIVILEGES ON \`${mysql_database}\`.* TO '${mysql_user}'@'127.0.0.1';
+FLUSH PRIVILEGES;
+" || die "创建数据库/用户失败"
+
+	log "数据库已创建: ${mysql_database} | 用户: ${mysql_user}"
+}
+
+test_mysql_app_connection() {
+	local mysql_host="$1"
+	local mysql_port="$2"
+	local mysql_user="$3"
+	local mysql_password="$4"
+
+	MYSQL_PWD="$mysql_password" mysql -h"$mysql_host" -P"$mysql_port" -u"$mysql_user" -e "SELECT 1" >/dev/null 2>&1
+}
+
 import_mysql_schema() {
 	local schema_file="$1"
 	local mysql_host="$2"
 	local mysql_port="$3"
 	local mysql_user="$4"
 	local mysql_password="$5"
+	local mysql_database="$6"
 
 	require_cmd mysql
-	log "导入数据库结构: $schema_file"
-	MYSQL_PWD="$mysql_password" mysql -h"$mysql_host" -P"$mysql_port" -u"$mysql_user" <"$schema_file"
+	log "导入数据库表结构: $schema_file"
+	MYSQL_PWD="$mysql_password" mysql -h"$mysql_host" -P"$mysql_port" -u"$mysql_user" "$mysql_database" < <(
+		sed '/^CREATE DATABASE/d; /^USE /d' "$schema_file"
+	)
 }
 
 npm_build_all() {

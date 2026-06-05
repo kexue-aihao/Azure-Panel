@@ -8,9 +8,9 @@
 #   sudo ./install.sh
 #
 # 非交互安装（CI / 脚本化）:
-#   NON_INTERACTIVE=1 \
-#   MYSQL_PASSWORD=your-db-pass \
-#   sudo ./install.sh
+#   NON_INTERACTIVE=1 sudo ./install.sh
+#   # 数据库密码自动生成；也可指定:
+#   MYSQL_PASSWORD=your-db-pass MYSQL_ROOT_PASSWORD=root-pass sudo ./install.sh
 #
 # 可选环境变量:
 #   APP_DIR=/www/wwwroot/azure-panel
@@ -19,7 +19,9 @@
 #   MYSQL_HOST=127.0.0.1
 #   MYSQL_PORT=3306
 #   MYSQL_USER=azure_panel
-#   MYSQL_PASSWORD=数据库密码
+#   MYSQL_PASSWORD=数据库密码（留空则自动生成）
+#   MYSQL_ROOT_PASSWORD=MySQL root 密码（留空则尝试读取 aaPanel 配置）
+#   SKIP_CREATE_DB=1          # 跳过自动建库（数据库已存在时）
 #   MYSQL_DATABASE=azure_panel
 #   APP_PORT=3000
 #   DOMAIN=panel.example.com
@@ -113,15 +115,13 @@ collect_config() {
 	prompt_or_env APP_PORT "应用监听端口" "$APP_PORT"
 	prompt_or_env DOMAIN "绑定域名（可留空稍后配置）" "$DOMAIN"
 
+	# 应用数据库密码：未指定则自动生成
 	if [[ -z "${MYSQL_PASSWORD:-}" ]]; then
-		if [[ "${NON_INTERACTIVE:-0}" == "1" ]]; then
-			die "非交互模式请设置环境变量 MYSQL_PASSWORD"
-		fi
-		read -r -s -p "MySQL 密码 (${MYSQL_USER}): " MYSQL_PASSWORD
-		echo ""
+		MYSQL_PASSWORD="$(rand_hex 16)"
+		log "已自动生成数据库密码 (${MYSQL_USER})"
+	elif [[ "${NON_INTERACTIVE:-0}" != "1" ]]; then
+		info "使用环境变量中的 MYSQL_PASSWORD"
 	fi
-
-	[[ -n "$MYSQL_PASSWORD" ]] || die "MySQL 密码不能为空"
 
 	SECRET_KEY="${SECRET_KEY:-$(rand_hex 48)}"
 	ENCRYPTION_KEY="${ENCRYPTION_KEY:-$(rand_hex 16)$(rand_hex 16)}"
@@ -142,31 +142,51 @@ setup_env() {
 
 setup_mysql() {
 	if [[ "${SKIP_MYSQL:-0}" == "1" ]]; then
-		warn "已跳过数据库导入 (SKIP_MYSQL=1)"
+		warn "已跳过数据库步骤 (SKIP_MYSQL=1)"
 		return
 	fi
 
 	local schema="${APP_DIR}/deploy/aapanel/schema.mysql.sql"
+	local cred_file="${APP_DIR}/deploy/aapanel/generated/db-credentials.txt"
 	[[ -f "$schema" ]] || die "未找到数据库脚本: $schema"
 
 	if ! command -v mysql >/dev/null 2>&1; then
-		warn "未找到 mysql 客户端，请手动在 phpMyAdmin 导入: deploy/aapanel/schema.mysql.sql"
-		return
+		die "未找到 mysql 客户端，请先在 aaPanel 安装 MySQL"
 	fi
 
-	log "测试数据库连接..."
-	if ! MYSQL_PWD="$MYSQL_PASSWORD" mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -e "SELECT 1" >/dev/null 2>&1; then
-		warn "数据库连接失败，请确认已在 aaPanel 创建数据库和用户"
-		warn "aaPanel → 数据库 → 添加数据库（库名/用户: ${MYSQL_USER}）"
-		if [[ "${NON_INTERACTIVE:-0}" != "1" ]]; then
-			read -r -p "是否跳过数据库导入继续安装? [y/N]: " skip_db
-			[[ "$skip_db" =~ ^[Yy]$ ]] && return
+	# 1) 自动创建数据库与用户
+	if [[ "${SKIP_CREATE_DB:-0}" != "1" ]]; then
+		if test_mysql_app_connection "$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD"; then
+			log "数据库用户已存在且可连接，跳过建库"
+		else
+			create_mysql_database_and_user \
+				"$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD" "$MYSQL_DATABASE"
 		fi
-		die "数据库连接失败，安装中止"
+	else
+		warn "已跳过自动建库 (SKIP_CREATE_DB=1)"
 	fi
 
-	import_mysql_schema "$schema" "$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD"
-	log "数据库结构导入完成"
+	# 2) 验证连接
+	test_mysql_app_connection "$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD" \
+		|| die "数据库连接失败，请检查 MySQL 服务与账号"
+
+	# 3) 导入表结构
+	import_mysql_schema "$schema" "$MYSQL_HOST" "$MYSQL_PORT" \
+		"$MYSQL_USER" "$MYSQL_PASSWORD" "$MYSQL_DATABASE"
+	log "数据库表结构导入完成"
+
+	# 4) 保存凭据备查
+	mkdir -p "${APP_DIR}/deploy/aapanel/generated"
+	cat >"$cred_file" <<EOF
+# Azure Panel 数据库凭据（install.sh 自动生成，请妥善保管）
+MYSQL_HOST=${MYSQL_HOST}
+MYSQL_PORT=${MYSQL_PORT}
+MYSQL_DATABASE=${MYSQL_DATABASE}
+MYSQL_USER=${MYSQL_USER}
+MYSQL_PASSWORD=${MYSQL_PASSWORD}
+EOF
+	chmod 600 "$cred_file" 2>/dev/null || true
+	info "数据库凭据已保存: $cred_file"
 }
 
 setup_supervisor() {
@@ -206,6 +226,8 @@ main() {
 	log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	info "项目目录 : $APP_DIR"
 	info "监听地址 : http://127.0.0.1:${port}"
+	info "数据库   : ${MYSQL_DATABASE} (用户: ${MYSQL_USER})"
+	info "DB 凭据  : ${APP_DIR}/deploy/aapanel/generated/db-credentials.txt"
 	info "Supervisor: $WEB_PROGRAM, $WORKER_PROGRAM"
 	info "日志目录 : /www/wwwlogs/"
 	echo ""

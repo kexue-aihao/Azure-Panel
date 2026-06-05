@@ -45,14 +45,17 @@ chmod +x install.sh update.sh
 sudo ./install.sh
 ```
 
-脚本自动完成：拉取/更新代码 → 生成 `.env` → 导入数据库 → `npm install` → `npm run build:all` → 配置 Supervisor → 健康检查。
+脚本自动完成：拉取/更新代码 → **自动创建数据库和用户** → 生成 `.env` → 导入表结构 → `npm install` → `npm run build:all` → 配置 Supervisor → 健康检查。
 
-**安装前请先在 aaPanel 创建数据库：**
+> 无需手动在 aaPanel 建库。脚本会通过 MySQL root 自动创建 `azure_panel` 库和用户，密码自动生成并保存到 `deploy/aapanel/generated/db-credentials.txt`。
 
-- 库名 / 用户名：`azure_panel`
-- 密码：自行设置（安装时输入）
+非交互安装（全自动）：
 
-非交互安装：
+```bash
+NON_INTERACTIVE=1 sudo ./install.sh
+```
+
+指定数据库密码：
 
 ```bash
 NON_INTERACTIVE=1 MYSQL_PASSWORD=你的密码 sudo ./install.sh

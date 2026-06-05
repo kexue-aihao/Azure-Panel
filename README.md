@@ -72,11 +72,9 @@ npm run start:worker   # 独立启动补机 Worker
 
 适用于已安装 **Nginx + MySQL 8.0 + Supervisor + Node.js 20** 的 aaPanel（宝塔）服务器。
 
-**首次安装（一条龙）：**
+**首次安装（一条龙，自动建库）：**
 
 ```bash
-# 1. 先在 aaPanel 创建数据库：库名/用户 azure_panel，记下密码
-# 2. SSH 执行一键安装
 cd /www/wwwroot
 curl -fsSL https://raw.githubusercontent.com/kexue-aihao/Azure-Panel/master/install.sh -o install.sh
 chmod +x install.sh
@@ -91,7 +89,9 @@ chmod +x install.sh update.sh
 sudo ./install.sh
 ```
 
-`install.sh` 自动完成：代码拉取 → `.env` 生成 → 数据库导入 → 构建 → Supervisor 配置 → 健康检查。
+`install.sh` 自动完成：代码拉取 → **自动创建数据库** → `.env` 生成 → 表结构导入 → 构建 → Supervisor 配置 → 健康检查。
+
+数据库凭据保存在 `deploy/aapanel/generated/db-credentials.txt`（请妥善保管）。
 
 **后续升级：**
 
@@ -287,11 +287,9 @@ npm run start:worker   # Start standalone replenishment worker
 
 For servers with **Nginx + MySQL 8.0 + Supervisor + Node.js 20** (aaPanel / BT Panel).
 
-**First-time install:**
+**First-time install (auto-creates database):**
 
 ```bash
-# 1. Create database in aaPanel: name/user azure_panel, note the password
-# 2. Run one-click installer
 cd /www/wwwroot
 curl -fsSL https://raw.githubusercontent.com/kexue-aihao/Azure-Panel/master/install.sh -o install.sh
 chmod +x install.sh
