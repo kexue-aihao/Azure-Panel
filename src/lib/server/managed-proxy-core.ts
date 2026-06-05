@@ -9,6 +9,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { decryptSecret } from './crypto';
 import { getProjectRoot, readEnv } from './runtime-env';
 import type { ProxyProfile } from './db/schema';
+import { updateProxyProfilePort } from './db/repo';
 import type { ProxyRuntimeConfig } from './proxy';
 
 export type ManagedProxyCore = 'sing-box' | 'xray';
@@ -32,6 +33,7 @@ type VlessShare = {
 };
 
 const managedProcesses = new Map<string, ManagedProcess>();
+const managedStartPromises = new Map<string, Promise<ProxyRuntimeConfig>>();
 const DEFAULT_MANAGED_PROXY_HOST = '127.0.0.1';
 const SUPPORTED_VLESS_TRANSPORTS = new Set(['tcp', 'ws', 'grpc']);
 const CORE_INSTALL_PROMISES = new Map<ManagedProxyCore, Promise<string>>();
@@ -105,14 +107,16 @@ function xrayLinuxArch() {
 	}
 }
 
-function coreDownloadUrl(core: ManagedProxyCore) {
+function coreDownloadUrls(core: ManagedProxyCore) {
 	const arch = linuxArch();
 	if (!arch) throw new Error(`当前 CPU 架构 ${process.arch} 暂不支持自动下载 ${core} 核心`);
 	if (core === 'sing-box') {
 		const version = readEnv('SING_BOX_VERSION') ?? '1.12.0';
 		return {
 			version,
-			url: `https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz`
+			urls: [
+				`https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz`
+			]
 		};
 	}
 	const xrayArch = xrayLinuxArch();
@@ -120,7 +124,11 @@ function coreDownloadUrl(core: ManagedProxyCore) {
 	const version = readEnv('XRAY_VERSION') ?? '25.4.30';
 	return {
 		version,
-		url: `https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${xrayArch}.zip`
+		urls: [
+			`https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${xrayArch}.zip`,
+			`https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xrayArch}.zip`,
+			`https://github.com/XTLS/Xray-core/releases/download/v25.4.30/Xray-linux-${xrayArch}.zip`
+		]
 	};
 }
 
@@ -135,24 +143,32 @@ async function ensureCoreInstalled(core: ManagedProxyCore) {
 async function installCore(core: ManagedProxyCore) {
 	const target = localCorePath(core);
 	mkdirSync(dirname(target), { recursive: true });
-	const { version, url } = coreDownloadUrl(core);
+	const { version, urls } = coreDownloadUrls(core);
 	const tempDir = await mkdtemp(join(tmpdir(), `azure-panel-${core}-`));
-	const archivePath = join(tempDir, basename(url));
 
 	try {
-		const response = await fetch(url);
-		if (!response.ok || !response.body) {
-			throw new Error(`下载 ${core} ${version} 失败: HTTP ${response.status}`);
-		}
-		await writeFile(archivePath, Buffer.from(await response.arrayBuffer()));
+		const errors: string[] = [];
+		for (const url of urls) {
+			const archivePath = join(tempDir, basename(new URL(url).pathname));
+			try {
+				const response = await fetch(url);
+				if (!response.ok || !response.body) {
+					throw new Error(`HTTP ${response.status}`);
+				}
+				await writeFile(archivePath, Buffer.from(await response.arrayBuffer()));
 
-		if (core === 'sing-box') {
-			await extractTarGzFile(archivePath, 'sing-box', target);
-		} else {
-			await extractZipFile(archivePath, 'xray', target);
+				if (core === 'sing-box') {
+					await extractTarGzFile(archivePath, 'sing-box', target);
+				} else {
+					await extractZipFile(archivePath, 'xray', target);
+				}
+				await chmod(target, 0o755);
+				return target;
+			} catch (err) {
+				errors.push(`${url}: ${err instanceof Error ? err.message : String(err)}`);
+			}
 		}
-		await chmod(target, 0o755);
-		return target;
+		throw new Error(errors.join('；'));
 	} catch (err) {
 		throw new Error(
 			`自动安装 ${core} 核心失败: ${err instanceof Error ? err.message : String(err)}。请运行 ./update.sh，或手动下载后在 .env 设置 ${coreEnvKey(core)}`
@@ -267,6 +283,13 @@ async function resolveListenPort(preferredPort?: number) {
 	if (preferredPort && Number.isInteger(preferredPort) && preferredPort > 0 && preferredPort <= 65535) {
 		if (await isLocalPortFree(preferredPort)) return preferredPort;
 		throw new Error(`托管代理本地端口 ${preferredPort} 已被占用`);
+	}
+	return allocateLocalPort();
+}
+
+async function resolveReusableListenPort(preferredPort?: number) {
+	if (preferredPort && Number.isInteger(preferredPort) && preferredPort > 0 && preferredPort <= 65535) {
+		if (await isLocalPortFree(preferredPort)) return preferredPort;
 	}
 	return allocateLocalPort();
 }
@@ -480,7 +503,7 @@ async function waitForManagedProxy(proxy: ProxyRuntimeConfig, getStartError: () 
 		const startError = getStartError();
 		if (startError) throw startError;
 		try {
-			await connectLocalPort(proxy.port, 500);
+			await verifyHttpProxyConnect(proxy.port, 1200);
 			return proxy;
 		} catch (err) {
 			lastError = err;
@@ -509,6 +532,43 @@ function connectLocalPort(port: number, timeoutMs: number) {
 	});
 }
 
+function verifyHttpProxyConnect(port: number, timeoutMs: number) {
+	return new Promise<void>((resolve, reject) => {
+		const socket = net.connect({ host: DEFAULT_MANAGED_PROXY_HOST, port });
+		let buffer = '';
+		const timer = setTimeout(() => {
+			socket.destroy();
+			reject(new Error('HTTP 代理 CONNECT 验证超时'));
+		}, timeoutMs);
+		const cleanup = () => clearTimeout(timer);
+
+		socket.once('connect', () => {
+			socket.write(
+				'CONNECT management.azure.com:443 HTTP/1.1\r\nHost: management.azure.com:443\r\n\r\n'
+			);
+		});
+		socket.on('data', (chunk) => {
+			buffer += String(chunk);
+			if (!buffer.includes('\r\n\r\n')) return;
+			cleanup();
+			socket.end();
+			if (/^HTTP\/\d(?:\.\d)? 2\d\d/i.test(buffer)) {
+				resolve();
+				return;
+			}
+			reject(new Error(`HTTP 代理 CONNECT 验证失败: ${buffer.split('\r\n')[0] || '无响应状态'}`));
+		});
+		socket.once('error', (err) => {
+			cleanup();
+			reject(err);
+		});
+		socket.once('end', () => {
+			cleanup();
+			if (!buffer) reject(new Error('HTTP 代理 CONNECT 验证无响应'));
+		});
+	});
+}
+
 export function canManageShareLink(shareLink: string) {
 	try {
 		const protocol = new URL(shareLink.trim()).protocol.replace(':', '').toLowerCase();
@@ -524,6 +584,46 @@ export async function startManagedProxyFromShareLink(
 ): Promise<ProxyRuntimeConfig> {
 	const core = options.core ?? 'sing-box';
 	const key = processKey(core, shareLink);
+	const pending = managedStartPromises.get(key);
+	if (pending) return pending;
+
+	const promise = startManagedProxyProcess(shareLink, { ...options, core }, key).finally(() => {
+		managedStartPromises.delete(key);
+	});
+	managedStartPromises.set(key, promise);
+	return promise;
+}
+
+async function ensureManagedProxyFromShareLink(
+	shareLink: string,
+	options: { core: ManagedProxyCore; port?: number }
+): Promise<ProxyRuntimeConfig> {
+	const core = options.core;
+	const key = processKey(core, shareLink);
+	const pending = managedStartPromises.get(key);
+	if (pending) return pending;
+
+	const promise = (async () => {
+		const existing = managedProcesses.get(key);
+		if (existing && existing.process.exitCode === null && !existing.process.killed) {
+			return existing.ready;
+		}
+		const port = await resolveReusableListenPort(options.port);
+		return startManagedProxyProcess(shareLink, { core, port }, key);
+	})().finally(() => {
+		managedStartPromises.delete(key);
+	});
+
+	managedStartPromises.set(key, promise);
+	return promise;
+}
+
+async function startManagedProxyProcess(
+	shareLink: string,
+	options: { core: ManagedProxyCore; port?: number },
+	key: string
+): Promise<ProxyRuntimeConfig> {
+	const core = options.core;
 	const existing = managedProcesses.get(key);
 	if (existing && existing.process.exitCode === null && !existing.process.killed) {
 		return existing.ready;
@@ -548,6 +648,9 @@ export async function startManagedProxyFromShareLink(
 	};
 	let stderr = '';
 	let startError: Error | null = null;
+	child.stdout.on('data', () => {
+		// Drain stdout so verbose cores cannot block on a full pipe.
+	});
 	child.stderr.on('data', (chunk) => {
 		stderr += String(chunk).slice(0, 1200);
 	});
@@ -593,7 +696,14 @@ export async function ensureManagedProxyForProfile(profile: ProxyProfile): Promi
 	const core = normalizeManagedCore(profile.managedCore ?? '');
 	const encrypted = profile.shareLinkEncrypted ?? '';
 	if (!core || !encrypted) return null;
-	return startManagedProxyFromShareLink(decryptSecret(encrypted), { core, port: profile.port });
+	const proxy = await ensureManagedProxyFromShareLink(decryptSecret(encrypted), {
+		core,
+		port: profile.port
+	});
+	if (proxy.port !== profile.port) {
+		await updateProxyProfilePort(profile.id, proxy.port);
+	}
+	return proxy;
 }
 
 export function normalizeManagedCore(value: string): ManagedProxyCore | null {

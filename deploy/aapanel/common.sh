@@ -782,10 +782,21 @@ ensure_proxy_cores() {
 			warn "未识别 Xray CPU 架构，跳过 Xray 自动下载"
 			return 0
 		fi
+		local xray_urls=()
 		xray_ver="${XRAY_VERSION:-$(latest_github_version XTLS/Xray-core 25.4.30)}"
-		xray_url="https://github.com/XTLS/Xray-core/releases/download/v${xray_ver}/Xray-linux-${xray_arch}.zip"
+		xray_urls+=("https://github.com/XTLS/Xray-core/releases/download/v${xray_ver}/Xray-linux-${xray_arch}.zip")
+		xray_urls+=("https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xray_arch}.zip")
+		[[ "$xray_ver" == "25.4.30" ]] || xray_urls+=("https://github.com/XTLS/Xray-core/releases/download/v25.4.30/Xray-linux-${xray_arch}.zip")
 		log "下载 Xray ${xray_ver} (${xray_arch})..."
-		if download_file "$xray_url" "${tmp_dir}/xray.zip"; then
+		local xray_downloaded=0
+		for xray_url in "${xray_urls[@]}"; do
+			if download_file "$xray_url" "${tmp_dir}/xray.zip"; then
+				xray_downloaded=1
+				break
+			fi
+			warn "Xray 下载失败: $xray_url"
+		done
+		if [[ "$xray_downloaded" == "1" ]]; then
 			if command -v unzip >/dev/null 2>&1; then
 				unzip -o "${tmp_dir}/xray.zip" -d "${tmp_dir}/xray" >/dev/null
 				find "${tmp_dir}/xray" -type f -name xray -perm /111 -exec cp {} "${bin_dir}/xray" \; -quit

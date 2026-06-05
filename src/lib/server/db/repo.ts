@@ -103,6 +103,23 @@ export async function insertProxyProfile(
 	return getSqliteDb().insert(sqliteProxyProfiles).values(values as never).returning().get()!;
 }
 
+export async function updateProxyProfilePort(proxyProfileId: number, port: number): Promise<void> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.update(mysqlProxyProfiles)
+			.set({ port })
+			.where(eq(mysqlProxyProfiles.id, proxyProfileId));
+		return;
+	}
+
+	getSqliteDb()
+		.update(sqliteProxyProfiles)
+		.set({ port })
+		.where(eq(sqliteProxyProfiles.id, proxyProfileId))
+		.run();
+}
+
 export async function deleteProxyProfile(userId: number, proxyProfileId: number): Promise<void> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();
