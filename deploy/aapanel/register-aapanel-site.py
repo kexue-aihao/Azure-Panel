@@ -108,23 +108,74 @@ def is_node_site(row):
     return project_type in ("nodejs", "general", "pm2", "node")
 
 
+SUCCESS_HINTS = (
+    "成功",
+    "success",
+    "Success",
+    "started",
+    "Started",
+    "restarted",
+    "Restarted",
+)
+
+
+def text_indicates_success(value):
+    if not isinstance(value, str):
+        return False
+    lower = value.lower()
+    return any(hint.lower() in lower for hint in SUCCESS_HINTS)
+
+
 def result_ok(res):
-    if isinstance(res, dict):
-        return bool(res.get("status"))
-    return bool(res)
+    """解析 aaPanel API 返回值（格式因版本/语言而异）"""
+    if res is None:
+        return False
+    if isinstance(res, bool):
+        return res
+    if not isinstance(res, dict):
+        return bool(res)
+
+    status = res.get("status")
+    if status is True or status in (0, "0"):
+        return True
+    if status in (False, -1):
+        pass
+
+    for key in ("msg", "message", "result", "data", "error_msg"):
+        val = res.get(key)
+        if text_indicates_success(val):
+            return True
+        if isinstance(val, dict) and result_ok(val):
+            return True
+
+    return False
 
 
 def result_message(res):
     if not isinstance(res, dict):
         return str(res)
-    for key in ("msg", "message", "error_msg", "data"):
+    for key in ("msg", "message", "result", "error_msg", "data"):
         if key in res and res[key]:
             return res[key]
     return str(res)
 
 
-def restart_node_project(mod_module, project_name):
+def stop_node_project(mod_module, project_name):
     import public
+
+    get = public.dict_obj()
+    get.project_name = project_name
+    try:
+        mod_module.main().stop_project(get)
+        time.sleep(1)
+    except Exception:
+        pass
+
+
+def restart_node_project(mod_module, project_name, port=None):
+    import public
+
+    stop_node_project(mod_module, project_name)
 
     get = public.dict_obj()
     get.project_name = project_name
@@ -133,9 +184,15 @@ def restart_node_project(mod_module, project_name):
         if result_ok(res):
             print("[aapanel] 重启成功: {}".format(project_name))
             return True
+        if port and verify_local_health(port, retries=5):
+            print("[aapanel] API 返回非常规格式，但健康检查通过: {}".format(project_name))
+            return True
         print("[aapanel] 重启失败 ({}): {}".format(project_name, result_message(res)))
         return False
     except Exception as exc:
+        if port and verify_local_health(port, retries=5):
+            print("[aapanel] 重启异常但服务可用 ({}): {}".format(project_name, exc))
+            return True
         print("[aapanel] 重启异常 ({}): {}".format(project_name, exc))
         return False
 
@@ -151,13 +208,13 @@ def register_nodejs_web(app_dir, domain, port, project_name, node_version):
     existing = find_site_by_name(project_name)
     if existing:
         print("[aapanel] Node 项目已存在，尝试重启: {}".format(project_name))
-        return restart_node_project(nodeMod, project_name)
+        return restart_node_project(nodeMod, project_name, port)
 
     domain_site = find_site_by_domain(domain)
     if domain_site and is_node_site(domain_site):
         name = domain_site.get("name")
         print("[aapanel] 域名 {} 已绑定 Node 项目 {}，尝试重启".format(domain, name))
-        return restart_node_project(nodeMod, name)
+        return restart_node_project(nodeMod, name, port)
 
     pkg = os.path.join(app_dir, "package.json")
     if not os.path.isfile(pkg):
@@ -193,7 +250,7 @@ def register_nodejs_web(app_dir, domain, port, project_name, node_version):
 
     if find_site_by_name(project_name):
         print("[aapanel] 项目记录已写入，尝试重启修复...")
-        return restart_node_project(nodeMod, project_name)
+        return restart_node_project(nodeMod, project_name, port)
 
     return False
 

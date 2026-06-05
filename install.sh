@@ -253,6 +253,13 @@ setup_supervisor() {
 		return
 	fi
 
+	local port
+	port="$(read_port_from_env "${APP_DIR}/.env" "$APP_PORT")"
+	if is_app_healthy "$port"; then
+		warn "端口 ${port} 已有服务在运行，跳过 Supervisor 启动（避免端口冲突）"
+		return
+	fi
+
 	local node_bin
 	node_bin="$(find_node_bin)"
 	mkdir -p /www/wwwlogs 2>/dev/null || true
@@ -275,6 +282,14 @@ setup_aapanel_resources() {
 	fi
 
 	if setup_aapanel_site "$APP_DIR" "$DOMAIN" "$port" "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}"; then
+		export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-1}"
+		export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-1}"
+		return 0
+	fi
+
+	# 面板 API 返回格式异常但 Node 项目实际已在运行
+	if is_app_healthy "$port" && aapanel_project_exists "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}"; then
+		warn "aaPanel Node 项目已在运行，视为注册成功并跳过 Supervisor"
 		export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-1}"
 		export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-1}"
 		return 0

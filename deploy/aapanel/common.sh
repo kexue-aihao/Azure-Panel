@@ -433,24 +433,35 @@ detect_nodejs_version_label() {
 	echo "${NODEJS_VERSION:-v20.20.2}"
 }
 
-# 注册 aaPanel 站点前释放端口，避免与已有 Supervisor 进程冲突
+# 注册 aaPanel 站点前停止 Supervisor，避免与面板 Node 项目争抢端口
 release_app_port() {
 	local port="$1"
 	local web_program="$2"
 	local worker_program="$3"
 
 	if [[ -n "$(find_supervisorctl)" ]]; then
-		log "停止 Supervisor 进程以释放端口 ${port}..."
+		log "停止 Supervisor 进程..."
 		run_supervisorctl stop "$web_program" "$worker_program" 2>/dev/null || true
 		sleep 1
 	fi
+}
 
-	if command -v fuser >/dev/null 2>&1; then
-		fuser -k "${port}/tcp" 2>/dev/null || true
-	elif command -v lsof >/dev/null 2>&1; then
-		lsof -ti:"${port}" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-	fi
-	sleep 1
+is_app_healthy() {
+	local port="$1"
+	command -v curl >/dev/null 2>&1 && curl -fsS "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1
+}
+
+aapanel_project_exists() {
+	local name="$1"
+	local panel_py="/www/server/panel/pyenv/bin/python3"
+
+	[[ -d /www/server/panel && -x "$panel_py" ]] || return 1
+	"$panel_py" - <<PY >/dev/null 2>&1
+import sys
+sys.path.insert(0, "/www/server/panel/class")
+import public
+sys.exit(0 if public.M("sites").where("name=?", ("${name}",)).count() > 0 else 1)
+PY
 }
 
 # 在 aaPanel 面板中注册 Web（Node 项目）与 Worker（通用项目），便于网站列表统一管理
@@ -527,15 +538,33 @@ import public
 from mod.project.nodejs import nodeMod, generalMod
 
 restarted = 0
+SUCCESS_HINTS = ("成功", "success", "Success", "started", "Started")
+
+def ok(res):
+    if isinstance(res, dict):
+        st = res.get("status")
+        if st is True or st in (0, "0"):
+            return True
+        for k in ("msg", "message", "result", "data"):
+            v = res.get(k)
+            if isinstance(v, str) and any(h in v for h in SUCCESS_HINTS):
+                return True
+    return bool(res)
+
 for name, mod in [("${web_name}", nodeMod), ("${worker_name}", generalMod)]:
     if public.M("sites").where("name=?", (name,)).count() == 0:
         continue
     get = public.dict_obj()
     get.project_name = name
     try:
+        mod.main().stop_project(get)
+    except Exception:
+        pass
+    try:
         res = mod.main().restart_project(get)
         print("[aapanel] restart {} -> {}".format(name, res))
-        restarted += 1
+        if ok(res):
+            restarted += 1
     except Exception as exc:
         print("[aapanel] restart {} failed: {}".format(name, exc))
         sys.exit(1)
