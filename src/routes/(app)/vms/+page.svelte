@@ -97,6 +97,41 @@
 	const createLocationSelectId = 'create-location-select';
 	const createSizeSelectId = 'create-size-select';
 	const imageSelectId = 'image-select';
+	const RANDOM_PASSWORD_LENGTH = 12;
+	const PASSWORD_LOWER = 'abcdefghijklmnopqrstuvwxyz';
+	const PASSWORD_UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+	const PASSWORD_DIGITS = '0123456789';
+	const PASSWORD_CHARS = `${PASSWORD_LOWER}${PASSWORD_UPPER}${PASSWORD_DIGITS}`;
+
+	function randomIndex(max: number) {
+		const values = new Uint32Array(1);
+		globalThis.crypto?.getRandomValues(values);
+		return (values[0] || Math.floor(Math.random() * max)) % max;
+	}
+
+	function randomChar(chars: string) {
+		return chars[randomIndex(chars.length)];
+	}
+
+	function generateAdminPassword(length = RANDOM_PASSWORD_LENGTH) {
+		const chars = [
+			randomChar(PASSWORD_LOWER),
+			randomChar(PASSWORD_UPPER),
+			randomChar(PASSWORD_DIGITS)
+		];
+		while (chars.length < length) chars.push(randomChar(PASSWORD_CHARS));
+
+		for (let i = chars.length - 1; i > 0; i--) {
+			const j = randomIndex(i + 1);
+			[chars[i], chars[j]] = [chars[j], chars[i]];
+		}
+
+		return chars.join('');
+	}
+
+	function refreshAdminPassword() {
+		createForm.admin_password = generateAdminPassword();
+	}
 
 	async function loadAccounts() {
 		accounts = await api<Account[]>('/api/user/azure/account/list');
@@ -215,6 +250,7 @@
 	}
 
 	async function changeAccount() {
+		refreshAdminPassword();
 		capabilities = null;
 		quotas = [];
 		images = [];
@@ -223,6 +259,7 @@
 	}
 
 	async function changeLocation() {
+		refreshAdminPassword();
 		await loadRegionDetails();
 	}
 
@@ -255,6 +292,7 @@
 			});
 			toast = `VM ${result.name} 创建完成，IPv4=${result.public_ipv4 || '-'} IPv6=${result.public_ipv6 || '-'}，刷IP次数=${result.ip_brush_attempts}`;
 			resourceGroup = createForm.resource_group;
+			refreshAdminPassword();
 			await loadVms();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '创建失败';
@@ -353,6 +391,7 @@
 	}
 
 	onMount(async () => {
+		refreshAdminPassword();
 		await loadAccounts();
 		if (accountId) {
 			await loadRegions();
@@ -577,13 +616,21 @@
 		</div>
 		<div class="grid gap-3 md:grid-cols-2">
 			<input class="input" bind:value={createForm.admin_username} placeholder="管理员用户名" required />
-			<input
-				class="input"
-				type="password"
-				bind:value={createForm.admin_password}
-				placeholder="管理员密码"
-				required
-			/>
+			<div class="grid gap-2 sm:grid-cols-[1fr_auto]">
+				<input
+					class="input font-mono"
+					type="text"
+					bind:value={createForm.admin_password}
+					minlength={RANDOM_PASSWORD_LENGTH}
+					autocomplete="off"
+					spellcheck="false"
+					placeholder="管理员密码"
+					required
+				/>
+				<button class="btn-secondary whitespace-nowrap" type="button" onclick={refreshAdminPassword}>
+					更换随机密码
+				</button>
+			</div>
 		</div>
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={createForm.enable_ipv6} /> 同时创建 IPv6 公网地址
