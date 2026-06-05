@@ -85,6 +85,7 @@ bootstrap_repo() {
 		echo "[bootstrap] git 同步不完整，从 GitHub 下载关键文件..."
 		mkdir -p "${APP_DIR}/deploy/aapanel"
 		curl -fsSL "${RAW_BASE}/deploy/aapanel/common.sh" -o "$common_file"
+		curl -fsSL "${RAW_BASE}/deploy/aapanel/register-aapanel-site.py" -o "${APP_DIR}/deploy/aapanel/register-aapanel-site.py"
 		curl -fsSL "${RAW_BASE}/install.sh" -o "${APP_DIR}/install.sh"
 		curl -fsSL "${RAW_BASE}/update.sh" -o "${APP_DIR}/update.sh"
 		chmod +x "${APP_DIR}/install.sh" "${APP_DIR}/update.sh" 2>/dev/null || true
@@ -124,6 +125,7 @@ APP_PORT="${APP_PORT:-3000}"
 WEB_PROGRAM="${WEB_PROGRAM:-azure-panel-web}"
 WORKER_PROGRAM="${WORKER_PROGRAM:-azure-panel-worker}"
 DOMAIN="${DOMAIN:-}"
+AAPANEL_WEB_PROJECT_NAME="${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}"
 
 banner() {
 	echo ""
@@ -246,12 +248,38 @@ setup_supervisor() {
 		return
 	fi
 
+	if [[ "${SKIP_SUPERVISOR_WEB:-0}" == "1" && "${SKIP_SUPERVISOR_WORKER:-0}" == "1" ]]; then
+		warn "Web/Worker 均由 aaPanel Node 项目管理，跳过 Supervisor"
+		return
+	fi
+
 	local node_bin
 	node_bin="$(find_node_bin)"
 	mkdir -p /www/wwwlogs 2>/dev/null || true
 
 	write_supervisor_configs "$node_bin" "$APP_DIR" "$APP_PORT" "$WEB_PROGRAM" "$WORKER_PROGRAM"
 	supervisor_reload_and_start "$WEB_PROGRAM" "$WORKER_PROGRAM" || true
+}
+
+setup_aapanel_resources() {
+	local port
+	port="$(read_port_from_env "${APP_DIR}/.env" "$APP_PORT")"
+
+	if [[ -z "$DOMAIN" ]]; then
+		return 1
+	fi
+
+	if [[ "${AAPANEL_REGISTER_SITE:-1}" == "0" ]]; then
+		warn "已禁用 aaPanel 站点注册 (AAPANEL_REGISTER_SITE=0)"
+		return 1
+	fi
+
+	if setup_aapanel_site "$APP_DIR" "$DOMAIN" "$port" "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}"; then
+		export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-1}"
+		export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-1}"
+		return 0
+	fi
+	return 1
 }
 
 verify_or_hint_supervisor() {
@@ -275,11 +303,18 @@ main() {
 	setup_env
 	setup_mysql
 	npm_build_all
-	setup_supervisor
-	verify_or_hint_supervisor
 
-	local port
+	local port aapanel_ok=0
 	port="$(read_port_from_env "${APP_DIR}/.env" "$APP_PORT")"
+
+	if setup_aapanel_resources; then
+		aapanel_ok=1
+	fi
+
+	setup_supervisor
+	if [[ "${aapanel_ok:-0}" != "1" ]]; then
+		verify_or_hint_supervisor
+	fi
 
 	if [[ "${SKIP_HEALTHCHECK:-0}" != "1" ]]; then
 		health_check "$port" || true
@@ -293,10 +328,17 @@ main() {
 	info "监听地址 : http://127.0.0.1:${port}"
 	info "数据库   : ${MYSQL_DATABASE} (用户: ${MYSQL_USER})"
 	info "DB 凭据  : ${APP_DIR}/deploy/aapanel/generated/db-credentials.txt"
-	info "Supervisor: $WEB_PROGRAM, $WORKER_PROGRAM"
+	if [[ "${aapanel_ok:-0}" == "1" ]]; then
+		info "aaPanel  : 网站 → Node 项目 → Azure-Panel / azure-panel-worker"
+		info "域名     : ${DOMAIN}"
+	else
+		info "Supervisor: $WEB_PROGRAM, $WORKER_PROGRAM"
+	fi
 	info "日志目录 : /www/wwwlogs/"
 	echo ""
-	print_nginx_hint "$port" "$DOMAIN"
+	if [[ "${aapanel_ok:-0}" != "1" ]]; then
+		print_nginx_hint "$port" "$DOMAIN"
+	fi
 	log "浏览器访问域名后注册账号即可使用"
 	log "后续升级: cd $APP_DIR && ./update.sh"
 	echo ""

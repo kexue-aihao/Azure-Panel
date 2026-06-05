@@ -117,11 +117,15 @@ HEALTH_PORT="$(read_port_from_env .env "$HEALTH_PORT")"
 # ---------- 安装依赖 & 构建 ----------
 npm_build_all
 
-# ---------- 重启 Supervisor ----------
+# ---------- 重启 Supervisor / aaPanel Node 项目 ----------
 if [[ "${SKIP_SUPERVISOR:-0}" != "1" ]]; then
-	restart_supervisor_programs "$WEB_PROGRAM" "$WORKER_PROGRAM" || true
+	if restart_aapanel_node_projects "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}" "$WORKER_PROGRAM" 2>/dev/null; then
+		log "已通过 aaPanel 重启 Node 项目"
+	else
+		restart_supervisor_programs "$WEB_PROGRAM" "$WORKER_PROGRAM" || true
+	fi
 else
-	warn "已跳过 Supervisor 重启 (SKIP_SUPERVISOR=1)"
+	warn "已跳过进程重启 (SKIP_SUPERVISOR=1)"
 fi
 
 # ---------- 健康检查 ----------

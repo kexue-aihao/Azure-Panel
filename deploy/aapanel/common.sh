@@ -422,6 +422,105 @@ supervisor_conf_dir() {
 	supervisor_conf_dirs | head -1
 }
 
+detect_nodejs_version_label() {
+	local bin_dir version
+
+	bin_dir="$(find_aapanel_node_bin_dir 2>/dev/null || true)"
+	if [[ -n "$bin_dir" ]]; then
+		version="$(echo "$bin_dir" | sed -n 's|.*/versions/node/\(v[^/]*\)/bin|\1|p')"
+		[[ -n "$version" ]] && { echo "$version"; return 0; }
+	fi
+	echo "${NODEJS_VERSION:-v20.20.2}"
+}
+
+# 在 aaPanel 面板中注册 Web（Node 项目）与 Worker（通用项目），便于网站列表统一管理
+setup_aapanel_site() {
+	local app_dir="$1"
+	local domain="$2"
+	local port="$3"
+	local web_project_name="${4:-Azure-Panel}"
+	local py_script panel_py node_version
+
+	if [[ -z "$domain" ]]; then
+		warn "未设置 DOMAIN，跳过 aaPanel 站点注册"
+		return 1
+	fi
+
+	if [[ "${SKIP_AAPANEL_SITE:-0}" == "1" ]]; then
+		warn "已跳过 aaPanel 站点注册 (SKIP_AAPANEL_SITE=1)"
+		return 1
+	fi
+
+	if [[ ! -d /www/server/panel ]]; then
+		warn "未检测到 aaPanel 安装目录，跳过站点注册"
+		return 1
+	fi
+
+	py_script="${app_dir}/deploy/aapanel/register-aapanel-site.py"
+	[[ -f "$py_script" ]] || { warn "未找到 $py_script"; return 1; }
+
+	panel_py="/www/server/panel/pyenv/bin/python3"
+	[[ -x "$panel_py" ]] || panel_py="$(command -v python3 2>/dev/null || true)"
+	[[ -n "$panel_py" ]] || { warn "未找到 python3，无法调用 aaPanel API"; return 1; }
+
+	node_version="$(detect_nodejs_version_label)"
+	log "注册 aaPanel 站点: ${domain} (Node ${node_version})"
+
+	chmod +x "$py_script" 2>/dev/null || true
+	if NODEJS_VERSION="$node_version" \
+		WORKER_PROJECT_NAME="${WORKER_PROGRAM:-azure-panel-worker}" \
+		"$panel_py" "$py_script" "$app_dir" "$domain" "$port" "$web_project_name"; then
+		mkdir -p "${app_dir}/deploy/aapanel/generated"
+		cat >"${app_dir}/deploy/aapanel/generated/aapanel-site.txt" <<EOF
+# aaPanel 站点信息（install.sh 自动生成）
+DOMAIN=${domain}
+WEB_PROJECT=${web_project_name}
+WORKER_PROJECT=${WORKER_PROGRAM:-azure-panel-worker}
+PORT=${port}
+EOF
+		log "aaPanel 站点注册成功 — 请在「网站 → Node 项目」中查看与管理"
+		return 0
+	fi
+
+	warn "aaPanel 站点注册失败"
+	return 1
+}
+
+restart_aapanel_node_projects() {
+	local web_name="${1:-Azure-Panel}"
+	local worker_name="${2:-azure-panel-worker}"
+	local panel_py="/www/server/panel/pyenv/bin/python3"
+
+	[[ -d /www/server/panel ]] || return 1
+	[[ -x "$panel_py" ]] || return 1
+
+	log "通过 aaPanel 重启 Node 项目: $web_name, $worker_name"
+	"$panel_py" - <<PY
+import sys
+sys.path.insert(0, "/www/server/panel/class")
+sys.path.insert(0, "/www/server/panel")
+import os
+os.chdir("/www/server/panel")
+import public
+from mod.project.nodejs import nodeMod, generalMod
+
+restarted = 0
+for name, mod in [("${web_name}", nodeMod), ("${worker_name}", generalMod)]:
+    if public.M("sites").where("name=?", (name,)).count() == 0:
+        continue
+    get = public.dict_obj()
+    get.project_name = name
+    try:
+        res = mod.main().restart_project(get)
+        print("[aapanel] restart {} -> {}".format(name, res))
+        restarted += 1
+    except Exception as exc:
+        print("[aapanel] restart {} failed: {}".format(name, exc))
+        sys.exit(1)
+sys.exit(0 if restarted > 0 else 1)
+PY
+}
+
 write_supervisor_configs() {
 	local node_bin="$1"
 	local app_dir="$2"
@@ -475,13 +574,21 @@ environment=NODE_ENV=\"production\""
 		fi
 
 		log "写入 Supervisor 配置 -> $conf_dir"
-		printf '%s\n' "$web_body" >"$web_conf"
-		printf '%s\n' "$worker_body" >"$worker_conf"
+		if [[ "${SKIP_SUPERVISOR_WEB:-0}" != "1" ]]; then
+			printf '%s\n' "$web_body" >"$web_conf"
+		fi
+		if [[ "${SKIP_SUPERVISOR_WORKER:-0}" != "1" ]]; then
+			printf '%s\n' "$worker_body" >"$worker_conf"
+		fi
 	done < <(supervisor_conf_dirs)
 
-	cp "${app_dir}/deploy/aapanel/generated/${web_program}.conf" 2>/dev/null || true
-	printf '%s\n' "$web_body" >"${app_dir}/deploy/aapanel/generated/${web_program}.conf"
-	printf '%s\n' "$worker_body" >"${app_dir}/deploy/aapanel/generated/${worker_program}.conf"
+	mkdir -p "${app_dir}/deploy/aapanel/generated"
+	if [[ "${SKIP_SUPERVISOR_WEB:-0}" != "1" ]]; then
+		printf '%s\n' "$web_body" >"${app_dir}/deploy/aapanel/generated/${web_program}.conf"
+	fi
+	if [[ "${SKIP_SUPERVISOR_WORKER:-0}" != "1" ]]; then
+		printf '%s\n' "$worker_body" >"${app_dir}/deploy/aapanel/generated/${worker_program}.conf"
+	fi
 }
 
 supervisor_reload_and_start() {
@@ -510,8 +617,17 @@ supervisor_reload_and_start() {
 		log "$update_out"
 	fi
 
-	log "启动进程: $web_program, $worker_program"
-	for prog in "$web_program" "$worker_program"; do
+	local -a progs=()
+	[[ "${SKIP_SUPERVISOR_WEB:-0}" != "1" ]] && progs+=("$web_program")
+	[[ "${SKIP_SUPERVISOR_WORKER:-0}" != "1" ]] && progs+=("$worker_program")
+
+	if [[ ${#progs[@]} -eq 0 ]]; then
+		warn "无 Supervisor 进程需启动（已由 aaPanel Node 项目管理）"
+		return 0
+	fi
+
+	log "启动进程: ${progs[*]}"
+	for prog in "${progs[@]}"; do
 		if run_supervisorctl status "$prog" 2>/dev/null | grep -q RUNNING; then
 			run_supervisorctl restart "$prog" 2>/dev/null || true
 			continue
@@ -521,24 +637,33 @@ supervisor_reload_and_start() {
 			|| warn "启动 $prog 失败，请查看 aaPanel → Supervisor"
 	done
 
-	run_supervisorctl status "$web_program" "$worker_program" 2>/dev/null || true
+	run_supervisorctl status "${progs[@]}" 2>/dev/null || true
 }
 
 restart_supervisor_programs() {
 	local web_program="$1"
 	local worker_program="$2"
+	local -a progs=()
+
+	[[ "${SKIP_SUPERVISOR_WEB:-0}" != "1" ]] && progs+=("$web_program")
+	[[ "${SKIP_SUPERVISOR_WORKER:-0}" != "1" ]] && progs+=("$worker_program")
+
+	if [[ ${#progs[@]} -eq 0 ]]; then
+		return 0
+	fi
 
 	if [[ -z "$(find_supervisorctl)" ]]; then
-		warn "未找到 supervisorctl，请手动在 aaPanel 重启 $web_program 和 $worker_program"
+		warn "未找到 supervisorctl，请手动在 aaPanel 重启 ${progs[*]}"
 		return 1
 	fi
 
-	log "重启 Supervisor 进程: $web_program, $worker_program"
-	if run_supervisorctl restart "$web_program" "$worker_program" 2>/dev/null; then
+	log "重启 Supervisor 进程: ${progs[*]}"
+	if run_supervisorctl restart "${progs[@]}" 2>/dev/null; then
 		log "Supervisor 重启成功"
 	else
-		run_supervisorctl restart "$web_program" || warn "重启 $web_program 失败"
-		run_supervisorctl restart "$worker_program" || warn "重启 $worker_program 失败"
+		for prog in "${progs[@]}"; do
+			run_supervisorctl restart "$prog" || warn "重启 $prog 失败"
+		done
 	fi
 }
 

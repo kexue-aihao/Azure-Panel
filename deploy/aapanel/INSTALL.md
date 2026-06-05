@@ -49,10 +49,25 @@ sudo ./install.sh
 
 > 无需手动在 aaPanel 建库。脚本会通过 MySQL root 自动创建 `azure_panel` 库和用户，密码自动生成并保存到 `deploy/aapanel/generated/db-credentials.txt`。
 
-非交互安装（全自动）：
+非交互安装（全自动，含 aaPanel 站点注册）：
 
 ```bash
-NON_INTERACTIVE=1 sudo ./install.sh
+NON_INTERACTIVE=1 DOMAIN=az.argoa.org sudo ./install.sh
+```
+
+安装时会自动在 aaPanel **网站 → Node 项目** 中创建：
+
+| 项目名 | 类型 | 说明 |
+|--------|------|------|
+| `Azure-Panel` | Node.js | Web 前端（`npm run start`，端口 3000） |
+| `azure-panel-worker` | 通用 | 补机 Worker（`build/worker.js`） |
+
+注册成功后可在面板内直接：**启停、查看日志、绑定 SSL、管理域名**，无需手动配置 Nginx 反代。
+
+若只需 Supervisor 方式、不在面板注册站点：
+
+```bash
+AAPANEL_REGISTER_SITE=0 sudo ./install.sh
 ```
 
 指定数据库密码：
@@ -154,6 +169,10 @@ Worker 会读取同目录下的 `.env` 文件。
 添加后执行 **重载配置** 并 **启动** 两个进程。
 
 ## 八、配置 Nginx 网站
+
+> **一键安装且已填写 `DOMAIN` 时无需此步**：脚本会自动注册 aaPanel Node 项目并配置反代。
+
+手动部署时：
 
 1. aaPanel → **网站** → **添加站点**（填写域名）
 2. 站点设置 → **配置文件**，在 `server { }` 块内加入反代（参考 `nginx.conf`）：
