@@ -22,6 +22,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
+GIT_BRANCH="${GIT_BRANCH:-master}"
+
+# 内联 Node PATH（aaPanel root 环境）
+if ! command -v npm >/dev/null 2>&1; then
+	for _d in $(ls -1 /www/server/nvm/versions/node 2>/dev/null | sort -V -r); do
+		[[ -x "/www/server/nvm/versions/node/${_d}/bin/npm" ]] && export PATH="/www/server/nvm/versions/node/${_d}/bin:${PATH}" && break
+	done
+fi
 
 # 若 common.sh 不存在，尝试从 GitHub 同步完整代码
 if [[ ! -f "${APP_DIR}/deploy/aapanel/common.sh" ]]; then
@@ -30,7 +38,12 @@ if [[ ! -f "${APP_DIR}/deploy/aapanel/common.sh" ]]; then
 	REPO_URL="${REPO_URL:-https://github.com/kexue-aihao/Azure-Panel.git}"
 	GIT_BRANCH="${GIT_BRANCH:-master}"
 	if [[ -d "${APP_DIR}/.git" ]]; then
-		git -C "$APP_DIR" pull origin "$GIT_BRANCH" || true
+		git -C "$APP_DIR" fetch origin "$GIT_BRANCH" 2>/dev/null || true
+		if [[ "${SKIP_GIT_RESET:-0}" != "1" ]]; then
+			git -C "$APP_DIR" reset --hard "origin/${GIT_BRANCH}" 2>/dev/null || true
+		else
+			git -C "$APP_DIR" pull origin "$GIT_BRANCH" || true
+		fi
 	else
 		cd "$APP_DIR"
 		git init

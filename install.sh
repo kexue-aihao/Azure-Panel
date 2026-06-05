@@ -17,16 +17,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_URL="${REPO_URL:-https://github.com/kexue-aihao/Azure-Panel.git}"
 GIT_BRANCH="${GIT_BRANCH:-master}"
 APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
+RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/kexue-aihao/Azure-Panel/master}"
 
-# ---------- 引导：确保完整项目文件存在（支持仅下载 install.sh 的情况）----------
+# 内联 Node PATH 修复（在 source common.sh 之前生效，兼容旧版 common.sh）
+_bootstrap_node_path() {
+	local d npm_path
+	if command -v npm >/dev/null 2>&1; then return 0; fi
+	if [[ -n "${NODE_BIN_DIR:-}" && -x "${NODE_BIN_DIR}/npm" ]]; then
+		export PATH="${NODE_BIN_DIR}:${PATH}"
+		return 0
+	fi
+	if [[ -d /www/server/nvm/versions/node ]]; then
+		for d in $(ls -1 /www/server/nvm/versions/node 2>/dev/null | sort -V -r); do
+			if [[ -x "/www/server/nvm/versions/node/${d}/bin/npm" ]]; then
+				export PATH="/www/server/nvm/versions/node/${d}/bin:${PATH}"
+				return 0
+			fi
+		done
+	fi
+	for npm_path in /www/server/nvm/versions/node/v*/bin/npm /www/server/nodejs/v*/bin/npm; do
+		[[ -x "$npm_path" ]] || continue
+		export PATH="$(dirname "$npm_path"):${PATH}"
+		return 0
+	done
+	return 1
+}
+_bootstrap_node_path || true
+
+# ---------- 引导：确保完整项目文件存在并同步到最新 ----------
 bootstrap_repo() {
 	local common_file="${APP_DIR}/deploy/aapanel/common.sh"
 
-	if [[ -f "$common_file" ]]; then
-		return 0
-	fi
-
-	echo "[bootstrap] 项目文件不完整，正在从 GitHub 拉取完整代码..."
 	command -v git >/dev/null 2>&1 || {
 		echo "[error] 未找到 git，请先安装: apt install git / yum install git"
 		exit 1
@@ -35,10 +56,15 @@ bootstrap_repo() {
 	mkdir -p "$APP_DIR"
 
 	if [[ -d "${APP_DIR}/.git" ]]; then
-		echo "[bootstrap] 检测到 Git 仓库，执行 git pull..."
+		echo "[bootstrap] 同步远程最新代码（覆盖本地 install.sh/update.sh 修改）..."
 		git -C "$APP_DIR" fetch origin "$GIT_BRANCH" 2>/dev/null || true
 		git -C "$APP_DIR" checkout "$GIT_BRANCH" 2>/dev/null || true
-		git -C "$APP_DIR" pull origin "$GIT_BRANCH" 2>/dev/null || true
+		if [[ "${SKIP_GIT_RESET:-0}" != "1" ]]; then
+			git -C "$APP_DIR" reset --hard "origin/${GIT_BRANCH}" 2>/dev/null \
+				|| git -C "$APP_DIR" pull origin "$GIT_BRANCH" 2>/dev/null || true
+		else
+			git -C "$APP_DIR" pull origin "$GIT_BRANCH" 2>/dev/null || true
+		fi
 	elif [[ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]]; then
 		# 目录非空（例如只有 curl 下载的 install.sh），强制同步仓库文件
 		echo "[bootstrap] 目录已有文件，从仓库同步..."
@@ -54,25 +80,36 @@ bootstrap_repo() {
 		git clone --branch "$GIT_BRANCH" --depth=1 "$REPO_URL" "$APP_DIR"
 	fi
 
+	# 兜底：git 失败时从 GitHub 直接下载关键文件
+	if [[ ! -f "$common_file" ]] && command -v curl >/dev/null 2>&1; then
+		echo "[bootstrap] git 同步不完整，从 GitHub 下载关键文件..."
+		mkdir -p "${APP_DIR}/deploy/aapanel"
+		curl -fsSL "${RAW_BASE}/deploy/aapanel/common.sh" -o "$common_file"
+		curl -fsSL "${RAW_BASE}/install.sh" -o "${APP_DIR}/install.sh"
+		curl -fsSL "${RAW_BASE}/update.sh" -o "${APP_DIR}/update.sh"
+		chmod +x "${APP_DIR}/install.sh" "${APP_DIR}/update.sh" 2>/dev/null || true
+	fi
+
 	[[ -f "$common_file" ]] || {
 		echo "[error] 拉取代码失败，未找到 deploy/aapanel/common.sh"
 		echo "[error] 请手动执行: git clone -b master $REPO_URL $APP_DIR"
 		exit 1
 	}
 
-	echo "[bootstrap] 代码拉取完成"
+	echo "[bootstrap] 代码同步完成"
 }
 
 bootstrap_repo
 
-# 若 install.sh 不在项目根目录，切换到项目根目录并重新执行
-if [[ "$SCRIPT_DIR" != "$APP_DIR" && -f "${APP_DIR}/install.sh" && "${AZURE_PANEL_INSTALL_REEXEC:-}" != "1" ]]; then
+# 同步后重新执行最新 install.sh（确保使用远程最新逻辑）
+if [[ "${AZURE_PANEL_INSTALL_REEXEC:-}" != "1" ]]; then
 	export AZURE_PANEL_INSTALL_REEXEC=1
 	cd "$APP_DIR"
 	exec bash "${APP_DIR}/install.sh" "$@"
 fi
 
 cd "$APP_DIR"
+_bootstrap_node_path || true
 
 # shellcheck source=deploy/aapanel/common.sh
 source "${APP_DIR}/deploy/aapanel/common.sh"
