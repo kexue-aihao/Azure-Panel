@@ -8,6 +8,8 @@ export const POST: RequestHandler = async (event) => {
 	const result = parseProxyShareLink(String(body.share_link ?? ''));
 	return ok({
 		supported: result.supported,
+		managed_supported: result.managed_supported,
+		managed_core: result.managed_core,
 		protocol: result.protocol,
 		name: result.name,
 		message: result.message,

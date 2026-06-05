@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS `proxy_profiles` (
   `port` int NOT NULL,
   `username_encrypted` text,
   `password_encrypted` text,
+  `managed_core` varchar(16) DEFAULT '',
+  `share_link_encrypted` text,
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `proxy_profiles_user_id_idx` (`user_id`)

@@ -128,6 +128,7 @@ if env_uses_mysql ".env"; then
 	repair_mysql_from_env ".env" "$APP_DIR" || warn "MySQL 自检/修复未完成，后续健康检查可能失败"
 fi
 
+ensure_proxy_cores
 npm_build_all
 
 # ---------- 重启 Supervisor / aaPanel Node 项目 ----------

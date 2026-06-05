@@ -3,7 +3,7 @@ import { ensureClientIpProxyProfile } from '$lib/server/auto-client-ip-proxy';
 import { encryptSecret } from '$lib/server/crypto';
 import { findProxyProfileByUser, insertAccount } from '$lib/server/db/repo';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
-import { publicProxyProfile, proxyProfileToRuntime } from '$lib/server/proxy';
+import { publicProxyProfile, proxyProfileToRuntimeReady } from '$lib/server/proxy';
 import type { RequestHandler } from './$types';
 
 export const POST: RequestHandler = async (event) => {
@@ -45,7 +45,7 @@ export const POST: RequestHandler = async (event) => {
 	}
 	if (proxyProfileId && !proxyProfile) return fail('代理配置不存在');
 	const runtimeProxy = proxyProfile
-		? proxyProfileToRuntime(proxyProfile, { clientIp })
+		? await proxyProfileToRuntimeReady(proxyProfile, { clientIp })
 		: proxyUrl;
 
 	let subscriptionId = '';

@@ -23,6 +23,8 @@ export const proxyProfiles = mysqlTable('proxy_profiles', {
 	port: int('port').notNull(),
 	usernameEncrypted: text('username_encrypted').default(''),
 	passwordEncrypted: text('password_encrypted').default(''),
+	managedCore: varchar('managed_core', { length: 16 }).default(''),
+	shareLinkEncrypted: text('share_link_encrypted').default(''),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });
 

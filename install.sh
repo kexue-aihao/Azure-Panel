@@ -327,6 +327,7 @@ main() {
 	collect_config
 	setup_env
 	setup_mysql
+	ensure_proxy_cores
 	npm_build_all
 
 	local port aapanel_ok=0

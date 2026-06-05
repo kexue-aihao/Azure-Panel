@@ -20,6 +20,8 @@ export const proxyProfiles = sqliteTable('proxy_profiles', {
 	port: integer('port').notNull(),
 	usernameEncrypted: text('username_encrypted').default(''),
 	passwordEncrypted: text('password_encrypted').default(''),
+	managedCore: text('managed_core').default(''),
+	shareLinkEncrypted: text('share_link_encrypted').default(''),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()
 		.$defaultFn(() => new Date())

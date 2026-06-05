@@ -10,7 +10,7 @@ import {
 } from './db/repo';
 import { createAzureClients, createVmSimple, getPowerState, isRunning, startVm } from './azure';
 import type { WorkflowPolicy } from './db/schema';
-import { proxyProfileToRuntime, proxySource } from './proxy';
+import { proxyProfileToRuntimeReady, proxySource } from './proxy';
 
 let timer: NodeJS.Timeout | null = null;
 const activePolicies = new Set<number>();
@@ -48,7 +48,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 			}
 			const clients = createAzureClients(
 				account,
-				proxyProfile ? proxyProfileToRuntime(proxyProfile) : null
+				proxyProfile ? await proxyProfileToRuntimeReady(proxyProfile) : null
 			);
 			const vmNames = JSON.parse(policy.vmNamesJson || '[]') as string[];
 			const listed = clients.compute.virtualMachines.list(policy.resourceGroup);

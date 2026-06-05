@@ -2,6 +2,11 @@ import { encryptSecret } from '$lib/server/crypto';
 import { insertProxyProfile } from '$lib/server/db/repo';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import {
+	normalizeManagedCore,
+	startManagedProxyFromShareLink,
+	type ManagedProxyCore
+} from '$lib/server/managed-proxy-core';
+import {
 	CLIENT_IP_PROXY_HOST,
 	normalizeProxyRuntime,
 	parseProxyShareLink,
@@ -19,15 +24,20 @@ export const POST: RequestHandler = async (event) => {
 	if (parsedShareLink && !parsedShareLink.supported) {
 		return fail(parsedShareLink.message);
 	}
+	const requestedCore = normalizeManagedCore(String(body.managed_core ?? parsedShareLink?.managed_core ?? ''));
+	const managedCore: ManagedProxyCore | null = parsedShareLink?.managed_supported
+		? requestedCore ?? 'sing-box'
+		: null;
 
 	const name = String(body.name ?? parsedShareLink?.name ?? '').trim();
 	if (!name) return fail('请填写代理名称');
 
 	let proxy;
 	try {
-		proxy =
-			parsedShareLink?.proxy ??
-			normalizeProxyRuntime({
+		if (managedCore && shareLink) {
+			proxy = await startManagedProxyFromShareLink(shareLink, { core: managedCore });
+		} else {
+			proxy = parsedShareLink?.proxy ?? normalizeProxyRuntime({
 				type: String(body.type ?? ''),
 				host:
 					String(body.source ?? '') === 'client_ip'
@@ -38,6 +48,7 @@ export const POST: RequestHandler = async (event) => {
 				password: String(body.password ?? ''),
 				method: String(body.method ?? '')
 			});
+		}
 		await validateProxyConnection(proxy, { clientIp: getRequestClientIp(event) });
 	} catch (err) {
 		return fail(err instanceof Error ? err.message : '代理配置无效');
@@ -54,7 +65,9 @@ export const POST: RequestHandler = async (event) => {
 			: proxy.username
 				? encryptSecret(proxy.username)
 				: '',
-		passwordEncrypted: proxy.password ? encryptSecret(proxy.password) : ''
+		passwordEncrypted: proxy.password ? encryptSecret(proxy.password) : '',
+		managedCore: managedCore ?? '',
+		shareLinkEncrypted: managedCore && shareLink ? encryptSecret(shareLink) : ''
 	});
 
 	return ok(publicProxyProfile(profile));

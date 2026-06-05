@@ -2,6 +2,7 @@ import net from 'node:net';
 import tls from 'node:tls';
 import { decryptSecret } from './crypto';
 import type { ProxyProfile } from './db/schema';
+import { ensureManagedProxyForProfile } from './managed-proxy-core';
 
 export const CLIENT_IP_PROXY_HOST = '__client_ip__';
 export const PROXY_TYPES = ['http', 'https', 'socks4', 'socks4a', 'socks5', 'shadowsocks'] as const;
@@ -59,11 +60,14 @@ export type PublicProxyProfile = {
 	auth_enabled: boolean;
 	label: string;
 	method: string;
+	managed_core: string;
 	created_at: Date;
 };
 
 export type ParsedProxyShareLink = {
 	supported: boolean;
+	managed_supported: boolean;
+	managed_core: 'sing-box' | 'xray' | '';
 	protocol: string;
 	name: string;
 	message: string;
@@ -74,6 +78,7 @@ export type ParsedProxyShareLink = {
 		security?: string;
 		transport?: string;
 		sni?: string;
+		flow?: string;
 		remark?: string;
 	};
 };
@@ -217,6 +222,8 @@ function parseShadowsocksShareLink(link: string, parsed: URL): ParsedProxyShareL
 
 	return {
 		supported: true,
+		managed_supported: false,
+		managed_core: '',
 		protocol: 'ss',
 		name: remark || endpoint.hostname || 'Shadowsocks',
 		message: '已识别 Shadowsocks 分享链接，可直接验证并保存。',
@@ -233,12 +240,15 @@ function unsupportedShareLink(parsed: URL): ParsedProxyShareLink {
 	const protocol = parsed.protocol.replace(':', '').toLowerCase();
 	const remark = parsed.hash ? safeDecode(parsed.hash.slice(1)) : '';
 	const params = parsed.searchParams;
+	const managedSupported = protocol === 'vless';
 	const message =
 		protocol === 'vless'
-			? '已识别 VLESS 分享链接，但 VLESS/Reality 不是 HTTP/SOCKS 代理端口，不能被 Azure SDK 直接使用。请先用 Xray、sing-box、Clash 或 v2rayN 导入该链接，并在当前机器暴露 HTTP/SOCKS 本地端口后再填写该端口。'
-			: `已识别 ${protocol.toUpperCase()} 分享链接，但当前面板只能直接使用 HTTP、HTTPS、SOCKS4、SOCKS5 和 Shadowsocks。请先转换成本地 HTTP/SOCKS 代理端口。`;
+			? '已识别 VLESS 分享链接，保存时将由内置 sing-box/Xray 核心转换为本机 HTTP 代理端口后供 Azure 使用。'
+			: `已识别 ${protocol.toUpperCase()} 分享链接，但当前面板只能直接使用 HTTP、HTTPS、SOCKS4、SOCKS5、Shadowsocks，以及内置核心托管的 VLESS。请先转换成本地 HTTP/SOCKS 代理端口。`;
 	return {
-		supported: false,
+		supported: managedSupported,
+		managed_supported: managedSupported,
+		managed_core: managedSupported ? 'sing-box' : '',
 		protocol,
 		name: remark || `${protocol.toUpperCase()} ${parsed.hostname}`,
 		message,
@@ -249,6 +259,7 @@ function unsupportedShareLink(parsed: URL): ParsedProxyShareLink {
 			security: params.get('security') ?? undefined,
 			transport: params.get('type') ?? undefined,
 			sni: params.get('sni') ?? undefined,
+			flow: params.get('flow') ?? undefined,
 			remark
 		}
 	};
@@ -272,6 +283,8 @@ export function parseProxyShareLink(shareLink: string): ParsedProxyShareLink {
 		const remark = parsed.hash ? safeDecode(parsed.hash.slice(1)) : '';
 		return {
 			supported: true,
+			managed_supported: false,
+			managed_core: '',
 			protocol,
 			name: remark || parsed.hostname || `${protocol.toUpperCase()} Proxy`,
 			message: '已识别可直接使用的代理链接。',
@@ -346,6 +359,15 @@ export function proxyProfileToRuntime(
 	};
 }
 
+export async function proxyProfileToRuntimeReady(
+	profile: ProxyProfile,
+	options: { clientIp?: string } = {}
+): Promise<ProxyRuntimeConfig> {
+	const managedProxy = await ensureManagedProxyForProfile(profile);
+	if (managedProxy) return managedProxy;
+	return proxyProfileToRuntime(profile, options);
+}
+
 function connectWithTimeout(options: { host: string; port: number; tls: boolean; timeoutMs: number }) {
 	return new Promise<void>((resolve, reject) => {
 		const socket = options.tls
@@ -393,6 +415,7 @@ export function publicProxyProfile(profile: ProxyProfile): PublicProxyProfile {
 	const runtime = storedProxyProfileToRuntime(profile);
 	const source = proxySource(profile);
 	const host = source === 'client_ip' ? '当前访问网站 IP' : runtime.host;
+	const managedCore = profile.managedCore ?? '';
 	return {
 		id: profile.id,
 		name: profile.name,
@@ -401,8 +424,9 @@ export function publicProxyProfile(profile: ProxyProfile): PublicProxyProfile {
 		host,
 		port: runtime.port,
 		auth_enabled: Boolean(profile.usernameEncrypted || profile.passwordEncrypted),
-		label: maskProxy(runtime),
+		label: managedCore ? `${managedCore} 托管: ${maskProxy(runtime)}` : maskProxy(runtime),
 		method: runtime.method ?? '',
+		managed_core: managedCore,
 		created_at: profile.createdAt
 	};
 }

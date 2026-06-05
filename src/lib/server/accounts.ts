@@ -1,7 +1,7 @@
 import { error } from '@sveltejs/kit';
 import { findAccountByUser, findProxyProfileByUser, listAccountsByUser } from './db/repo';
 import type { AzureAccount, User } from './db/schema';
-import { proxyProfileToRuntime, type ProxyRuntimeConfig } from './proxy';
+import { proxyProfileToRuntimeReady, type ProxyRuntimeConfig } from './proxy';
 
 export type AzureAccountWithProxy = {
 	account: AzureAccount;
@@ -23,7 +23,7 @@ export async function getUserAccountWithProxy(
 	if (!account.proxyProfileId) return { account, proxy: null };
 
 	const profile = await findProxyProfileByUser(userId, account.proxyProfileId);
-	return { account, proxy: profile ? proxyProfileToRuntime(profile, options) : null };
+	return { account, proxy: profile ? await proxyProfileToRuntimeReady(profile, options) : null };
 }
 
 export async function listUserAccounts(user: User) {

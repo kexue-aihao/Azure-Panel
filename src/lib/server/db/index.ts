@@ -35,6 +35,8 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		port int NOT NULL,
 		username_encrypted text,
 		password_encrypted text,
+		managed_core varchar(16) DEFAULT '',
+		share_link_encrypted text,
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
 		KEY proxy_profiles_user_id_idx (user_id)
@@ -141,6 +143,16 @@ async function ensureMysqlSchema(pool: Pool) {
 			if ((err as { code?: string }).code !== 'ER_DUP_KEYNAME') throw err;
 		});
 	await pool
+		.query("ALTER TABLE proxy_profiles ADD COLUMN managed_core varchar(16) DEFAULT ''")
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
+		.query('ALTER TABLE proxy_profiles ADD COLUMN share_link_encrypted text NULL')
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
 		.query('ALTER TABLE workflow_policies ADD COLUMN userdata_encrypted text NULL')
 		.catch((err) => {
 			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
@@ -214,6 +226,8 @@ export async function initDatabase() {
 			port INTEGER NOT NULL,
 			username_encrypted TEXT DEFAULT '',
 			password_encrypted TEXT DEFAULT '',
+			managed_core TEXT DEFAULT '',
+			share_link_encrypted TEXT DEFAULT '',
 			created_at INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS azure_accounts (
@@ -269,6 +283,15 @@ export async function initDatabase() {
 	}
 	if (!columns.some((column) => column.name === 'proxy_profile_id')) {
 		sqlite.exec('ALTER TABLE azure_accounts ADD COLUMN proxy_profile_id INTEGER');
+	}
+	const proxyColumns = sqlite.prepare('PRAGMA table_info(proxy_profiles)').all() as Array<{
+		name: string;
+	}>;
+	if (!proxyColumns.some((column) => column.name === 'managed_core')) {
+		sqlite.exec("ALTER TABLE proxy_profiles ADD COLUMN managed_core TEXT DEFAULT ''");
+	}
+	if (!proxyColumns.some((column) => column.name === 'share_link_encrypted')) {
+		sqlite.exec("ALTER TABLE proxy_profiles ADD COLUMN share_link_encrypted TEXT DEFAULT ''");
 	}
 	const workflowColumns = sqlite.prepare('PRAGMA table_info(workflow_policies)').all() as Array<{
 		name: string;

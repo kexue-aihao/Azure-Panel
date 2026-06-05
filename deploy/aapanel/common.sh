@@ -642,6 +642,102 @@ npm_build_all() {
 	log "构建完成"
 }
 
+detect_arch_label() {
+	local machine
+	machine="$(uname -m 2>/dev/null || echo unknown)"
+	case "$machine" in
+		x86_64|amd64) echo "amd64" ;;
+		aarch64|arm64) echo "arm64" ;;
+		*) echo "" ;;
+	esac
+}
+
+download_file() {
+	local url="$1"
+	local dest="$2"
+	if command -v curl >/dev/null 2>&1; then
+		curl -fL --retry 2 --connect-timeout 10 "$url" -o "$dest"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -O "$dest" "$url"
+	else
+		return 1
+	fi
+}
+
+latest_github_version() {
+	local repo="$1"
+	local fallback="$2"
+	local url="https://api.github.com/repos/${repo}/releases/latest"
+	local tag=""
+
+	if command -v curl >/dev/null 2>&1; then
+		tag="$(curl -fsSL --connect-timeout 8 "$url" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+	fi
+	tag="${tag#v}"
+	echo "${tag:-$fallback}"
+}
+
+ensure_proxy_cores() {
+	if [[ "${SKIP_PROXY_CORE_INSTALL:-0}" == "1" ]]; then
+		warn "已跳过内置代理核心安装 (SKIP_PROXY_CORE_INSTALL=1)"
+		return 0
+	fi
+	if [[ "$(uname -s 2>/dev/null)" != "Linux" ]]; then
+		warn "当前系统不是 Linux，跳过 sing-box/Xray 自动下载；可通过 SING_BOX_BIN 或 XRAY_BIN 指定核心路径"
+		return 0
+	fi
+
+	local arch bin_dir tmp_dir sing_ver xray_ver sing_url xray_url
+	arch="$(detect_arch_label)"
+	if [[ -z "$arch" ]]; then
+		warn "未识别 CPU 架构，跳过 sing-box/Xray 自动下载"
+		return 0
+	fi
+
+	bin_dir="${APP_DIR:-$(pwd)}/bin"
+	tmp_dir="${APP_DIR:-$(pwd)}/deploy/aapanel/generated/proxy-core-download"
+	mkdir -p "$bin_dir" "$tmp_dir"
+
+	if [[ ! -x "${bin_dir}/sing-box" ]]; then
+		sing_ver="${SING_BOX_VERSION:-$(latest_github_version SagerNet/sing-box 1.12.0)}"
+		sing_url="https://github.com/SagerNet/sing-box/releases/download/v${sing_ver}/sing-box-${sing_ver}-linux-${arch}.tar.gz"
+		log "下载 sing-box ${sing_ver} (${arch})..."
+		if download_file "$sing_url" "${tmp_dir}/sing-box.tar.gz"; then
+			if command -v tar >/dev/null 2>&1 && tar -xzf "${tmp_dir}/sing-box.tar.gz" -C "$tmp_dir"; then
+				find "$tmp_dir" -type f -name sing-box -perm /111 -exec cp {} "${bin_dir}/sing-box" \; -quit
+				chmod +x "${bin_dir}/sing-box" 2>/dev/null || true
+				[[ -x "${bin_dir}/sing-box" ]] && log "sing-box 已安装: ${bin_dir}/sing-box" || warn "sing-box 解压后未找到可执行文件"
+			else
+				warn "sing-box 解压失败，可手动设置 SING_BOX_BIN=/path/to/sing-box"
+			fi
+		else
+			warn "sing-box 下载失败，可手动设置 SING_BOX_BIN=/path/to/sing-box"
+		fi
+	else
+		log "sing-box 已存在: ${bin_dir}/sing-box"
+	fi
+
+	if [[ ! -x "${bin_dir}/xray" ]]; then
+		xray_ver="${XRAY_VERSION:-$(latest_github_version XTLS/Xray-core 25.4.30)}"
+		xray_url="https://github.com/XTLS/Xray-core/releases/download/v${xray_ver}/Xray-linux-${arch}.zip"
+		log "下载 Xray ${xray_ver} (${arch})..."
+		if download_file "$xray_url" "${tmp_dir}/xray.zip"; then
+			if command -v unzip >/dev/null 2>&1; then
+				unzip -o "${tmp_dir}/xray.zip" -d "${tmp_dir}/xray" >/dev/null
+				find "${tmp_dir}/xray" -type f -name xray -perm /111 -exec cp {} "${bin_dir}/xray" \; -quit
+				chmod +x "${bin_dir}/xray" 2>/dev/null || true
+				[[ -x "${bin_dir}/xray" ]] && log "Xray 已安装: ${bin_dir}/xray" || warn "Xray 解压后未找到可执行文件"
+			else
+				warn "未安装 unzip，跳过 Xray 解压；如需 Xray 请安装 unzip 后重跑 update.sh"
+			fi
+		else
+			warn "Xray 下载失败，可手动设置 XRAY_BIN=/path/to/xray"
+		fi
+	else
+		log "Xray 已存在: ${bin_dir}/xray"
+	fi
+}
+
 supervisor_conf_dir() {
 	supervisor_conf_dirs | head -1
 }

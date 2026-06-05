@@ -15,6 +15,7 @@
 		auth_enabled: boolean;
 		label: string;
 		method: string;
+		managed_core: string;
 	};
 
 	type ClientIpProxyStatus = {
@@ -33,6 +34,8 @@
 
 	type ParsedShareLink = {
 		supported: boolean;
+		managed_supported: boolean;
+		managed_core: 'sing-box' | 'xray' | '';
 		protocol: string;
 		name: string;
 		message: string;
@@ -50,6 +53,7 @@
 			security?: string;
 			transport?: string;
 			sni?: string;
+			flow?: string;
 			remark?: string;
 		};
 	};
@@ -57,6 +61,7 @@
 	let proxies = $state<ProxyProfile[]>([]);
 	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
 	let shareLink = $state('');
+	let managedCore = $state<'sing-box' | 'xray'>('sing-box');
 	let parsedShareLink = $state<ParsedShareLink | null>(null);
 	let form = $state({
 		name: '',
@@ -103,10 +108,11 @@
 		try {
 			await api('/api/user/proxy/add', {
 				method: 'POST',
-				body: JSON.stringify({ ...form, share_link: shareLink })
+				body: JSON.stringify({ ...form, share_link: shareLink, managed_core: managedCore })
 			});
 			toast = '代理配置已添加';
 			shareLink = '';
+			managedCore = 'sing-box';
 			parsedShareLink = null;
 			form = {
 				name: '',
@@ -137,6 +143,9 @@
 				body: JSON.stringify({ share_link: shareLink })
 			});
 			toast = parsedShareLink.message;
+			if (parsedShareLink.managed_core === 'sing-box' || parsedShareLink.managed_core === 'xray') {
+				managedCore = parsedShareLink.managed_core;
+			}
 			if (parsedShareLink.supported && parsedShareLink.proxy) {
 				form.name = parsedShareLink.name || form.name;
 				form.type = parsedShareLink.proxy.type;
@@ -205,7 +214,7 @@
 			<p class="mt-1 text-sm text-muted">
 				这里配置的是固定自托管代理，例如本机 Clash/V2rayN 或远程 HTTP/SOCKS 代理。
 				当前访问网站 IP 会由系统自动识别，不需要在这里额外添加。
-				VLESS/Reality 分享链接可识别节点信息，但需要先用客户端转换为本机 HTTP/SOCKS 代理端口。
+				VLESS/Reality 分享链接可由内置 sing-box/Xray 核心托管并转换为本机 HTTP 代理端口。
 			</p>
 		</div>
 
@@ -227,7 +236,7 @@
 				id="share-link"
 				class="input min-h-24 font-mono text-xs"
 				bind:value={shareLink}
-				placeholder="支持直接识别 http://、socks5://、ss://。VLESS/Reality 会识别信息并提示先转换为本地 HTTP/SOCKS 端口。"
+				placeholder="支持 http://、socks5://、ss://。VLESS/Reality 可由内置 sing-box/Xray 转换为本地 HTTP 代理端口。"
 			></textarea>
 			<div class="flex flex-wrap items-center gap-2">
 				<button class="btn-secondary" type="button" onclick={() => void parseShareLink()}>
@@ -235,10 +244,25 @@
 				</button>
 				{#if parsedShareLink}
 					<span class={parsedShareLink.supported ? 'text-sm text-emerald-300' : 'text-sm text-yellow-300'}>
-						{parsedShareLink.protocol.toUpperCase()} / {parsedShareLink.supported ? '可直接保存' : '需转换'}
+						{parsedShareLink.protocol.toUpperCase()} / {parsedShareLink.managed_supported
+							? '内置核心托管'
+							: parsedShareLink.supported
+								? '可直接保存'
+								: '暂不支持'}
 					</span>
 				{/if}
 			</div>
+			{#if parsedShareLink?.managed_supported}
+				<div class="grid gap-2 sm:grid-cols-[150px_1fr]">
+					<select class="input" bind:value={managedCore}>
+						<option value="sing-box">sing-box</option>
+						<option value="xray">Xray</option>
+					</select>
+					<div class="text-xs text-muted">
+						保存时面板会启动所选核心，只监听 127.0.0.1，并把该节点转换成本机 HTTP 代理。
+					</div>
+				</div>
+			{/if}
 			{#if parsedShareLink}
 				<div class="rounded-lg border border-border px-3 py-2 text-xs text-muted">
 					<div>{parsedShareLink.message}</div>
@@ -249,6 +273,7 @@
 								: ''}
 							{parsedShareLink.details.security ? ` / ${parsedShareLink.details.security}` : ''}
 							{parsedShareLink.details.transport ? ` / ${parsedShareLink.details.transport}` : ''}
+							{parsedShareLink.details.flow ? ` / ${parsedShareLink.details.flow}` : ''}
 							{parsedShareLink.details.sni ? ` / SNI ${parsedShareLink.details.sni}` : ''}
 						</div>
 					{/if}
@@ -374,6 +399,8 @@
 								<div>{proxy.host}</div>
 								{#if proxy.source === 'client_ip'}
 									<div class="text-xs text-muted">请求时动态解析</div>
+								{:else if proxy.managed_core}
+									<div class="text-xs text-muted">{proxy.managed_core} 本机托管</div>
 								{/if}
 							</td>
 							<td class="p-3">{proxy.port}</td>

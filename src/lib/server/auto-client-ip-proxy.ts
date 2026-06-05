@@ -114,7 +114,9 @@ export async function detectClientIpProxy(
 			host: CLIENT_IP_PROXY_HOST,
 			port: available.port,
 			usernameEncrypted: '',
-			passwordEncrypted: ''
+			passwordEncrypted: '',
+			managedCore: '',
+			shareLinkEncrypted: ''
 		});
 	}
 
