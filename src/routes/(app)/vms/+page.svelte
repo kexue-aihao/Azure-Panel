@@ -23,6 +23,12 @@
 		hyperVGenerations: string;
 		restricted: boolean;
 		restrictionReasons: string[];
+		quotaName: string;
+		quotaLocalizedName: string;
+		quotaRemaining: number;
+		totalQuotaRemaining: number;
+		quotaRequired: number;
+		quotaRestricted: boolean;
 	};
 	type CapabilityResult = {
 		location: string;
@@ -127,6 +133,17 @@
 		}
 
 		return chars.join('');
+	}
+
+	function randomName(prefix: string, maxLength = 48) {
+		const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		const available = Math.max(maxLength - suffix.length - 1, 1);
+		return `${prefix.slice(0, available)}-${suffix}`;
+	}
+
+	function refreshCreateNames() {
+		createForm.resource_group = randomName('rg-azp', 64);
+		createForm.vm_name = randomName('vm-azp', 48);
 	}
 
 	function refreshAdminPassword() {
@@ -251,6 +268,7 @@
 
 	async function changeAccount() {
 		refreshAdminPassword();
+		refreshCreateNames();
 		capabilities = null;
 		quotas = [];
 		images = [];
@@ -260,6 +278,7 @@
 
 	async function changeLocation() {
 		refreshAdminPassword();
+		refreshCreateNames();
 		await loadRegionDetails();
 	}
 
@@ -277,8 +296,10 @@
 		}
 		createLoading = true;
 		try {
+			refreshCreateNames();
 			const result = await api<{
 				name: string;
+				resource_group: string;
 				public_ipv4: string;
 				public_ipv6: string;
 				ip_brush_attempts: number;
@@ -291,7 +312,8 @@
 				})
 			});
 			toast = `VM ${result.name} 创建完成，IPv4=${result.public_ipv4 || '-'} IPv6=${result.public_ipv6 || '-'}，刷IP次数=${result.ip_brush_attempts}`;
-			resourceGroup = createForm.resource_group;
+			resourceGroup = result.resource_group;
+			refreshCreateNames();
 			refreshAdminPassword();
 			await loadVms();
 		} catch (err) {
@@ -392,6 +414,7 @@
 
 	onMount(async () => {
 		refreshAdminPassword();
+		refreshCreateNames();
 		await loadAccounts();
 		if (accountId) {
 			await loadRegions();
@@ -448,7 +471,7 @@
 					{:else}
 						{#each regions as region}
 							<option value={region.name}>
-								{region.displayName} ({region.name}) · {region.availableSizeCount} 个规格
+								{region.displayName} ({region.name}) · {region.availableSizeCount} 个可创建规格
 							</option>
 						{/each}
 					{/if}
@@ -537,11 +560,14 @@
 		<div>
 			<h2 class="text-lg font-medium">创建 VM</h2>
 			<p class="mt-1 text-sm text-muted">
-				创建时默认可同时创建 IPv4/IPv6，UserData 会作为 cloud-init 首次启动脚本注入。填写 IPv4 前缀后会先刷到匹配公网 IP 再建机。
+				创建时会自动随机生成资源组和 VM 名称，默认可同时创建 IPv4/IPv6，UserData 会作为 cloud-init 首次启动脚本注入。填写 IPv4 前缀后会先刷到匹配公网 IP 再建机。
 			</p>
 		</div>
 		<div class="grid gap-3 md:grid-cols-2">
-			<input class="input" bind:value={createForm.resource_group} placeholder="资源组" required />
+			<div class="rounded-lg border border-border bg-background px-3 py-2 text-sm">
+				<div class="text-xs text-muted">本次将自动创建资源组</div>
+				<div class="mt-1 font-mono">{createForm.resource_group}</div>
+			</div>
 			<div>
 				<label class="mb-1 block text-xs text-muted" for={createLocationSelectId}>创建区域</label>
 				<select
@@ -565,7 +591,10 @@
 					{/if}
 				</select>
 			</div>
-			<input class="input" bind:value={createForm.vm_name} placeholder="VM 名称" required />
+			<div class="rounded-lg border border-border bg-background px-3 py-2 text-sm">
+				<div class="text-xs text-muted">本次 VM 名称</div>
+				<div class="mt-1 font-mono">{createForm.vm_name}</div>
+			</div>
 			<div>
 				<label class="mb-1 block text-xs text-muted" for={createSizeSelectId}>实例规格</label>
 				<select
@@ -580,7 +609,7 @@
 					{:else if capabilities?.available.length}
 						{#each capabilities.available as item}
 							<option value={item.name}>
-								{item.name} · {item.cores} vCPU · {item.memoryGB}GB
+								{item.name} · {item.cores} vCPU · {item.memoryGB}GB · 剩余 {item.quotaRemaining}
 							</option>
 						{/each}
 					{:else}

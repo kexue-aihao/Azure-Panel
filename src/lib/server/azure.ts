@@ -51,6 +51,12 @@ export type VmCapability = {
 	hyperVGenerations: string;
 	restricted: boolean;
 	restrictionReasons: string[];
+	quotaName: string;
+	quotaLocalizedName: string;
+	quotaRemaining: number;
+	totalQuotaRemaining: number;
+	quotaRequired: number;
+	quotaRestricted: boolean;
 };
 
 export type VmCapabilitiesResult = {
@@ -632,7 +638,13 @@ function vmSizeToCapability(size: VirtualMachineSize): VmCapability {
 		acceleratedNetworking: null,
 		hyperVGenerations: '',
 		restricted: false,
-		restrictionReasons: []
+		restrictionReasons: [],
+		quotaName: '',
+		quotaLocalizedName: '',
+		quotaRemaining: 0,
+		totalQuotaRemaining: 0,
+		quotaRequired: size.numberOfCores ?? 0,
+		quotaRestricted: false
 	};
 }
 
@@ -648,7 +660,13 @@ function skuToCapability(sku: ResourceSku, location: string): VmCapability {
 		acceleratedNetworking: accelerated ? accelerated.toLowerCase() === 'true' : null,
 		hyperVGenerations: capabilityValue(sku, 'HyperVGenerations'),
 		restricted: isLocationRestricted(sku, location),
-		restrictionReasons: restrictionReasons(sku, location)
+		restrictionReasons: restrictionReasons(sku, location),
+		quotaName: '',
+		quotaLocalizedName: '',
+		quotaRemaining: 0,
+		totalQuotaRemaining: 0,
+		quotaRequired: capabilityNumber(sku, 'vCPUs'),
+		quotaRestricted: false
 	};
 }
 
@@ -669,6 +687,113 @@ function selectLargest(list: VmCapability[], key: 'cores' | 'memoryGB') {
 
 function displayLocationName(location: string) {
 	return LOCATION_DISPLAY_NAMES[location.toLowerCase()] ?? location;
+}
+
+function isAzureRegionOption(region: AzureRegionOption | null): region is AzureRegionOption {
+	return region !== null;
+}
+
+function quotaKey(value: string) {
+	return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isTotalRegionalVcpuQuota(quota: ComputeQuota) {
+	const name = quotaKey(quota.name);
+	const localized = quotaKey(quota.localizedName);
+	return (
+		name === 'cores' ||
+		name === 'totalregionalvcpus' ||
+		name === 'totalregionalcores' ||
+		localized === 'cores' ||
+		localized === 'totalregionalvcpus' ||
+		localized === 'totalregionalcores' ||
+		(localized.includes('total') &&
+			localized.includes('regional') &&
+			(localized.includes('vcpu') || localized.includes('core')))
+	);
+}
+
+function findTotalRegionalVcpuQuota(quotas: ComputeQuota[]) {
+	return quotas.find(isTotalRegionalVcpuQuota);
+}
+
+function findFamilyQuota(capability: VmCapability, quotas: ComputeQuota[]) {
+	const family = quotaKey(capability.family);
+	if (!family) return undefined;
+	return quotas.find((quota) => {
+		const name = quotaKey(quota.name);
+		const localized = quotaKey(quota.localizedName);
+		return (
+			name === family ||
+			name === `${family}vcpus` ||
+			localized === family ||
+			localized === `${family}vcpus` ||
+			localized.startsWith(family)
+		);
+	});
+}
+
+function applyQuotaToCapabilities(capabilities: VmCapability[], quotas: ComputeQuota[]) {
+	const totalQuota = findTotalRegionalVcpuQuota(quotas);
+	const totalRemaining = totalQuota?.remaining ?? 0;
+
+	return capabilities.map((capability) => {
+		const reasons = [...capability.restrictionReasons];
+		const required = capability.cores;
+		const familyQuota = findFamilyQuota(capability, quotas);
+		const effectiveQuota = familyQuota ?? totalQuota;
+		let quotaRestricted = false;
+
+		if (required <= 0) {
+			quotaRestricted = true;
+			reasons.push('MissingCoreCount');
+		}
+		if (!totalQuota) {
+			quotaRestricted = true;
+			reasons.push('MissingTotalRegionalVcpuQuota');
+		} else if (totalQuota.remaining < required) {
+			quotaRestricted = true;
+			reasons.push(`TotalRegionalVcpusRemaining:${totalQuota.remaining}`);
+		}
+		if (capability.family) {
+			if (!familyQuota) {
+				quotaRestricted = true;
+				reasons.push(`MissingFamilyQuota:${capability.family}`);
+			} else if (familyQuota.remaining < required) {
+				quotaRestricted = true;
+				reasons.push(`${familyQuota.name || familyQuota.localizedName}Remaining:${familyQuota.remaining}`);
+			}
+		}
+
+		return {
+			...capability,
+			restricted: capability.restricted || quotaRestricted,
+			restrictionReasons: [...new Set(reasons)],
+			quotaName: effectiveQuota?.name ?? '',
+			quotaLocalizedName: effectiveQuota?.localizedName ?? '',
+			quotaRemaining: effectiveQuota?.remaining ?? 0,
+			totalQuotaRemaining: totalRemaining,
+			quotaRequired: required,
+			quotaRestricted
+		};
+	});
+}
+
+async function mapWithConcurrency<T, R>(
+	items: T[],
+	limit: number,
+	mapper: (item: T) => Promise<R>
+): Promise<R[]> {
+	const results: R[] = [];
+	let next = 0;
+	const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+		while (next < items.length) {
+			const index = next++;
+			results[index] = await mapper(items[index]);
+		}
+	});
+	await Promise.all(workers);
+	return results;
 }
 
 function resourceGroupToInfo(group: ResourceGroup): AzureResourceGroupInfo {
@@ -781,23 +906,18 @@ export async function listVmCapabilities(
 ): Promise<VmCapabilitiesResult> {
 	const skus: VmCapability[] = [];
 
-	try {
-		for await (const sku of clients.compute.resourceSkus.list({
-			filter: `location eq '${location}'`
-		})) {
-			if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
-			skus.push(skuToCapability(sku, location));
-		}
-	} catch {
-		for await (const size of clients.compute.virtualMachineSizes.list(location)) {
-			if (size.name) skus.push(vmSizeToCapability(size));
-		}
+	for await (const sku of clients.compute.resourceSkus.list({
+		filter: `location eq '${location}'`
+	})) {
+		if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
+		skus.push(skuToCapability(sku, location));
 	}
 
-	const available = skus
+	const quotaAware = applyQuotaToCapabilities(skus, await listComputeQuotas(clients, location));
+	const available = quotaAware
 		.filter((sku) => !sku.restricted)
 		.sort((a, b) => byCapacity(a, b));
-	const restricted = skus
+	const restricted = quotaAware
 		.filter((sku) => sku.restricted)
 		.sort((a, b) => byCapacity(a, b));
 
@@ -825,14 +945,25 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 		}
 	}
 
-	return [...byRegion.entries()]
-		.map(([name, available]) => ({
+	const regions = await mapWithConcurrency([...byRegion.entries()], 4, async ([name, candidates]) => {
+		const quotas = await listComputeQuotas(clients, name).catch(() => []);
+		if (quotas.length === 0) return null;
+		const available = applyQuotaToCapabilities(candidates, quotas)
+			.filter((capability) => !capability.restricted)
+			.sort((a, b) => byCapacity(a, b));
+		if (available.length === 0) return null;
+		const region: AzureRegionOption = {
 			name,
 			displayName: displayLocationName(name),
 			availableSizeCount: available.length,
 			highestCoreSize: selectLargest(available, 'cores'),
 			largestMemorySize: selectLargest(available, 'memoryGB')
-		}))
+		};
+		return region;
+	});
+
+	return regions
+		.filter(isAzureRegionOption)
 		.sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
@@ -1208,6 +1339,14 @@ function sanitizeResourceName(value: string) {
 	return value.replace(/[^a-zA-Z0-9_.-]/g, '-').replace(/^-+|-+$/g, '') || 'azure-panel';
 }
 
+export function randomAzureResourceName(prefix: string, maxLength = 64) {
+	const cleanPrefix = sanitizeResourceName(prefix).toLowerCase().replace(/_/g, '-');
+	const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+	const separator = '-';
+	const available = Math.max(maxLength - suffix.length - separator.length, 1);
+	return `${cleanPrefix.slice(0, available)}${separator}${suffix}`;
+}
+
 function resourceName(base: string, suffix: string, maxLength = 80) {
 	const cleanBase = sanitizeResourceName(base);
 	const cleanSuffix = sanitizeResourceName(suffix);
@@ -1482,6 +1621,15 @@ export async function createVmAdvanced(
 		'Microsoft.Storage',
 		'Microsoft.KeyVault'
 	]);
+	const capabilities = await listVmCapabilities(clients, location);
+	const selectedCapability = capabilities.available.find((capability) => capability.name === vmSize);
+	if (!selectedCapability) {
+		const restricted = capabilities.restricted.find((capability) => capability.name === vmSize);
+		const reason = restricted?.restrictionReasons.length
+			? `：${restricted.restrictionReasons.join('、')}`
+			: '';
+		throw new Error(`当前账号在 ${location} 不支持创建 ${vmSize}${reason}`);
+	}
 	const { publisher, offer, sku, version } = parseImageReference(imageReference);
 	const customData = encodeCustomData(options.customData);
 	const network = await createNetworkForVm(clients, {

@@ -1,5 +1,5 @@
 ﻿import { getUserAccountWithProxy } from '$lib/server/accounts';
-import { createAzureClients, createVmAdvanced } from '$lib/server/azure';
+import { createAzureClients, createVmAdvanced, randomAzureResourceName } from '$lib/server/azure';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
@@ -7,12 +7,14 @@ export const POST: RequestHandler = async (event) => {
 	const user = await requireUser(event);
 	const body = await event.request.json();
 	const accountId = Number(body.account_id);
-	const resourceGroup = String(body.resource_group ?? '').trim();
 	const location = String(body.location ?? '').trim();
-	const vmName = String(body.vm_name ?? '').trim();
+	const requestedResourceGroup = String(body.resource_group ?? '').trim();
+	const requestedVmName = String(body.vm_name ?? '').trim();
+	const resourceGroup = requestedResourceGroup || randomAzureResourceName('rg-azp', 64);
+	const vmName = requestedVmName || randomAzureResourceName('vm-azp', 48);
 	const adminPassword = String(body.admin_password ?? '');
 
-	if (!accountId || !resourceGroup || !location || !vmName) return fail('参数不完整');
+	if (!accountId || !location) return fail('参数不完整');
 	if (!adminPassword) return fail('缺少管理员密码');
 
 	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
