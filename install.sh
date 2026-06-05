@@ -99,8 +99,7 @@ banner() {
 check_prerequisites() {
 	log "检查运行环境..."
 	require_cmd git
-	require_cmd npm
-	require_cmd node
+	require_node_tools
 
 	if [[ "${EUID}" -ne 0 ]]; then
 		warn "建议使用 root 或 sudo 运行，以便写入 Supervisor 配置"

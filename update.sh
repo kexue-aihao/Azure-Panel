@@ -57,8 +57,7 @@ log() { echo -e "${GREEN}[update]${NC} $*"; }
 
 # ---------- 前置检查 ----------
 require_cmd git
-require_cmd npm
-require_cmd node
+require_node_tools
 
 # ---------- 进入项目目录 ----------
 if [[ -f "${SCRIPT_DIR}/package.json" ]]; then

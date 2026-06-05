@@ -22,12 +22,101 @@ require_cmd() {
 	command -v "$1" >/dev/null 2>&1 || die "未找到命令: $1，请先安装"
 }
 
+# aaPanel 将 Node.js 装在非标准路径，root 执行脚本时 PATH 可能找不到 npm
+# 常见路径: /www/server/nvm/versions/node/v20.x.x/bin
+find_aapanel_node_bin_dir() {
+	local dir npm_path version
+
+	# 用户显式指定
+	if [[ -n "${NODE_BIN_DIR:-}" && -x "${NODE_BIN_DIR}/npm" ]]; then
+		echo "$NODE_BIN_DIR"
+		return 0
+	fi
+
+	# aaPanel NVM 目录（优先较新版本）
+	if [[ -d /www/server/nvm/versions/node ]]; then
+		for dir in $(ls -1 /www/server/nvm/versions/node 2>/dev/null | sort -V -r); do
+			if [[ -x "/www/server/nvm/versions/node/${dir}/bin/npm" ]]; then
+				echo "/www/server/nvm/versions/node/${dir}/bin"
+				return 0
+			fi
+		done
+	fi
+
+	# 其他常见路径
+	local candidates=(
+		"/www/server/nodejs"
+		"/usr/local/nodejs/bin"
+		"/usr/local/bin"
+	)
+	for dir in "${candidates[@]}"; do
+		if [[ -x "${dir}/npm" ]]; then
+			echo "$dir"
+			return 0
+		fi
+	done
+
+	# 通配搜索
+	for npm_path in \
+		/www/server/nvm/versions/node/v*/bin/npm \
+		/www/server/nodejs/v*/bin/npm \
+		/root/.nvm/versions/node/v*/bin/npm; do
+		[[ -x "$npm_path" ]] || continue
+		echo "$(dirname "$npm_path")"
+		return 0
+	done
+
+	return 1
+}
+
+# 将 aaPanel Node 路径加入 PATH，供 npm install / build 使用
+setup_node_env() {
+	local bin_dir=""
+
+	if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+		return 0
+	fi
+
+	bin_dir="$(find_aapanel_node_bin_dir 2>/dev/null || true)"
+	if [[ -n "$bin_dir" ]]; then
+		export PATH="${bin_dir}:${PATH}"
+		log "已加载 Node 环境: ${bin_dir} (node $(node -v 2>/dev/null), npm $(npm -v 2>/dev/null))"
+		return 0
+	fi
+
+	# 尝试加载 nvm（若存在）
+	if [[ -s /root/.nvm/nvm.sh ]]; then
+		# shellcheck source=/dev/null
+		source /root/.nvm/nvm.sh
+		command -v npm >/dev/null 2>&1 && return 0
+	fi
+
+	return 1
+}
+
+require_node_tools() {
+	setup_node_env || true
+
+	if [[ -n "${NODE_BIN:-}" && -x "$NODE_BIN" ]]; then
+		export PATH="$(dirname "$NODE_BIN"):${PATH}"
+	fi
+
+	command -v node >/dev/null 2>&1 || die "未找到 node。请在 aaPanel 软件商店安装 Node.js 20 LTS（Node 版本管理器）"
+	command -v npm  >/dev/null 2>&1 || die "未找到 npm。请在 aaPanel 软件商店安装 Node.js 20 LTS，或设置 NODE_BIN_DIR=/path/to/node/bin"
+}
+
 find_node_bin() {
+	require_node_tools
 	if [[ -n "${NODE_BIN:-}" && -x "$NODE_BIN" ]]; then
 		echo "$NODE_BIN"
 		return
 	fi
-	command -v node 2>/dev/null || die "未找到 node，请在 aaPanel 安装 Node.js 20 LTS"
+	command -v node
+}
+
+find_npm_bin() {
+	require_node_tools
+	command -v npm
 }
 
 find_supervisorctl() {
@@ -221,10 +310,11 @@ import_mysql_schema() {
 }
 
 npm_build_all() {
+	require_node_tools
 	log "安装 npm 依赖..."
-	npm install --production=false
+	"$(find_npm_bin)" install --production=false
 	log "构建 Web + Worker..."
-	npm run build:all
+	"$(find_npm_bin)" run build:all
 	[[ -f build/index.js ]] || die "构建失败: 未找到 build/index.js"
 	[[ -f build/worker.js ]]  || die "构建失败: 未找到 build/worker.js"
 	log "构建完成"
