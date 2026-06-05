@@ -8,11 +8,34 @@ export const PROXY_TYPES = ['http', 'https', 'socks4', 'socks4a', 'socks5', 'sha
 export const AUTO_CLIENT_IP_PROXY_NAME = '当前访问网站 IP（自动识别）';
 export const AUTO_CLIENT_IP_PROXY_CANDIDATES = [
 	{ type: 'http', port: 7890, label: 'HTTP 7890' },
+	{ type: 'socks5', port: 7890, label: 'SOCKS5 7890' },
+	{ type: 'http', port: 7891, label: 'HTTP 7891' },
+	{ type: 'socks5', port: 7891, label: 'SOCKS5 7891' },
+	{ type: 'http', port: 7892, label: 'HTTP 7892' },
+	{ type: 'socks5', port: 7892, label: 'SOCKS5 7892' },
+	{ type: 'http', port: 7893, label: 'HTTP 7893' },
+	{ type: 'socks5', port: 7893, label: 'SOCKS5 7893' },
+	{ type: 'http', port: 7897, label: 'HTTP 7897' },
+	{ type: 'socks5', port: 7897, label: 'SOCKS5 7897' },
+	{ type: 'http', port: 7899, label: 'HTTP 7899' },
+	{ type: 'socks5', port: 7899, label: 'SOCKS5 7899' },
 	{ type: 'socks5', port: 10808, label: 'SOCKS5 10808' },
-	{ type: 'socks5', port: 1080, label: 'SOCKS5 1080' },
-	{ type: 'http', port: 8080, label: 'HTTP 8080' },
 	{ type: 'http', port: 10809, label: 'HTTP 10809' },
-	{ type: 'http', port: 7897, label: 'HTTP 7897' }
+	{ type: 'socks5', port: 10810, label: 'SOCKS5 10810' },
+	{ type: 'socks5', port: 1080, label: 'SOCKS5 1080' },
+	{ type: 'socks5', port: 1081, label: 'SOCKS5 1081' },
+	{ type: 'socks5', port: 1086, label: 'SOCKS5 1086' },
+	{ type: 'socks5', port: 1087, label: 'SOCKS5 1087' },
+	{ type: 'http', port: 2080, label: 'HTTP 2080' },
+	{ type: 'socks5', port: 2081, label: 'SOCKS5 2081' },
+	{ type: 'http', port: 3128, label: 'HTTP 3128' },
+	{ type: 'http', port: 8080, label: 'HTTP 8080' },
+	{ type: 'http', port: 8081, label: 'HTTP 8081' },
+	{ type: 'http', port: 8118, label: 'HTTP 8118' },
+	{ type: 'http', port: 8888, label: 'HTTP 8888' },
+	{ type: 'http', port: 8889, label: 'HTTP 8889' },
+	{ type: 'socks5', port: 20170, label: 'SOCKS5 20170' },
+	{ type: 'http', port: 20171, label: 'HTTP 20171' }
 ] as const satisfies { type: ProxyType; port: number; label: string }[];
 export type ProxyType = (typeof PROXY_TYPES)[number];
 export type ProxySource = 'fixed' | 'client_ip';
@@ -37,6 +60,22 @@ export type PublicProxyProfile = {
 	label: string;
 	method: string;
 	created_at: Date;
+};
+
+export type ParsedProxyShareLink = {
+	supported: boolean;
+	protocol: string;
+	name: string;
+	message: string;
+	proxy: ProxyRuntimeConfig | null;
+	details: {
+		host?: string;
+		port?: number;
+		security?: string;
+		transport?: string;
+		sni?: string;
+		remark?: string;
+	};
 };
 
 const DEFAULT_PORTS: Record<ProxyType, number> = {
@@ -131,6 +170,121 @@ export function parseProxyUrl(proxyUrl: string): ProxyRuntimeConfig | null {
 		username: parsed.username ? decodeURIComponent(parsed.username) : '',
 		password: parsed.password ? decodeURIComponent(parsed.password) : ''
 	});
+}
+
+function decodeBase64Url(value: string) {
+	const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+	const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+	return Buffer.from(padded, 'base64').toString('utf8');
+}
+
+function safeDecode(value: string) {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		return value;
+	}
+}
+
+function parseShadowsocksShareLink(link: string, parsed: URL): ParsedProxyShareLink {
+	const remark = parsed.hash ? safeDecode(parsed.hash.slice(1)) : '';
+	const query = parsed.search;
+	const withoutProtocol = link.trim().slice('ss://'.length).split('#')[0].split('?')[0];
+	let body = withoutProtocol;
+
+	if (!body.includes('@')) {
+		body = decodeBase64Url(body);
+	}
+
+	const [authPart, endpointPart] = body.split('@');
+	if (!authPart || !endpointPart) throw new Error('Shadowsocks 分享链接缺少认证或主机信息');
+
+	let auth = safeDecode(authPart);
+	if (!auth.includes(':')) {
+		auth = decodeBase64Url(auth);
+	}
+	const authSplit = auth.split(':');
+	const method = authSplit.shift() ?? '';
+	const password = authSplit.join(':');
+	const endpoint = new URL(`ss://${endpointPart}${query}`);
+	const proxy = normalizeProxyRuntime({
+		type: 'shadowsocks',
+		host: endpoint.hostname,
+		port: endpoint.port,
+		method,
+		password
+	});
+
+	return {
+		supported: true,
+		protocol: 'ss',
+		name: remark || endpoint.hostname || 'Shadowsocks',
+		message: '已识别 Shadowsocks 分享链接，可直接验证并保存。',
+		proxy,
+		details: {
+			host: proxy.host,
+			port: proxy.port,
+			remark
+		}
+	};
+}
+
+function unsupportedShareLink(parsed: URL): ParsedProxyShareLink {
+	const protocol = parsed.protocol.replace(':', '').toLowerCase();
+	const remark = parsed.hash ? safeDecode(parsed.hash.slice(1)) : '';
+	const params = parsed.searchParams;
+	const message =
+		protocol === 'vless'
+			? '已识别 VLESS 分享链接，但 VLESS/Reality 不是 HTTP/SOCKS 代理端口，不能被 Azure SDK 直接使用。请先用 Xray、sing-box、Clash 或 v2rayN 导入该链接，并在当前机器暴露 HTTP/SOCKS 本地端口后再填写该端口。'
+			: `已识别 ${protocol.toUpperCase()} 分享链接，但当前面板只能直接使用 HTTP、HTTPS、SOCKS4、SOCKS5 和 Shadowsocks。请先转换成本地 HTTP/SOCKS 代理端口。`;
+	return {
+		supported: false,
+		protocol,
+		name: remark || `${protocol.toUpperCase()} ${parsed.hostname}`,
+		message,
+		proxy: null,
+		details: {
+			host: parsed.hostname,
+			port: parsed.port ? Number(parsed.port) : undefined,
+			security: params.get('security') ?? undefined,
+			transport: params.get('type') ?? undefined,
+			sni: params.get('sni') ?? undefined,
+			remark
+		}
+	};
+}
+
+export function parseProxyShareLink(shareLink: string): ParsedProxyShareLink {
+	const normalized = shareLink.trim();
+	if (!normalized) throw new Error('请粘贴代理分享链接');
+
+	let parsed: URL;
+	try {
+		parsed = new URL(normalized);
+	} catch {
+		throw new Error('代理分享链接格式无效');
+	}
+
+	const protocol = parsed.protocol.replace(':', '').toLowerCase();
+	if (['http', 'https', 'socks4', 'socks4a', 'socks5'].includes(protocol)) {
+		const proxy = parseProxyUrl(normalized);
+		if (!proxy) throw new Error('代理分享链接为空');
+		const remark = parsed.hash ? safeDecode(parsed.hash.slice(1)) : '';
+		return {
+			supported: true,
+			protocol,
+			name: remark || parsed.hostname || `${protocol.toUpperCase()} Proxy`,
+			message: '已识别可直接使用的代理链接。',
+			proxy,
+			details: {
+				host: proxy.host,
+				port: proxy.port,
+				remark
+			}
+		};
+	}
+	if (protocol === 'ss') return parseShadowsocksShareLink(normalized, parsed);
+	return unsupportedShareLink(parsed);
 }
 
 export function buildProxyUrl(proxy: ProxyRuntimeConfig): string {

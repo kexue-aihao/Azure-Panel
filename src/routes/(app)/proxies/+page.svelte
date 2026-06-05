@@ -31,8 +31,33 @@
 		}[];
 	};
 
+	type ParsedShareLink = {
+		supported: boolean;
+		protocol: string;
+		name: string;
+		message: string;
+		proxy: {
+			type: ProxyType;
+			host: string;
+			port: number;
+			username: string;
+			password: string;
+			method: string;
+		} | null;
+		details: {
+			host?: string;
+			port?: number;
+			security?: string;
+			transport?: string;
+			sni?: string;
+			remark?: string;
+		};
+	};
+
 	let proxies = $state<ProxyProfile[]>([]);
 	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
+	let shareLink = $state('');
+	let parsedShareLink = $state<ParsedShareLink | null>(null);
 	let form = $state({
 		name: '',
 		type: 'http' as ProxyType,
@@ -78,9 +103,11 @@
 		try {
 			await api('/api/user/proxy/add', {
 				method: 'POST',
-				body: JSON.stringify(form)
+				body: JSON.stringify({ ...form, share_link: shareLink })
 			});
 			toast = '代理配置已添加';
+			shareLink = '';
+			parsedShareLink = null;
 			form = {
 				name: '',
 				type: 'http',
@@ -94,6 +121,35 @@
 			await load();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '添加失败';
+		}
+	}
+
+	async function parseShareLink() {
+		if (!shareLink.trim()) {
+			parsedShareLink = null;
+			toast = '请先粘贴代理分享链接';
+			return;
+		}
+
+		try {
+			parsedShareLink = await api<ParsedShareLink>('/api/user/proxy/parse', {
+				method: 'POST',
+				body: JSON.stringify({ share_link: shareLink })
+			});
+			toast = parsedShareLink.message;
+			if (parsedShareLink.supported && parsedShareLink.proxy) {
+				form.name = parsedShareLink.name || form.name;
+				form.type = parsedShareLink.proxy.type;
+				form.source = 'fixed';
+				form.host = parsedShareLink.proxy.host;
+				form.port = parsedShareLink.proxy.port;
+				form.method = parsedShareLink.proxy.method;
+				form.username = parsedShareLink.proxy.username;
+				form.password = parsedShareLink.proxy.password;
+			}
+		} catch (err) {
+			parsedShareLink = null;
+			toast = err instanceof Error ? err.message : '分享链接识别失败';
 		}
 	}
 
@@ -149,6 +205,7 @@
 			<p class="mt-1 text-sm text-muted">
 				这里配置的是固定自托管代理，例如本机 Clash/V2rayN 或远程 HTTP/SOCKS 代理。
 				当前访问网站 IP 会由系统自动识别，不需要在这里额外添加。
+				VLESS/Reality 分享链接可识别节点信息，但需要先用客户端转换为本机 HTTP/SOCKS 代理端口。
 			</p>
 		</div>
 
@@ -162,6 +219,41 @@
 			<button class="btn-secondary" type="button" onclick={() => usePreset('V2rayN', 'socks5', 10808)}>
 				V2rayN
 			</button>
+		</div>
+
+		<div class="space-y-2 rounded-lg border border-border bg-background p-3">
+			<label class="text-sm text-muted" for="share-link">代理分享链接（可选）</label>
+			<textarea
+				id="share-link"
+				class="input min-h-24 font-mono text-xs"
+				bind:value={shareLink}
+				placeholder="支持直接识别 http://、socks5://、ss://。VLESS/Reality 会识别信息并提示先转换为本地 HTTP/SOCKS 端口。"
+			></textarea>
+			<div class="flex flex-wrap items-center gap-2">
+				<button class="btn-secondary" type="button" onclick={() => void parseShareLink()}>
+					识别并填入
+				</button>
+				{#if parsedShareLink}
+					<span class={parsedShareLink.supported ? 'text-sm text-emerald-300' : 'text-sm text-yellow-300'}>
+						{parsedShareLink.protocol.toUpperCase()} / {parsedShareLink.supported ? '可直接保存' : '需转换'}
+					</span>
+				{/if}
+			</div>
+			{#if parsedShareLink}
+				<div class="rounded-lg border border-border px-3 py-2 text-xs text-muted">
+					<div>{parsedShareLink.message}</div>
+					{#if parsedShareLink.details.host}
+						<div class="mt-1 break-all">
+							节点: {parsedShareLink.details.host}{parsedShareLink.details.port
+								? `:${parsedShareLink.details.port}`
+								: ''}
+							{parsedShareLink.details.security ? ` / ${parsedShareLink.details.security}` : ''}
+							{parsedShareLink.details.transport ? ` / ${parsedShareLink.details.transport}` : ''}
+							{parsedShareLink.details.sni ? ` / SNI ${parsedShareLink.details.sni}` : ''}
+						</div>
+					{/if}
+				</div>
+			{/if}
 		</div>
 
 		<input class="input" bind:value={form.name} placeholder="标注" required />
@@ -258,7 +350,12 @@
 					</td>
 					<td class="p-3 text-muted">无</td>
 					<td class="p-3 {clientIpProxy?.available ? 'text-emerald-300' : 'text-muted'}">
-						{clientIpProxy?.message ?? '正在识别'}
+						<div>{clientIpProxy?.message ?? '正在识别'}</div>
+						{#if clientIpProxy?.candidates?.length}
+							<div class="mt-1 max-w-[360px] text-xs text-muted">
+								已尝试：{clientIpProxy.candidates.map((candidate) => candidate.label).join('、')}
+							</div>
+						{/if}
 					</td>
 				</tr>
 				{#if customProxies.length === 0}

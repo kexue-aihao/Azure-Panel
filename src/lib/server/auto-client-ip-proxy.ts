@@ -10,6 +10,10 @@ import {
 	type PublicProxyProfile
 } from './proxy';
 
+const AUTO_PORT_HINT = [...new Set(AUTO_CLIENT_IP_PROXY_CANDIDATES.map((candidate) => candidate.port))]
+	.sort((a, b) => a - b)
+	.join('、');
+
 type CandidateStatus = {
 	type: string;
 	port: number;
@@ -86,7 +90,7 @@ export async function detectClientIpProxy(
 			available: false,
 			profile: null,
 			candidates,
-			message: `当前访问 IP ${normalizedClientIp} 未检测到可用代理端口`
+			message: `当前访问 IP ${normalizedClientIp} 未检测到可用代理端口。已尝试常见端口：${AUTO_PORT_HINT}`
 		};
 	}
 
@@ -129,7 +133,7 @@ export async function ensureClientIpProxyProfile(userId: number, clientIp: strin
 	const detected = await detectClientIpProxy(userId, clientIp, { create: true, timeoutMs: 1500 });
 	if (!detected.profile) {
 		throw new Error(
-			`${detected.message}。请确认当前访问者 IP 上已运行 HTTP/SOCKS 代理，常见端口：7890、10808、1080、8080。`
+			`${detected.message}。请确认当前访问者 IP 上已运行 HTTP/SOCKS 代理，或先把 VLESS/Reality 节点导入 Clash/Xray/sing-box/v2rayN 并暴露本地 HTTP/SOCKS 端口。`
 		);
 	}
 
