@@ -34,19 +34,46 @@
 		remaining: number;
 		unit: string;
 	};
+	type VmSizeOption = {
+		name: string;
+		cores: number;
+		memory_gb: number;
+		max_data_disk_count: number;
+		quota_localized_name: string;
+		quota_remaining: number;
+		quota_required: number;
+		source: string;
+	};
+	type VmImageOption = {
+		label: string;
+		imageReference: string;
+		publisher: string;
+		offer: string;
+		sku: string;
+		version: string;
+		osType: 'Linux' | 'Windows' | 'Unknown';
+		architecture: string;
+		hyperVGeneration: string;
+	};
 
 	let accounts = $state<Account[]>([]);
 	let proxies = $state<ProxyProfile[]>([]);
 	let vms = $state<Vm[]>([]);
 	let quotas = $state<Quota[]>([]);
+	let vmSizes = $state<VmSizeOption[]>([]);
+	let vmImages = $state<VmImageOption[]>([]);
 	let accountId = $state<number | null>(null);
 	let resourceGroup = $state('');
 	let location = $state('malaysiawest');
 	let loading = $state(false);
 	let quotaLoading = $state(false);
+	let sizeLoading = $state(false);
+	let imageLoading = $state(false);
 	let createLoading = $state(false);
 	let ipActionLoading = $state('');
 	let toast = $state('');
+	let sizeError = $state('');
+	let imageError = $state('');
 	let proxyMode = $state<ProxyMode>('account');
 	let proxyProfileId = $state('');
 	let brushIpPrefix = $state('85.211');
@@ -78,6 +105,7 @@
 	const PASSWORD_UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 	const PASSWORD_DIGITS = '0123456789';
 	const PASSWORD_CHARS = `${PASSWORD_LOWER}${PASSWORD_UPPER}${PASSWORD_DIGITS}`;
+	let createOptionsRequestId = 0;
 
 	function randomIndex(max: number) {
 		const values = new Uint32Array(1);
@@ -159,7 +187,7 @@
 	async function changeProxySelection() {
 		syncProxySelection();
 		if (accountId) {
-			await Promise.all([loadVms(), loadQuotas()]);
+			await Promise.all([loadVms(), loadRegionDetails()]);
 		}
 	}
 
@@ -215,10 +243,95 @@
 		createForm.location = location;
 	}
 
+	function sizeLabel(size: VmSizeOption) {
+		const memory = Number.isFinite(size.memory_gb) ? `${size.memory_gb} GB` : '-';
+		const quota =
+			size.quota_remaining || size.quota_required
+				? `，剩余 ${size.quota_remaining}/${size.quota_required} vCPU`
+				: '';
+		return `${size.name}（${size.cores}C / ${memory}${quota}）`;
+	}
+
+	function imageLabel(image: VmImageOption) {
+		const meta = [image.osType, image.architecture, image.hyperVGeneration]
+			.filter(Boolean)
+			.join(' / ');
+		return meta ? `${image.label} - ${meta}` : image.label;
+	}
+
+	async function loadVmSizes(requestId: number) {
+		if (!accountId || !location.trim()) {
+			vmSizes = [];
+			sizeLoading = false;
+			sizeError = '';
+			return;
+		}
+		sizeLoading = true;
+		sizeError = '';
+		try {
+			const params = new URLSearchParams({
+				account_id: String(accountId),
+				location: location.trim()
+			});
+			appendProxyParams(params);
+			const result = await api<{ sizes: VmSizeOption[] }>(`/api/user/azure/vm/sizes?${params}`);
+			if (requestId !== createOptionsRequestId) return;
+			vmSizes = result.sizes ?? [];
+			if (vmSizes.length && !vmSizes.some((size) => size.name === createForm.vm_size)) {
+				createForm.vm_size = vmSizes[0].name;
+			}
+		} catch (err) {
+			if (requestId !== createOptionsRequestId) return;
+			vmSizes = [];
+			sizeError = err instanceof Error ? err.message : '规格查询失败';
+		} finally {
+			if (requestId === createOptionsRequestId) sizeLoading = false;
+		}
+	}
+
+	async function loadVmImages(requestId: number) {
+		if (!accountId || !location.trim()) {
+			vmImages = [];
+			imageLoading = false;
+			imageError = '';
+			return;
+		}
+		imageLoading = true;
+		imageError = '';
+		try {
+			const params = new URLSearchParams({
+				account_id: String(accountId),
+				location: location.trim()
+			});
+			appendProxyParams(params);
+			const images = await api<VmImageOption[]>(`/api/user/azure/image/list?${params}`);
+			if (requestId !== createOptionsRequestId) return;
+			vmImages = images ?? [];
+			if (
+				vmImages.length &&
+				!vmImages.some((image) => image.imageReference === createForm.image_reference)
+			) {
+				createForm.image_reference = vmImages[0].imageReference;
+			}
+		} catch (err) {
+			if (requestId !== createOptionsRequestId) return;
+			vmImages = [];
+			imageError = err instanceof Error ? err.message : '系统镜像查询失败';
+		} finally {
+			if (requestId === createOptionsRequestId) imageLoading = false;
+		}
+	}
+
+	async function loadCreateOptions() {
+		syncCreateLocation();
+		const requestId = ++createOptionsRequestId;
+		await Promise.all([loadVmSizes(requestId), loadVmImages(requestId)]);
+	}
+
 	async function loadRegionDetails() {
 		syncCreateLocation();
 		quotas = [];
-		await loadQuotas();
+		await Promise.all([loadQuotas(), loadCreateOptions()]);
 	}
 
 	async function changeAccount() {
@@ -240,6 +353,14 @@
 		syncCreateLocation();
 		if (!createForm.location.trim() || !createForm.vm_size.trim() || !createForm.image_reference.trim()) {
 			toast = '请填写区域、实例规格和系统镜像';
+			return;
+		}
+		if (!vmSizes.some((size) => size.name === createForm.vm_size)) {
+			toast = '请先从 Azure 官方 API 返回的实例规格下拉列表中选择规格';
+			return;
+		}
+		if (!vmImages.some((image) => image.imageReference === createForm.image_reference)) {
+			toast = '请先从 Azure 官方 API 返回的安装系统下拉列表中选择系统';
 			return;
 		}
 		createLoading = true;
@@ -462,7 +583,7 @@
 		</div>
 
 		<div class="grid gap-3 md:grid-cols-3">
-			<button class="btn-secondary" onclick={() => void loadQuotas()} disabled={quotaLoading}>
+			<button class="btn-secondary" onclick={() => void loadRegionDetails()} disabled={quotaLoading}>
 				{quotaLoading ? '查询中...' : '查询区域配额'}
 			</button>
 		</div>
@@ -525,24 +646,50 @@
 			</div>
 			<div>
 				<label class="mb-1 block text-xs text-muted" for={createSizeSelectId}>实例规格</label>
-				<input
+				<select
 					id={createSizeSelectId}
 					class="input"
 					bind:value={createForm.vm_size}
-					placeholder="Standard_B1s"
+					disabled={sizeLoading || vmSizes.length === 0}
 					required
-				/>
+				>
+					{#if sizeLoading}
+						<option value={createForm.vm_size}>正在从 Azure 官方 API 查询规格...</option>
+					{:else if vmSizes.length === 0}
+						<option value={createForm.vm_size}>{sizeError || '暂无可选择规格，请先选择账号和区域'}</option>
+					{:else}
+						{#each vmSizes as size}
+							<option value={size.name}>{sizeLabel(size)}</option>
+						{/each}
+					{/if}
+				</select>
+				{#if sizeError}
+					<p class="mt-1 text-xs text-red-300">{sizeError}</p>
+				{/if}
 			</div>
 		</div>
 		<div>
 			<label class="mb-1 block text-xs text-muted" for={imageSelectId}>安装系统</label>
-			<input
+			<select
 				id={imageSelectId}
 				class="input"
 				bind:value={createForm.image_reference}
-				placeholder="Canonical:ubuntu-24_04-lts:server:latest"
+				disabled={imageLoading || vmImages.length === 0}
 				required
-			/>
+			>
+				{#if imageLoading}
+					<option value={createForm.image_reference}>正在从 Azure 官方 API 查询系统镜像...</option>
+				{:else if vmImages.length === 0}
+					<option value={createForm.image_reference}>{imageError || '暂无可选择系统，请先选择账号和区域'}</option>
+				{:else}
+					{#each vmImages as image}
+						<option value={image.imageReference}>{imageLabel(image)}</option>
+					{/each}
+				{/if}
+			</select>
+			{#if imageError}
+				<p class="mt-1 text-xs text-red-300">{imageError}</p>
+			{/if}
 			<p class="mt-1 break-all text-xs text-muted">{createForm.image_reference}</p>
 		</div>
 		<div class="grid gap-3 md:grid-cols-2">
