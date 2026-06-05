@@ -1096,10 +1096,15 @@ function findFamilyQuota(capability: VmCapability, index: QuotaIndex) {
 	);
 }
 
-function applyQuotaToCapabilities(capabilities: VmCapability[], quotas: ComputeQuota[]) {
+function applyQuotaToCapabilities(
+	capabilities: VmCapability[],
+	quotas: ComputeQuota[],
+	options: { restrictByQuota?: boolean } = {}
+) {
 	const quotaIndex = buildQuotaIndex(quotas);
 	const totalQuota = quotaIndex.totalQuota;
 	const totalRemaining = totalQuota?.remaining ?? 0;
+	const restrictByQuota = options.restrictByQuota ?? true;
 
 	return capabilities.map((capability) => {
 		const reasons = [...capability.restrictionReasons];
@@ -1130,7 +1135,7 @@ function applyQuotaToCapabilities(capabilities: VmCapability[], quotas: ComputeQ
 
 		return {
 			...capability,
-			restricted: capability.restricted || quotaRestricted,
+			restricted: capability.restricted || (restrictByQuota && quotaRestricted),
 			restrictionReasons: [...new Set(reasons)],
 			quotaName: effectiveQuota?.name ?? '',
 			quotaLocalizedName: effectiveQuota?.localizedName ?? '',
@@ -1357,7 +1362,7 @@ export async function listVmCapabilities(
 		listComputeQuotas(clients, location)
 	]);
 	const merged = mergeVisibleVmCapabilities(resourceSkus, legacySizes);
-	const quotaAware = applyQuotaToCapabilities(merged, quotas);
+	const quotaAware = applyQuotaToCapabilities(merged, quotas, { restrictByQuota: false });
 	const available = quotaAware
 		.filter((sku) => !sku.restricted)
 		.sort((a, b) => byCapacity(a, b));
@@ -1388,6 +1393,30 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 		throw new Error('Azure 官方 API 没有返回当前订阅可创建 VM 的区域');
 	}
 
+	const availableRegions: AzureRegionOption[] = [];
+	for (const [name, candidates] of byRegion) {
+		const available = candidates
+			.filter((capability) => !capability.restricted)
+			.sort((a, b) => byCapacity(a, b));
+		if (available.length === 0) continue;
+		availableRegions.push({
+			name,
+			displayName: displayLocationName(name),
+			availableSizeCount: available.length,
+			highestCoreSize: selectLargest(available, 'cores'),
+			largestMemorySize: selectLargest(available, 'memoryGB')
+		});
+	}
+	availableRegions.sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+	if (availableRegions.length === 0) {
+		throw new Error('Azure 官方 API 没有返回当前订阅可创建 VM 的区域');
+	}
+	return availableRegions;
+}
+
+export async function listQuotaFilteredVmRegions(clients: AzureClients): Promise<AzureRegionOption[]> {
+	const byRegion = await listResourceSkuCapabilitiesByRegion(clients);
 	const configuredScanLimit = Number(readEnv('AZURE_REGION_SCAN_LIMIT') ?? byRegion.size);
 	const configuredConcurrency = Number(readEnv('AZURE_REGION_SCAN_CONCURRENCY') ?? 6);
 	const maxScan =

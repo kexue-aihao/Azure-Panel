@@ -247,7 +247,7 @@
 			if (regions.length === 0) {
 				location = '';
 				createForm.location = '';
-				toast = '当前账号没有识别到配额足够且官方允许创建 VM 的区域';
+				toast = '当前账号没有识别到 Azure 返回的 VM 区域';
 				return false;
 			}
 			if (regions.length && !regions.some((region) => region.name === location)) {
@@ -305,7 +305,7 @@
 			if (capabilities.available.length === 0) {
 				createForm.vm_size = '';
 			}
-			toast = `已识别 ${capabilities.available.length} 个当前账号可用规格`;
+			toast = `已识别 ${capabilities.available.length} 个 ${location} 可用规格`;
 		} catch (err) {
 			capabilities = null;
 			createForm.vm_size = '';
@@ -390,7 +390,7 @@
 		if (!accountId) return;
 		createForm.location = location;
 		if (!capabilities?.available.some((item) => item.name === createForm.vm_size)) {
-			toast = '请先从 Azure 查询并选择当前区域可开的实例规格';
+			toast = '请先从 Azure 查询并选择当前区域规格';
 			return;
 		}
 		if (!images.some((item) => item.imageReference === createForm.image_reference)) {
@@ -624,7 +624,7 @@
 					{:else}
 						{#each regions as region}
 							<option value={region.name}>
-								{region.displayName} ({region.name}) · {region.availableSizeCount} 个可创建规格
+								{region.displayName} ({region.name}) · {region.availableSizeCount} 个规格
 							</option>
 						{/each}
 					{/if}
@@ -638,7 +638,7 @@
 				{regionsLoading ? '识别区域中...' : '重新识别区域'}
 			</button>
 			<button class="btn-secondary" onclick={() => void loadCapabilities()} disabled={capabilityLoading}>
-				{capabilityLoading ? '查询中...' : '查询可开型号'}
+				{capabilityLoading ? '查询中...' : '查询区域规格'}
 			</button>
 			<button class="btn-secondary" onclick={() => void loadQuotas()} disabled={quotaLoading}>
 				{quotaLoading ? '查询中...' : '查询区域配额'}
@@ -762,13 +762,11 @@
 					{:else if capabilities?.available.length}
 						{#each capabilities.available as item}
 							<option value={item.name}>
-								{item.name} · {item.cores} vCPU · {item.memoryGB}GB · 配额 {item.quotaLocalizedName ||
-									item.quotaName ||
-									'区域总量'} 剩余 {item.quotaRemaining}
+								{item.name} · {item.cores} vCPU · {item.memoryGB}GB
 							</option>
 						{/each}
 					{:else}
-						<option value={createForm.vm_size}>请先选择区域并查询可开型号</option>
+						<option value={createForm.vm_size}>请先选择区域并查询规格</option>
 					{/if}
 				</select>
 			</div>
