@@ -1,7 +1,8 @@
 import { maskProxyUrl, validateAzureCredentials, validateProxyUrl } from '$lib/server/azure';
+import { ensureClientIpProxyProfile } from '$lib/server/auto-client-ip-proxy';
 import { encryptSecret } from '$lib/server/crypto';
 import { findProxyProfileByUser, insertAccount } from '$lib/server/db/repo';
-import { fail, ok, requireUser } from '$lib/server/http';
+import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import { publicProxyProfile, proxyProfileToRuntime } from '$lib/server/proxy';
 import type { RequestHandler } from './$types';
 
@@ -14,6 +15,7 @@ export const POST: RequestHandler = async (event) => {
 	const clientId = String(body.client_id ?? '');
 	const clientSecret = String(body.client_secret ?? '');
 	const proxyUrl = String(body.proxy_url ?? '').trim();
+	const proxyMode = String(body.proxy_mode ?? '');
 	const proxyProfileId = Number(body.proxy_profile_id ?? 0) || null;
 	const remark = String(body.remark ?? '');
 
@@ -29,10 +31,21 @@ export const POST: RequestHandler = async (event) => {
 		}
 	}
 
-	const proxyProfile = proxyProfileId ? await findProxyProfileByUser(user.id, proxyProfileId) : null;
+	const clientIp = getRequestClientIp(event);
+	let proxyProfile = null;
+	try {
+		proxyProfile =
+			proxyMode === 'client_ip'
+				? await ensureClientIpProxyProfile(user.id, clientIp)
+				: proxyProfileId
+					? await findProxyProfileByUser(user.id, proxyProfileId)
+					: null;
+	} catch (err) {
+		return fail(err instanceof Error ? err.message : '当前访问 IP 代理自动识别失败');
+	}
 	if (proxyProfileId && !proxyProfile) return fail('代理配置不存在');
 	const runtimeProxy = proxyProfile
-		? proxyProfileToRuntime(proxyProfile, { clientIp: event.getClientAddress() })
+		? proxyProfileToRuntime(proxyProfile, { clientIp })
 		: proxyUrl;
 
 	let subscriptionId = '';

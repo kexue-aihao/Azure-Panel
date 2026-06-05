@@ -1,6 +1,6 @@
 ﻿import { getUserAccountWithProxy } from '$lib/server/accounts';
 import { createAzureClients, createVmAdvanced } from '$lib/server/azure';
-import { fail, ok, requireUser } from '$lib/server/http';
+import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
 export const POST: RequestHandler = async (event) => {
@@ -15,7 +15,9 @@ export const POST: RequestHandler = async (event) => {
 	if (!accountId || !resourceGroup || !location || !vmName) return fail('参数不完整');
 	if (!adminPassword) return fail('缺少管理员密码');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, { clientIp: event.getClientAddress() });
+	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
+		clientIp: getRequestClientIp(event)
+	});
 	try {
 		const result = await createVmAdvanced(createAzureClients(account, proxy), {
 			resourceGroup,

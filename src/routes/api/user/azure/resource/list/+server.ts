@@ -1,6 +1,6 @@
 ﻿import { getUserAccountWithProxy } from '$lib/server/accounts';
 import { createAzureClients, listVirtualMachines } from '$lib/server/azure';
-import { fail, ok, requireUser } from '$lib/server/http';
+import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async (event) => {
@@ -9,7 +9,9 @@ export const GET: RequestHandler = async (event) => {
 	const resourceGroup = event.url.searchParams.get('resource_group') ?? undefined;
 	if (!accountId) return fail('缺少 account_id');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, { clientIp: event.getClientAddress() });
+	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
+		clientIp: getRequestClientIp(event)
+	});
 	const clients = createAzureClients(account, proxy);
 
 	try {

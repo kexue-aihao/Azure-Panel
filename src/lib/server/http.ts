@@ -12,3 +12,20 @@ export function fail(message: string, status = 400) {
 export async function requireUser(event: RequestEvent) {
 	return getUserFromAuthHeader(event.request.headers.get('authorization'));
 }
+
+function firstHeaderIp(value: string | null) {
+	return value
+		?.split(',')
+		.map((item) => item.trim())
+		.find(Boolean);
+}
+
+export function getRequestClientIp(event: RequestEvent) {
+	const headers = event.request.headers;
+	const forwarded =
+		firstHeaderIp(headers.get('cf-connecting-ip')) ??
+		firstHeaderIp(headers.get('x-real-ip')) ??
+		firstHeaderIp(headers.get('x-forwarded-for'));
+	const raw = forwarded ?? event.getClientAddress();
+	return raw.trim().replace(/^\[(.*)\]$/, '$1').replace(/^::ffff:/, '');
+}

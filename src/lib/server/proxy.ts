@@ -5,6 +5,15 @@ import type { ProxyProfile } from './db/schema';
 
 export const CLIENT_IP_PROXY_HOST = '__client_ip__';
 export const PROXY_TYPES = ['http', 'https', 'socks4', 'socks4a', 'socks5', 'shadowsocks'] as const;
+export const AUTO_CLIENT_IP_PROXY_NAME = '当前访问网站 IP（自动识别）';
+export const AUTO_CLIENT_IP_PROXY_CANDIDATES = [
+	{ type: 'http', port: 7890, label: 'HTTP 7890' },
+	{ type: 'socks5', port: 10808, label: 'SOCKS5 10808' },
+	{ type: 'socks5', port: 1080, label: 'SOCKS5 1080' },
+	{ type: 'http', port: 8080, label: 'HTTP 8080' },
+	{ type: 'http', port: 10809, label: 'HTTP 10809' },
+	{ type: 'http', port: 7897, label: 'HTTP 7897' }
+] as const satisfies { type: ProxyType; port: number; label: string }[];
 export type ProxyType = (typeof PROXY_TYPES)[number];
 export type ProxySource = 'fixed' | 'client_ip';
 

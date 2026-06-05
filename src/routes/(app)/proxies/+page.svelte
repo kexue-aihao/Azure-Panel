@@ -17,7 +17,22 @@
 		method: string;
 	};
 
+	type ClientIpProxyStatus = {
+		client_ip: string;
+		available: boolean;
+		message: string;
+		profile: ProxyProfile | null;
+		candidates: {
+			type: string;
+			port: number;
+			label: string;
+			available: boolean;
+			error: string;
+		}[];
+	};
+
 	let proxies = $state<ProxyProfile[]>([]);
+	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
 	let form = $state({
 		name: '',
 		type: 'http' as ProxyType,
@@ -47,9 +62,15 @@
 
 	let requiresUsername = $derived(form.type === 'http' || form.type === 'https' || form.type === 'socks5');
 	let isShadowsocks = $derived(form.type === 'shadowsocks');
+	let customProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
 
 	async function load() {
-		proxies = await api<ProxyProfile[]>('/api/user/proxy/list');
+		const [proxyList, detected] = await Promise.all([
+			api<ProxyProfile[]>('/api/user/proxy/list'),
+			api<ClientIpProxyStatus>('/api/user/proxy/client-ip')
+		]);
+		proxies = proxyList;
+		clientIpProxy = detected;
 	}
 
 	async function submit(e: Event) {
@@ -126,8 +147,8 @@
 		<div>
 			<h2 class="text-lg font-medium">添加自托管代理</h2>
 			<p class="mt-1 text-sm text-muted">
-				这里配置的是后端访问 Azure API 的出站代理。可用固定主机，也可以使用当前访问网站的
-				IP 作为代理主机，但该 IP 必须真的运行了对应代理端口。
+				这里配置的是固定自托管代理，例如本机 Clash/V2rayN 或远程 HTTP/SOCKS 代理。
+				当前访问网站 IP 会由系统自动识别，不需要在这里额外添加。
 			</p>
 		</div>
 
@@ -164,24 +185,12 @@
 			{/if}
 		</div>
 
-		<div class="grid gap-3 sm:grid-cols-2">
-			<label class="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm">
-				<input type="radio" bind:group={form.source} value="fixed" />
-				固定主机
-			</label>
-			<label class="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm">
-				<input type="radio" bind:group={form.source} value="client_ip" />
-				使用当前访问网站 IP
-			</label>
-		</div>
-
 		<div class="grid gap-3 sm:grid-cols-[1fr_130px]">
 			<input
 				class="input"
 				bind:value={form.host}
-				placeholder={form.source === 'client_ip' ? '自动使用当前访问 IP' : '主机名'}
-				disabled={form.source === 'client_ip'}
-				required={form.source === 'fixed'}
+				placeholder="主机名，例如 127.0.0.1"
+				required
 			/>
 			<input
 				class="input"
@@ -206,7 +215,7 @@
 		/>
 
 		<p class="text-xs text-muted">
-			保存前会验证代理端口可连接。当前访问网站 IP 模式要求访问者 IP 上已开放对应代理端口。
+			保存前会验证代理端口可连接。账号添加页可直接选择“当前访问网站 IP（自动识别）”。
 		</p>
 		<button class="btn-primary" type="submit">验证并提交</button>
 	</form>
@@ -240,12 +249,24 @@
 					<td class="p-3 text-muted">-</td>
 					<td class="p-3 text-muted">默认可选</td>
 				</tr>
-				{#if proxies.length === 0}
+				<tr class="border-b border-border/60">
+					<td class="p-3 font-medium">当前访问网站 IP</td>
+					<td class="p-3 text-muted">AUTO</td>
+					<td class="p-3 text-muted">{clientIpProxy?.client_ip || '识别中'}</td>
+					<td class="p-3 text-muted">
+						{clientIpProxy?.profile ? clientIpProxy.profile.port : '自动探测'}
+					</td>
+					<td class="p-3 text-muted">无</td>
+					<td class="p-3 {clientIpProxy?.available ? 'text-emerald-300' : 'text-muted'}">
+						{clientIpProxy?.message ?? '正在识别'}
+					</td>
+				</tr>
+				{#if customProxies.length === 0}
 					<tr>
 						<td class="p-3 text-muted" colspan="6">还没有自定义代理配置</td>
 					</tr>
 				{:else}
-					{#each proxies as proxy}
+					{#each customProxies as proxy}
 						<tr class="border-b border-border/60">
 							<td class="p-3">
 								<div class="font-medium">{proxy.name}</div>

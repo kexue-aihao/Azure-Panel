@@ -1,6 +1,6 @@
 import { encryptSecret } from '$lib/server/crypto';
 import { insertProxyProfile } from '$lib/server/db/repo';
-import { fail, ok, requireUser } from '$lib/server/http';
+import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import {
 	CLIENT_IP_PROXY_HOST,
 	normalizeProxyRuntime,
@@ -29,7 +29,7 @@ export const POST: RequestHandler = async (event) => {
 			password: String(body.password ?? ''),
 			method: String(body.method ?? '')
 		});
-		await validateProxyConnection(proxy, { clientIp: event.getClientAddress() });
+		await validateProxyConnection(proxy, { clientIp: getRequestClientIp(event) });
 	} catch (err) {
 		return fail(err instanceof Error ? err.message : '代理配置无效');
 	}

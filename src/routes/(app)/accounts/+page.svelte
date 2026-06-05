@@ -23,8 +23,23 @@
 		label: string;
 	};
 
+	type ClientIpProxyStatus = {
+		client_ip: string;
+		available: boolean;
+		message: string;
+		profile: ProxyProfile | null;
+		candidates: {
+			type: string;
+			port: number;
+			label: string;
+			available: boolean;
+			error: string;
+		}[];
+	};
+
 	let accounts = $state<Account[]>([]);
 	let proxies = $state<ProxyProfile[]>([]);
+	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
 	let form = $state({
 		tenant_id: '',
 		client_id: '',
@@ -34,7 +49,6 @@
 	});
 	let toast = $state('');
 	let fixedProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
-	let clientIpProxies = $derived(proxies.filter((proxy) => proxy.source === 'client_ip'));
 
 	function resetForm() {
 		form = {
@@ -52,7 +66,12 @@
 			return;
 		}
 
-		const options = form.proxy_mode === 'client_ip' ? clientIpProxies : fixedProxies;
+		if (form.proxy_mode === 'client_ip') {
+			form.proxy_profile_id = '';
+			return;
+		}
+
+		const options = fixedProxies;
 		if (!options.some((proxy) => String(proxy.id) === form.proxy_profile_id)) {
 			form.proxy_profile_id = options[0] ? String(options[0].id) : '';
 		}
@@ -68,14 +87,25 @@
 		syncProxySelection();
 	}
 
+	async function loadClientIpProxy() {
+		try {
+			clientIpProxy = await api<ClientIpProxyStatus>('/api/user/proxy/client-ip');
+		} catch (err) {
+			clientIpProxy = {
+				client_ip: '',
+				available: false,
+				profile: null,
+				candidates: [],
+				message: err instanceof Error ? err.message : '当前访问 IP 识别失败'
+			};
+		}
+	}
+
 	async function submit(e: Event) {
 		e.preventDefault();
 		syncProxySelection();
-		if (form.proxy_mode !== 'direct' && !form.proxy_profile_id) {
-			toast =
-				form.proxy_mode === 'client_ip'
-					? '请先在“代理配置”添加一个使用当前访问网站 IP 的代理档案'
-					: '请先选择一个自定义代理档案';
+		if (form.proxy_mode === 'profile' && !form.proxy_profile_id) {
+			toast = '请先选择一个自定义代理档案';
 			return;
 		}
 
@@ -83,7 +113,8 @@
 			tenant_id: form.tenant_id,
 			client_id: form.client_id,
 			client_secret: form.client_secret,
-			proxy_profile_id: form.proxy_mode === 'direct' ? '' : form.proxy_profile_id
+			proxy_mode: form.proxy_mode,
+			proxy_profile_id: form.proxy_mode === 'profile' ? form.proxy_profile_id : ''
 		};
 
 		try {
@@ -112,6 +143,7 @@
 
 	onMount(() => {
 		void load();
+		void loadClientIpProxy();
 	});
 </script>
 
@@ -147,23 +179,25 @@
 				onchange={syncProxySelection}
 			>
 				<option value="direct">不使用代理（服务器源站 IP）</option>
-				<option value="client_ip">使用当前访问网站 IP 的代理档案</option>
+				<option value="client_ip">使用当前访问网站 IP（自动识别）</option>
 				<option value="profile">选择自定义代理档案</option>
 			</select>
 		</div>
 
 		{#if form.proxy_mode === 'client_ip'}
-			{#if clientIpProxies.length === 0}
-				<div class="rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted">
-					还没有“当前访问网站 IP”代理档案，请先到“代理配置”添加。该访问者 IP
-					必须运行对应的 HTTP/SOCKS/Shadowsocks 代理端口。
+			{#if clientIpProxy}
+				<div
+					class="rounded-lg border border-border bg-background px-3 py-2 text-sm {clientIpProxy.available
+						? 'text-emerald-300'
+						: 'text-muted'}"
+				>
+					<div>识别 IP: {clientIpProxy.client_ip || '-'}</div>
+					<div>{clientIpProxy.message}</div>
 				</div>
 			{:else}
-				<select class="input" bind:value={form.proxy_profile_id} required>
-					{#each clientIpProxies as proxy}
-						<option value={String(proxy.id)}>{proxy.name} - {proxy.label}</option>
-					{/each}
-				</select>
+				<div class="rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted">
+					正在识别当前访问网站 IP...
+				</div>
 			{/if}
 		{:else if form.proxy_mode === 'profile'}
 			{#if fixedProxies.length === 0}
