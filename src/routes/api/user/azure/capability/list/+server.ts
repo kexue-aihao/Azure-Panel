@@ -9,10 +9,10 @@ export const GET: RequestHandler = async (event) => {
 	const location = String(event.url.searchParams.get('location') ?? '').trim();
 	if (!accountId || !location) return fail('缺少 account_id 或 location');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
-		clientIp: getRequestClientIp(event)
-	});
 	try {
+		const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
+			clientIp: getRequestClientIp(event)
+		});
 		const result = await listVmCapabilities(createAzureClients(account, proxy), location);
 		return ok({
 			location: result.location,
@@ -22,6 +22,6 @@ export const GET: RequestHandler = async (event) => {
 			largest_memory_size: result.largestMemorySize
 		});
 	} catch (err) {
-		return fail(String(err), 500);
+		return fail(err instanceof Error ? err.message : String(err), 500);
 	}
 };

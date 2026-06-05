@@ -28,6 +28,7 @@ import {
 	parseProxyUrl,
 	type ProxyRuntimeConfig
 } from './proxy';
+import { readEnv } from './runtime-env';
 
 export type VmInfo = {
 	name: string;
@@ -287,6 +288,33 @@ const LOCATION_DISPLAY_NAMES: Record<string, string> = {
 	westus2: 'West US 2',
 	westus3: 'West US 3'
 };
+
+const REGION_SCAN_PRIORITY = [
+	'malaysiawest',
+	'eastasia',
+	'southeastasia',
+	'japaneast',
+	'japanwest',
+	'koreacentral',
+	'koreasouth',
+	'australiaeast',
+	'eastus',
+	'eastus2',
+	'centralus',
+	'southcentralus',
+	'westus',
+	'westus2',
+	'westus3',
+	'northcentralus',
+	'uksouth',
+	'ukwest',
+	'northeurope',
+	'westeurope',
+	'francecentral',
+	'germanywestcentral',
+	'swedencentral',
+	'canadacentral'
+];
 
 const FEATURED_IMAGE_CANDIDATES = [
 	{
@@ -693,6 +721,34 @@ function isAzureRegionOption(region: AzureRegionOption | null): region is AzureR
 	return region !== null;
 }
 
+function azureErrorMessage(err: unknown) {
+	if (err instanceof Error && err.message) return err.message;
+	const record = err as {
+		message?: unknown;
+		code?: unknown;
+		statusCode?: unknown;
+		body?: { error?: { message?: unknown; code?: unknown } };
+	};
+	const bodyMessage = record?.body?.error?.message;
+	const bodyCode = record?.body?.error?.code;
+	if (bodyMessage) return String(bodyMessage);
+	if (record?.message) return String(record.message);
+	if (bodyCode) return String(bodyCode);
+	if (record?.code) return String(record.code);
+	if (record?.statusCode) return `Azure 请求失败 (${record.statusCode})`;
+	return String(err);
+}
+
+function rankRegionEntries(entries: [string, VmCapability[]][]) {
+	const rank = new Map(REGION_SCAN_PRIORITY.map((name, index) => [name, index]));
+	return [...entries].sort(([a], [b]) => {
+		const rankA = rank.get(a) ?? Number.MAX_SAFE_INTEGER;
+		const rankB = rank.get(b) ?? Number.MAX_SAFE_INTEGER;
+		if (rankA !== rankB) return rankA - rankB;
+		return displayLocationName(a).localeCompare(displayLocationName(b));
+	});
+}
+
 function quotaKey(value: string) {
 	return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -757,8 +813,7 @@ function applyQuotaToCapabilities(capabilities: VmCapability[], quotas: ComputeQ
 		}
 		if (capability.family) {
 			if (!familyQuota) {
-				quotaRestricted = true;
-				reasons.push(`MissingFamilyQuota:${capability.family}`);
+				reasons.push(`UnmatchedFamilyQuota:${capability.family}`);
 			} else if (familyQuota.remaining < required) {
 				quotaRestricted = true;
 				reasons.push(`${familyQuota.name || familyQuota.localizedName}Remaining:${familyQuota.remaining}`);
@@ -933,21 +988,38 @@ export async function listVmCapabilities(
 export async function listAvailableVmRegions(clients: AzureClients): Promise<AzureRegionOption[]> {
 	const byRegion = new Map<string, VmCapability[]>();
 
-	for await (const sku of clients.compute.resourceSkus.list()) {
-		if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
-		for (const region of sku.locations ?? []) {
-			const location = region.toLowerCase();
-			const capability = skuToCapability(sku, location);
-			if (capability.restricted) continue;
-			const list = byRegion.get(location) ?? [];
-			list.push(capability);
-			byRegion.set(location, list);
+	try {
+		for await (const sku of clients.compute.resourceSkus.list()) {
+			if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
+			for (const region of sku.locations ?? []) {
+				const location = region.toLowerCase();
+				const capability = skuToCapability(sku, location);
+				if (capability.restricted) continue;
+				const list = byRegion.get(location) ?? [];
+				list.push(capability);
+				byRegion.set(location, list);
+			}
 		}
+	} catch (err) {
+		throw new Error(`查询 Azure 官方可用规格失败：${azureErrorMessage(err)}`);
 	}
 
-	const regions = await mapWithConcurrency([...byRegion.entries()], 4, async ([name, candidates]) => {
-		const quotas = await listComputeQuotas(clients, name).catch(() => []);
-		if (quotas.length === 0) return null;
+	if (byRegion.size === 0) {
+		throw new Error('Azure 官方 API 没有返回当前订阅可创建 VM 的区域');
+	}
+
+	const configuredScanLimit = Number(readEnv('AZURE_REGION_SCAN_LIMIT') ?? 24);
+	const maxScan = Number.isFinite(configuredScanLimit) ? Math.max(1, configuredScanLimit) : 24;
+	const entries = rankRegionEntries([...byRegion.entries()]).slice(0, maxScan);
+	const quotaErrors: string[] = [];
+	const regions = await mapWithConcurrency(entries, 3, async ([name, candidates]) => {
+		const quotas = await listComputeQuotas(clients, name).catch((err) => {
+			quotaErrors.push(`${name}: ${azureErrorMessage(err)}`);
+			return [];
+		});
+		if (quotas.length === 0) {
+			return null;
+		}
 		const available = applyQuotaToCapabilities(candidates, quotas)
 			.filter((capability) => !capability.restricted)
 			.sort((a, b) => byCapacity(a, b));
@@ -962,9 +1034,19 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 		return region;
 	});
 
-	return regions
+	const availableRegions = regions
 		.filter(isAzureRegionOption)
 		.sort((a, b) => a.displayName.localeCompare(b.displayName));
+	if (availableRegions.length === 0) {
+		const scanned = entries.map(([name]) => name).join('、');
+		const failed = quotaErrors.slice(0, 5).join('；');
+		throw new Error(
+			`未识别到可创建 VM 的区域。已检查 ${entries.length}/${byRegion.size} 个候选区域：${scanned}。` +
+				`请确认该订阅有 Compute vCPU 配额；如需扩大扫描可在 .env 设置 AZURE_REGION_SCAN_LIMIT=60。` +
+				(failed ? ` 配额查询失败示例：${failed}` : '')
+		);
+	}
+	return availableRegions;
 }
 
 export async function listResourceGroups(clients: AzureClients): Promise<AzureResourceGroupInfo[]> {

@@ -9,12 +9,11 @@ export const GET: RequestHandler = async (event) => {
 	const resourceGroup = event.url.searchParams.get('resource_group') ?? undefined;
 	if (!accountId) return fail('缺少 account_id');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
-		clientIp: getRequestClientIp(event)
-	});
-	const clients = createAzureClients(account, proxy);
-
 	try {
+		const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
+			clientIp: getRequestClientIp(event)
+		});
+		const clients = createAzureClients(account, proxy);
 		const vms = await listVirtualMachines(clients, resourceGroup);
 		return ok(
 			vms.map((vm) => ({
@@ -29,6 +28,6 @@ export const GET: RequestHandler = async (event) => {
 			}))
 		);
 	} catch (err) {
-		return fail(String(err), 500);
+		return fail(err instanceof Error ? err.message : String(err), 500);
 	}
 };

@@ -8,12 +8,12 @@ export const GET: RequestHandler = async (event) => {
 	const accountId = Number(event.url.searchParams.get('account_id'));
 	if (!accountId) return fail('缺少 account_id');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
-		clientIp: getRequestClientIp(event)
-	});
 	try {
+		const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
+			clientIp: getRequestClientIp(event)
+		});
 		return ok(await listAvailableVmRegions(createAzureClients(account, proxy)));
 	} catch (err) {
-		return fail(String(err), 500);
+		return fail(err instanceof Error ? err.message : String(err), 500);
 	}
 };

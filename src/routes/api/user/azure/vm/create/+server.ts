@@ -17,10 +17,10 @@ export const POST: RequestHandler = async (event) => {
 	if (!accountId || !location) return fail('参数不完整');
 	if (!adminPassword) return fail('缺少管理员密码');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
-		clientIp: getRequestClientIp(event)
-	});
 	try {
+		const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
+			clientIp: getRequestClientIp(event)
+		});
 		const result = await createVmAdvanced(createAzureClients(account, proxy), {
 			resourceGroup,
 			location,
@@ -44,6 +44,6 @@ export const POST: RequestHandler = async (event) => {
 			ip_brush_matched: result.ipBrushMatched
 		});
 	} catch (err) {
-		return fail(String(err), 500);
+		return fail(err instanceof Error ? err.message : String(err), 500);
 	}
 };

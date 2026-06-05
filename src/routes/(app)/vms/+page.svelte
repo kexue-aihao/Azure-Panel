@@ -158,21 +158,29 @@
 	async function loadRegions() {
 		if (!accountId) {
 			regions = [];
-			return;
+			return false;
 		}
 
 		regionsLoading = true;
 		try {
 			const params = new URLSearchParams({ account_id: String(accountId) });
 			regions = await api<RegionOption[]>(`/api/user/azure/region/list?${params}`);
+			if (regions.length === 0) {
+				location = '';
+				createForm.location = '';
+				toast = '当前账号没有识别到配额足够且官方允许创建 VM 的区域';
+				return false;
+			}
 			if (regions.length && !regions.some((region) => region.name === location)) {
 				location = regions[0].name;
 			}
 			createForm.location = location;
 			toast = `已识别 ${regions.length} 个当前账号可开机区域`;
+			return true;
 		} catch (err) {
 			regions = [];
 			toast = err instanceof Error ? err.message : '区域查询失败';
+			return false;
 		} finally {
 			regionsLoading = false;
 		}
@@ -272,8 +280,12 @@
 		capabilities = null;
 		quotas = [];
 		images = [];
-		await loadRegions();
-		await Promise.all([loadVms(), loadRegionDetails()]);
+		const loadedRegions = await loadRegions();
+		if (loadedRegions) {
+			await Promise.all([loadVms(), loadRegionDetails()]);
+		} else {
+			await loadVms();
+		}
 	}
 
 	async function changeLocation() {
