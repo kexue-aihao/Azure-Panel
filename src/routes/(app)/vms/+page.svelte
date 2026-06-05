@@ -622,7 +622,9 @@
 					{:else if capabilities?.available.length}
 						{#each capabilities.available as item}
 							<option value={item.name}>
-								{item.name} · {item.cores} vCPU · {item.memoryGB}GB · 剩余 {item.quotaRemaining}
+								{item.name} · {item.cores} vCPU · {item.memoryGB}GB · 配额 {item.quotaLocalizedName ||
+									item.quotaName ||
+									'区域总量'} 剩余 {item.quotaRemaining}
 							</option>
 						{/each}
 					{:else}

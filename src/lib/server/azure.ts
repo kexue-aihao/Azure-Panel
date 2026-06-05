@@ -685,7 +685,8 @@ function isLocationRestricted(sku: ResourceSku, location: string): boolean {
 		sku.restrictions?.some((restriction) => {
 			return (
 				restrictionAppliesToLocation(restriction, location) &&
-				isLocationWideRestriction(restriction)
+				isLocationWideRestriction(restriction) &&
+				restriction.reasonCode === 'NotAvailableForSubscription'
 			);
 		}) ?? false
 	);
@@ -787,12 +788,8 @@ function mergeVmCapabilities(...groups: VmCapability[][]) {
 	return [...byName.values()];
 }
 
-function mergeAuthoritativeCapabilities(authoritative: VmCapability[], supplemental: VmCapability[]) {
-	const authoritativeNames = new Set(authoritative.map((item) => item.name.toLowerCase()));
-	return mergeVmCapabilities(
-		authoritative,
-		supplemental.filter((item) => authoritativeNames.has(item.name.toLowerCase()))
-	);
+function mergeVisibleVmCapabilities(authoritative: VmCapability[], supplemental: VmCapability[]) {
+	return mergeVmCapabilities(authoritative, supplemental);
 }
 
 function byCapacity(a: VmCapability, b: VmCapability) {
@@ -902,7 +899,7 @@ function quotaFamilyKeys(quota: ComputeQuota) {
 function matchesFamilyQuotaKey(candidate: string, keys: string[], allowPrefix: boolean) {
 	if (keys.some((key) => key === candidate || key === `${candidate}vcpus`)) return true;
 	if (!allowPrefix || candidate.length < 2) return false;
-	return keys.some((key) => key.startsWith(candidate) || candidate.startsWith(key));
+	return keys.some((key) => key.startsWith(candidate) || (key.length >= 2 && candidate.startsWith(key)));
 }
 
 function findQuotaByFamilyCandidate(
@@ -1149,7 +1146,7 @@ export async function listVmCapabilities(
 		listVmSizeCapabilitiesForLocation(clients, location).catch(() => []),
 		listComputeQuotas(clients, location)
 	]);
-	const merged = mergeAuthoritativeCapabilities(resourceSkus, legacySizes);
+	const merged = mergeVisibleVmCapabilities(resourceSkus, legacySizes);
 	const quotaAware = applyQuotaToCapabilities(merged, quotas);
 	const available = quotaAware
 		.filter((sku) => !sku.restricted)
@@ -1206,7 +1203,7 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 			return null;
 		}
 		const legacySizes = await listVmSizeCapabilitiesForLocation(clients, name).catch(() => []);
-		const available = applyQuotaToCapabilities(mergeAuthoritativeCapabilities(candidates, legacySizes), quotas)
+		const available = applyQuotaToCapabilities(mergeVisibleVmCapabilities(candidates, legacySizes), quotas)
 			.filter((capability) => !capability.restricted)
 			.sort((a, b) => byCapacity(a, b));
 		if (available.length === 0) return null;
