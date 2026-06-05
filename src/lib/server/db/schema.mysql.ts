@@ -14,6 +14,18 @@ export const users = mysqlTable('users', {
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });
 
+export const proxyProfiles = mysqlTable('proxy_profiles', {
+	id: int('id').primaryKey().autoincrement(),
+	userId: int('user_id').notNull(),
+	name: varchar('name', { length: 120 }).notNull(),
+	type: varchar('type', { length: 16 }).notNull(),
+	host: varchar('host', { length: 255 }).notNull(),
+	port: int('port').notNull(),
+	usernameEncrypted: text('username_encrypted').default(''),
+	passwordEncrypted: text('password_encrypted').default(''),
+	createdAt: timestamp('created_at').notNull().defaultNow()
+});
+
 export const azureAccounts = mysqlTable('azure_accounts', {
 	id: int('id').primaryKey().autoincrement(),
 	userId: int('user_id').notNull(),
@@ -22,6 +34,7 @@ export const azureAccounts = mysqlTable('azure_accounts', {
 	clientId: varchar('client_id', { length: 64 }).notNull(),
 	clientSecretEncrypted: text('client_secret_encrypted').notNull(),
 	subscriptionId: varchar('subscription_id', { length: 64 }).notNull(),
+	proxyProfileId: int('proxy_profile_id'),
 	proxyUrlEncrypted: text('proxy_url_encrypted').default(''),
 	remark: varchar('remark', { length: 255 }).default(''),
 	createdAt: timestamp('created_at').notNull().defaultNow()
@@ -61,6 +74,7 @@ export const workflowLogs = mysqlTable('workflow_logs', {
 });
 
 export type User = typeof users.$inferSelect;
+export type ProxyProfile = typeof proxyProfiles.$inferSelect;
 export type AzureAccount = typeof azureAccounts.$inferSelect;
 export type WorkflowPolicy = typeof workflowPolicies.$inferSelect;
 export type WorkflowLog = typeof workflowLogs.$inferSelect;

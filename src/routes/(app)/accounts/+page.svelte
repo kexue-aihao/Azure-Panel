@@ -8,25 +8,40 @@
 		tenant_id: string;
 		client_id: string;
 		subscription_id: string;
+		proxy_profile_id: number | null;
 		proxy_enabled: boolean;
+		proxy_name: string;
 		proxy_label: string;
 		remark: string;
 	};
 
+	type ProxyProfile = {
+		id: number;
+		name: string;
+		type: 'http' | 'https' | 'socks4' | 'socks5';
+		label: string;
+	};
+
 	let accounts = $state<Account[]>([]);
+	let proxies = $state<ProxyProfile[]>([]);
 	let form = $state({
 		name: '',
 		tenant_id: '',
 		client_id: '',
 		client_secret: '',
 		subscription_id: '',
-		proxy_url: '',
+		proxy_profile_id: '',
 		remark: ''
 	});
 	let toast = $state('');
 
 	async function load() {
-		accounts = await api<Account[]>('/api/user/azure/account/list');
+		const [accountList, proxyList] = await Promise.all([
+			api<Account[]>('/api/user/azure/account/list'),
+			api<ProxyProfile[]>('/api/user/proxy/list')
+		]);
+		accounts = accountList;
+		proxies = proxyList;
 	}
 
 	async function submit(e: Event) {
@@ -43,7 +58,7 @@
 				client_id: '',
 				client_secret: '',
 				subscription_id: '',
-				proxy_url: '',
+				proxy_profile_id: '',
 				remark: ''
 			};
 			await load();
@@ -79,7 +94,7 @@
 		<h2 class="text-lg font-medium">添加 Service Principal</h2>
 		<p class="text-sm text-muted">
 			默认由部署本网站的服务器直接请求 Azure API，Azure 侧看到的是服务器源站出站 IP。
-			填写代理后，此账号的验证、VM 查询、开关机和自动补机会走代理出口 IP。
+			选择代理配置后，此账号的验证、VM 查询、开关机和自动补机会走代理出口 IP。
 		</p>
 		<input class="input" bind:value={form.name} placeholder="账号名称" required />
 		<input class="input" bind:value={form.tenant_id} placeholder="Tenant ID" required />
@@ -92,12 +107,15 @@
 			required
 		/>
 		<input class="input" bind:value={form.subscription_id} placeholder="Subscription ID" required />
-		<input
-			class="input"
-			bind:value={form.proxy_url}
-			placeholder="自托管代理（可选）：http://user:pass@host:port"
-		/>
-		<p class="text-xs text-muted">支持 HTTP/HTTPS 代理；如需认证，可把用户名密码写在代理 URL 中。</p>
+		<select class="input" bind:value={form.proxy_profile_id}>
+			<option value="">不使用代理（服务器源站 IP）</option>
+			{#each proxies as proxy}
+				<option value={String(proxy.id)}>{proxy.name} - {proxy.label}</option>
+			{/each}
+		</select>
+		<p class="text-xs text-muted">
+			如需 HTTP/SOCKS/本机代理，请先到“代理配置”添加，例如 127.0.0.1:7890。
+		</p>
 		<input class="input" bind:value={form.remark} placeholder="备注（可选）" />
 		<button class="btn-primary" type="submit">保存账号</button>
 	</form>
@@ -114,7 +132,9 @@
 						<div class="mt-1 text-xs text-muted">订阅: {account.subscription_id}</div>
 						<div class="text-xs text-muted">租户: {account.tenant_id}</div>
 						<div class="text-xs text-muted">
-							出站: {account.proxy_enabled ? `代理 ${account.proxy_label}` : '服务器源站 IP'}
+							出站: {account.proxy_enabled
+								? `代理 ${account.proxy_name ? `${account.proxy_name} ` : ''}${account.proxy_label}`
+								: '服务器源站 IP'}
 						</div>
 					</div>
 					<button class="btn-danger" onclick={() => void remove(account.id)}>删除</button>

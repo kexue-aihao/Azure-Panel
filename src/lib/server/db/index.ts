@@ -26,6 +26,19 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		PRIMARY KEY (id),
 		UNIQUE KEY users_email_unique (email)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS proxy_profiles (
+		id int NOT NULL AUTO_INCREMENT,
+		user_id int NOT NULL,
+		name varchar(120) NOT NULL,
+		type varchar(16) NOT NULL,
+		host varchar(255) NOT NULL,
+		port int NOT NULL,
+		username_encrypted text,
+		password_encrypted text,
+		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (id),
+		KEY proxy_profiles_user_id_idx (user_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS azure_accounts (
 		id int NOT NULL AUTO_INCREMENT,
 		user_id int NOT NULL,
@@ -34,11 +47,13 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		client_id varchar(64) NOT NULL,
 		client_secret_encrypted text NOT NULL,
 		subscription_id varchar(64) NOT NULL,
+		proxy_profile_id int NULL,
 		proxy_url_encrypted text,
 		remark varchar(255) DEFAULT '',
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
-		KEY azure_accounts_user_id_idx (user_id)
+		KEY azure_accounts_user_id_idx (user_id),
+		KEY azure_accounts_proxy_profile_id_idx (proxy_profile_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS workflow_policies (
 		id int NOT NULL AUTO_INCREMENT,
@@ -113,6 +128,14 @@ async function ensureMysqlSchema(pool: Pool) {
 	await pool.query('ALTER TABLE azure_accounts ADD COLUMN proxy_url_encrypted text NULL').catch((err) => {
 		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
 	});
+	await pool.query('ALTER TABLE azure_accounts ADD COLUMN proxy_profile_id int NULL').catch((err) => {
+		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+	});
+	await pool
+		.query('CREATE INDEX azure_accounts_proxy_profile_id_idx ON azure_accounts (proxy_profile_id)')
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_KEYNAME') throw err;
+		});
 }
 
 export async function initDatabase() {
@@ -155,6 +178,17 @@ export async function initDatabase() {
 			password_hash TEXT NOT NULL,
 			created_at INTEGER NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS proxy_profiles (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			type TEXT NOT NULL,
+			host TEXT NOT NULL,
+			port INTEGER NOT NULL,
+			username_encrypted TEXT DEFAULT '',
+			password_encrypted TEXT DEFAULT '',
+			created_at INTEGER NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS azure_accounts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -163,6 +197,7 @@ export async function initDatabase() {
 			client_id TEXT NOT NULL,
 			client_secret_encrypted TEXT NOT NULL,
 			subscription_id TEXT NOT NULL,
+			proxy_profile_id INTEGER REFERENCES proxy_profiles(id) ON DELETE SET NULL,
 			proxy_url_encrypted TEXT DEFAULT '',
 			remark TEXT DEFAULT '',
 			created_at INTEGER NOT NULL
@@ -201,5 +236,12 @@ export async function initDatabase() {
 	if (!columns.some((column) => column.name === 'proxy_url_encrypted')) {
 		sqlite.exec("ALTER TABLE azure_accounts ADD COLUMN proxy_url_encrypted TEXT DEFAULT ''");
 	}
+	if (!columns.some((column) => column.name === 'proxy_profile_id')) {
+		sqlite.exec('ALTER TABLE azure_accounts ADD COLUMN proxy_profile_id INTEGER');
+	}
+	sqlite.exec(`
+		CREATE INDEX IF NOT EXISTS proxy_profiles_user_id_idx ON proxy_profiles(user_id);
+		CREATE INDEX IF NOT EXISTS azure_accounts_proxy_profile_id_idx ON azure_accounts(proxy_profile_id);
+	`);
 	console.log('[db] Connected to SQLite:', dbPath);
 }

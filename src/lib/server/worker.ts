@@ -2,6 +2,7 @@ import { decryptSecret } from './crypto';
 import { getWorkerIntervalMs } from './env';
 import {
 	findAccountById,
+	findProxyProfileByUser,
 	insertWorkflowLog,
 	listEnabledWorkflows,
 	listEnabledWorkflowsByUser,
@@ -9,6 +10,7 @@ import {
 } from './db/repo';
 import { createAzureClients, createVmSimple, getPowerState, isRunning, startVm } from './azure';
 import type { WorkflowPolicy } from './db/schema';
+import { proxyProfileToRuntime } from './proxy';
 
 let timer: NodeJS.Timeout | null = null;
 const activePolicies = new Set<number>();
@@ -32,7 +34,13 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 				continue;
 			}
 
-			const clients = createAzureClients(account);
+			const proxyProfile = account.proxyProfileId
+				? await findProxyProfileByUser(account.userId, account.proxyProfileId)
+				: null;
+			const clients = createAzureClients(
+				account,
+				proxyProfile ? proxyProfileToRuntime(proxyProfile) : null
+			);
 			const vmNames = JSON.parse(policy.vmNamesJson || '[]') as string[];
 			const listed = clients.compute.virtualMachines.list(policy.resourceGroup);
 			const existing = new Set<string>();

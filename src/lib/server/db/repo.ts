@@ -1,14 +1,16 @@
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { getDriver, getMysqlDb, getSqliteDb } from './index';
-import type { AzureAccount, User, WorkflowLog, WorkflowPolicy } from './schema';
+import type { AzureAccount, ProxyProfile, User, WorkflowLog, WorkflowPolicy } from './schema';
 import {
 	azureAccounts as sqliteAzureAccounts,
+	proxyProfiles as sqliteProxyProfiles,
 	users as sqliteUsers,
 	workflowLogs as sqliteWorkflowLogs,
 	workflowPolicies as sqliteWorkflowPolicies
 } from './schema';
 import {
 	azureAccounts as mysqlAzureAccounts,
+	proxyProfiles as mysqlProxyProfiles,
 	users as mysqlUsers,
 	workflowLogs as mysqlWorkflowLogs,
 	workflowPolicies as mysqlWorkflowPolicies
@@ -46,6 +48,96 @@ export async function createUser(email: string, passwordHash: string): Promise<U
 	return getSqliteDb().insert(sqliteUsers).values({ email, passwordHash }).returning().get()!;
 }
 
+export async function listProxyProfilesByUser(userId: number): Promise<ProxyProfile[]> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const rows = await db
+			.select()
+			.from(mysqlProxyProfiles)
+			.where(eq(mysqlProxyProfiles.userId, userId))
+			.orderBy(desc(mysqlProxyProfiles.id));
+		return rows as ProxyProfile[];
+	}
+
+	return getSqliteDb()
+		.select()
+		.from(sqliteProxyProfiles)
+		.where(eq(sqliteProxyProfiles.userId, userId))
+		.orderBy(desc(sqliteProxyProfiles.id))
+		.all();
+}
+
+export async function findProxyProfileByUser(
+	userId: number,
+	proxyProfileId: number
+): Promise<ProxyProfile | null> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const condition = and(
+			eq(mysqlProxyProfiles.id, proxyProfileId),
+			eq(mysqlProxyProfiles.userId, userId)
+		);
+		const rows = await db.select().from(mysqlProxyProfiles).where(condition);
+		return (rows[0] as ProxyProfile) ?? null;
+	}
+
+	const condition = and(
+		eq(sqliteProxyProfiles.id, proxyProfileId),
+		eq(sqliteProxyProfiles.userId, userId)
+	);
+	return getSqliteDb().select().from(sqliteProxyProfiles).where(condition).get() ?? null;
+}
+
+export async function insertProxyProfile(
+	values: Omit<ProxyProfile, 'id' | 'createdAt'>
+): Promise<ProxyProfile> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const result = await db.insert(mysqlProxyProfiles).values(values as never).$returningId();
+		const id = Number(result[0]?.id);
+		if (!id) throw new Error('Failed to create proxy profile');
+		const rows = await db.select().from(mysqlProxyProfiles).where(eq(mysqlProxyProfiles.id, id));
+		return rows[0] as ProxyProfile;
+	}
+
+	return getSqliteDb().insert(sqliteProxyProfiles).values(values as never).returning().get()!;
+}
+
+export async function deleteProxyProfile(userId: number, proxyProfileId: number): Promise<void> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.update(mysqlAzureAccounts)
+			.set({ proxyProfileId: null })
+			.where(
+				and(
+					eq(mysqlAzureAccounts.userId, userId),
+					eq(mysqlAzureAccounts.proxyProfileId, proxyProfileId)
+				)
+			);
+		await db
+			.delete(mysqlProxyProfiles)
+			.where(and(eq(mysqlProxyProfiles.id, proxyProfileId), eq(mysqlProxyProfiles.userId, userId)));
+		return;
+	}
+
+	const sqlite = getSqliteDb();
+	sqlite
+		.update(sqliteAzureAccounts)
+		.set({ proxyProfileId: null })
+		.where(
+			and(
+				eq(sqliteAzureAccounts.userId, userId),
+				eq(sqliteAzureAccounts.proxyProfileId, proxyProfileId)
+			)
+		)
+		.run();
+	sqlite
+		.delete(sqliteProxyProfiles)
+		.where(and(eq(sqliteProxyProfiles.id, proxyProfileId), eq(sqliteProxyProfiles.userId, userId)))
+		.run();
+}
+
 export async function listAccountsByUser(userId: number): Promise<AzureAccount[]> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();
@@ -73,7 +165,8 @@ export async function findAccountByUser(userId: number, accountId: number): Prom
 }
 
 export async function insertAccount(
-	values: Omit<AzureAccount, 'id' | 'createdAt' | 'proxyUrlEncrypted'> & {
+	values: Omit<AzureAccount, 'id' | 'createdAt' | 'proxyProfileId' | 'proxyUrlEncrypted'> & {
+		proxyProfileId?: number | null;
 		proxyUrlEncrypted?: string | null;
 	}
 ): Promise<AzureAccount> {

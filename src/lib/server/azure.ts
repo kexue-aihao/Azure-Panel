@@ -4,8 +4,15 @@ import { NetworkManagementClient } from '@azure/arm-network';
 import { ResourceManagementClient } from '@azure/arm-resources';
 import type { ProxySettings } from '@azure/core-rest-pipeline';
 import type { TokenCredentialOptions } from '@azure/identity';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 import type { AzureAccount } from './db/schema';
 import { decryptSecret } from './crypto';
+import {
+	buildProxyUrl,
+	maskProxy,
+	parseProxyUrl,
+	type ProxyRuntimeConfig
+} from './proxy';
 
 export type VmInfo = {
 	name: string;
@@ -25,56 +32,43 @@ export type AzureClients = {
 
 const RUNNING = new Set(['PowerState/running', 'PowerState/starting']);
 
-function parseProxyUrl(proxyUrl: string): ProxySettings | undefined {
-	const normalized = proxyUrl.trim();
-	if (!normalized) return undefined;
-
-	const parsed = new URL(normalized);
-	if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-		throw new Error('代理仅支持 http:// 或 https:// 地址');
-	}
-	if (!parsed.hostname) throw new Error('代理地址缺少主机名');
-
-	const port = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
-	if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-		throw new Error('代理端口无效');
-	}
-
-	return {
-		host: `${parsed.protocol}//${parsed.hostname}`,
-		port,
-		username: parsed.username ? decodeURIComponent(parsed.username) : undefined,
-		password: parsed.password ? decodeURIComponent(parsed.password) : undefined
-	};
-}
-
 export function validateProxyUrl(proxyUrl: string) {
 	parseProxyUrl(proxyUrl);
 }
 
 export function maskProxyUrl(proxyUrl: string): string {
-	const normalized = proxyUrl.trim();
-	if (!normalized) return '';
 	try {
-		const parsed = new URL(normalized);
-		const auth = parsed.username ? '***@' : '';
-		return `${parsed.protocol}//${auth}${parsed.hostname}${parsed.port ? `:${parsed.port}` : ''}`;
+		const parsed = parseProxyUrl(proxyUrl);
+		return parsed ? maskProxy(parsed) : '';
 	} catch {
 		return '代理配置异常';
 	}
 }
 
-function azureClientOptions(proxyUrl?: string | null): TokenCredentialOptions {
-	const proxyOptions = proxyUrl ? parseProxyUrl(proxyUrl) : undefined;
-	return proxyOptions ? { proxyOptions } : {};
+function proxySettings(proxy: ProxyRuntimeConfig): ProxySettings {
+	return {
+		host: `${proxy.type}://${proxy.host}`,
+		port: proxy.port,
+		username: proxy.username,
+		password: proxy.password
+	};
 }
 
-function decryptProxyUrl(account: AzureAccount): string {
-	return account.proxyUrlEncrypted ? decryptSecret(account.proxyUrlEncrypted) : '';
+function azureClientOptions(proxy?: ProxyRuntimeConfig | null): TokenCredentialOptions {
+	if (!proxy) return {};
+	if (proxy.type === 'http' || proxy.type === 'https') {
+		return { proxyOptions: proxySettings(proxy) };
+	}
+	return { agent: new SocksProxyAgent(buildProxyUrl(proxy)) as TokenCredentialOptions['agent'] };
 }
 
-export function createAzureClients(account: AzureAccount): AzureClients {
-	const clientOptions = azureClientOptions(decryptProxyUrl(account));
+function decryptLegacyProxy(account: AzureAccount): ProxyRuntimeConfig | null {
+	return account.proxyUrlEncrypted ? parseProxyUrl(decryptSecret(account.proxyUrlEncrypted)) : null;
+}
+
+export function createAzureClients(account: AzureAccount, proxy?: ProxyRuntimeConfig | null): AzureClients {
+	const runtimeProxy = proxy ?? decryptLegacyProxy(account);
+	const clientOptions = azureClientOptions(runtimeProxy);
 	const credential = new ClientSecretCredential(
 		account.tenantId,
 		account.clientId,
@@ -94,9 +88,10 @@ export async function validateAzureCredentials(
 	clientId: string,
 	clientSecret: string,
 	subscriptionId: string,
-	proxyUrl = ''
+	proxy?: ProxyRuntimeConfig | string | null
 ) {
-	const clientOptions = azureClientOptions(proxyUrl);
+	const runtimeProxy = typeof proxy === 'string' ? parseProxyUrl(proxy) : proxy;
+	const clientOptions = azureClientOptions(runtimeProxy);
 	const credential = new ClientSecretCredential(tenantId, clientId, clientSecret, clientOptions);
 	const client = new ComputeManagementClient(credential, subscriptionId, clientOptions);
 	await client.virtualMachines.listAll().next();

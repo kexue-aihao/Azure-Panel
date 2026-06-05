@@ -9,6 +9,22 @@ export const users = sqliteTable('users', {
 		.$defaultFn(() => new Date())
 });
 
+export const proxyProfiles = sqliteTable('proxy_profiles', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	userId: integer('user_id')
+		.notNull()
+		.references(() => users.id, { onDelete: 'cascade' }),
+	name: text('name').notNull(),
+	type: text('type').notNull(),
+	host: text('host').notNull(),
+	port: integer('port').notNull(),
+	usernameEncrypted: text('username_encrypted').default(''),
+	passwordEncrypted: text('password_encrypted').default(''),
+	createdAt: integer('created_at', { mode: 'timestamp' })
+		.notNull()
+		.$defaultFn(() => new Date())
+});
+
 export const azureAccounts = sqliteTable('azure_accounts', {
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	userId: integer('user_id')
@@ -19,6 +35,9 @@ export const azureAccounts = sqliteTable('azure_accounts', {
 	clientId: text('client_id').notNull(),
 	clientSecretEncrypted: text('client_secret_encrypted').notNull(),
 	subscriptionId: text('subscription_id').notNull(),
+	proxyProfileId: integer('proxy_profile_id').references(() => proxyProfiles.id, {
+		onDelete: 'set null'
+	}),
 	proxyUrlEncrypted: text('proxy_url_encrypted').default(''),
 	remark: text('remark').default(''),
 	createdAt: integer('created_at', { mode: 'timestamp' })
@@ -70,6 +89,7 @@ export const workflowLogs = sqliteTable('workflow_logs', {
 });
 
 export type User = typeof users.$inferSelect;
+export type ProxyProfile = typeof proxyProfiles.$inferSelect;
 export type AzureAccount = typeof azureAccounts.$inferSelect;
 export type WorkflowPolicy = typeof workflowPolicies.$inferSelect;
 export type WorkflowLog = typeof workflowLogs.$inferSelect;

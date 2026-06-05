@@ -13,6 +13,20 @@ CREATE TABLE IF NOT EXISTS `users` (
   UNIQUE KEY `users_email_unique` (`email`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `proxy_profiles` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `name` varchar(120) NOT NULL,
+  `type` varchar(16) NOT NULL,
+  `host` varchar(255) NOT NULL,
+  `port` int NOT NULL,
+  `username_encrypted` text,
+  `password_encrypted` text,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `proxy_profiles_user_id_idx` (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `azure_accounts` (
   `id` int NOT NULL AUTO_INCREMENT,
   `user_id` int NOT NULL,
@@ -21,11 +35,13 @@ CREATE TABLE IF NOT EXISTS `azure_accounts` (
   `client_id` varchar(64) NOT NULL,
   `client_secret_encrypted` text NOT NULL,
   `subscription_id` varchar(64) NOT NULL,
+  `proxy_profile_id` int DEFAULT NULL,
   `proxy_url_encrypted` text,
   `remark` varchar(255) DEFAULT '',
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `azure_accounts_user_id_idx` (`user_id`)
+  KEY `azure_accounts_user_id_idx` (`user_id`),
+  KEY `azure_accounts_proxy_profile_id_idx` (`proxy_profile_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `workflow_policies` (
