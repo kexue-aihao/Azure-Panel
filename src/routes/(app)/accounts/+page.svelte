@@ -34,7 +34,14 @@
 				body: JSON.stringify(form)
 			});
 			toast = '账号添加成功';
-			form = { name: '', tenant_id: '', client_id: '', client_secret: '', subscription_id: '', remark: '' };
+			form = {
+				name: '',
+				tenant_id: '',
+				client_id: '',
+				client_secret: '',
+				subscription_id: '',
+				remark: ''
+			};
 			await load();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '添加失败';
@@ -42,7 +49,7 @@
 	}
 
 	async function remove(id: number) {
-		if (!confirm('确认删除该账号？')) return;
+		if (!confirm('确认删除这个账号吗？')) return;
 		try {
 			await api(`/api/user/azure/account/delete?account_id=${id}`, { method: 'DELETE' });
 			toast = '已删除';
@@ -52,7 +59,9 @@
 		}
 	}
 
-	onMount(load);
+	onMount(() => {
+		void load();
+	});
 </script>
 
 <h1 class="mb-4 text-2xl font-semibold">Azure 账号</h1>
@@ -67,7 +76,13 @@
 		<input class="input" bind:value={form.name} placeholder="账号名称" required />
 		<input class="input" bind:value={form.tenant_id} placeholder="Tenant ID" required />
 		<input class="input" bind:value={form.client_id} placeholder="Client ID" required />
-		<input class="input" bind:value={form.client_secret} type="password" placeholder="Client Secret" required />
+		<input
+			class="input"
+			bind:value={form.client_secret}
+			type="password"
+			placeholder="Client Secret"
+			required
+		/>
 		<input class="input" bind:value={form.subscription_id} placeholder="Subscription ID" required />
 		<input class="input" bind:value={form.remark} placeholder="备注（可选）" />
 		<button class="btn-primary" type="submit">保存账号</button>
@@ -85,7 +100,7 @@
 						<div class="mt-1 text-xs text-muted">订阅: {account.subscription_id}</div>
 						<div class="text-xs text-muted">租户: {account.tenant_id}</div>
 					</div>
-					<button class="btn-danger" onclick={() => remove(account.id)}>删除</button>
+					<button class="btn-danger" onclick={() => void remove(account.id)}>删除</button>
 				</div>
 			{/each}
 		{/if}

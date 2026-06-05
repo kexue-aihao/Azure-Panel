@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { drizzle as drizzleSqlite } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzleMysql } from 'drizzle-orm/mysql2';
-import mysql from 'mysql2/promise';
+import { createPool, type Pool } from 'mysql2/promise';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { readEnv } from '../runtime-env';
@@ -9,11 +9,13 @@ import * as sqliteSchema from './schema';
 import * as mysqlSchema from './schema.mysql';
 
 export type DbDriver = 'sqlite' | 'mysql';
+export type SqliteDb = ReturnType<typeof drizzleSqlite<typeof sqliteSchema>>;
+export type MysqlDb = ReturnType<typeof drizzleMysql<typeof mysqlSchema>>;
 
 let driver: DbDriver = 'sqlite';
-let sqliteDb: ReturnType<typeof drizzleSqlite<typeof sqliteSchema>> | null = null;
-let mysqlPool: mysql.Pool | null = null;
-let mysqlDb: ReturnType<typeof drizzleMysql<typeof mysqlSchema>> | null = null;
+let sqliteDb: SqliteDb | null = null;
+let mysqlPool: Pool | null = null;
+let mysqlDb: MysqlDb | null = null;
 
 function resolveDriver(): DbDriver {
 	const configured = (readEnv('DB_DRIVER') ?? '').toLowerCase();
@@ -22,24 +24,33 @@ function resolveDriver(): DbDriver {
 	return 'sqlite';
 }
 
-export function getSchema() {
-	return driver === 'mysql' ? mysqlSchema : sqliteSchema;
+export function getDriver() {
+	return driver;
+}
+
+export function getMysqlDb(): { db: MysqlDb; pool: Pool } {
+	if (!mysqlDb || !mysqlPool) throw new Error('MySQL database is not initialized');
+	return { db: mysqlDb, pool: mysqlPool };
+}
+
+export function getSqliteDb(): SqliteDb {
+	if (!sqliteDb) throw new Error('SQLite database is not initialized');
+	return sqliteDb;
 }
 
 export function getDb() {
 	if (driver === 'mysql') {
-		if (!mysqlDb || !mysqlPool) throw new Error('MySQL 数据库未初始化');
-		return { db: mysqlDb, driver: 'mysql' as const, pool: mysqlPool };
+		const { db, pool } = getMysqlDb();
+		return { db, driver: 'mysql' as const, pool };
 	}
-	if (!sqliteDb) throw new Error('SQLite 数据库未初始化');
-	return { db: sqliteDb, driver: 'sqlite' as const };
+	return { db: getSqliteDb(), driver: 'sqlite' as const };
 }
 
 export async function initDatabase() {
 	driver = resolveDriver();
 
 	if (driver === 'mysql') {
-		mysqlPool = mysql.createPool({
+		mysqlPool = createPool({
 			host: readEnv('MYSQL_HOST') ?? '127.0.0.1',
 			port: Number(readEnv('MYSQL_PORT') ?? '3306'),
 			user: readEnv('MYSQL_USER') ?? 'azure_panel',
@@ -48,8 +59,8 @@ export async function initDatabase() {
 			waitForConnections: true,
 			connectionLimit: 10
 		});
-		mysqlDb = drizzleMysql(mysqlPool, { schema: mysqlSchema, mode: 'default' });
-		console.log('[db] 已连接 MySQL');
+		mysqlDb = drizzleMysql(mysqlPool, { schema: mysqlSchema, mode: 'default' }) as unknown as MysqlDb;
+		console.log('[db] Connected to MySQL');
 		return;
 	}
 
@@ -108,5 +119,5 @@ export async function initDatabase() {
 			created_at INTEGER NOT NULL
 		);
 	`);
-	console.log('[db] 已连接 SQLite:', dbPath);
+	console.log('[db] Connected to SQLite:', dbPath);
 }

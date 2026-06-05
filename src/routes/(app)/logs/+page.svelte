@@ -18,8 +18,10 @@
 	}
 
 	onMount(() => {
-		load();
-		const timer = setInterval(load, 10_000);
+		void load();
+		const timer = setInterval(() => {
+			void load();
+		}, 10_000);
 		return () => clearInterval(timer);
 	});
 </script>
@@ -39,7 +41,9 @@
 		</thead>
 		<tbody>
 			{#if logs.length === 0}
-				<tr><td class="p-3 text-muted" colspan="5">暂无日志</td></tr>
+				<tr>
+					<td class="p-3 text-muted" colspan="5">暂无日志</td>
+				</tr>
 			{:else}
 				{#each logs as log}
 					<tr class="border-b border-border/60">
@@ -47,7 +51,13 @@
 						<td class="p-3">#{log.policy_id}</td>
 						<td class="p-3">{log.action}</td>
 						<td class="p-3">
-							<span class="badge {log.status === 'success' ? 'bg-green-900/50 text-green-300' : 'bg-red-900/50 text-red-300'}">
+							<span
+								class={`badge ${
+									log.status === 'success'
+										? 'bg-green-900/50 text-green-300'
+										: 'bg-red-900/50 text-red-300'
+								}`}
+							>
 								{log.status}
 							</span>
 						</td>

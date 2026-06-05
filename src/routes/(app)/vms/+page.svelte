@@ -15,8 +15,10 @@
 	let vms = $state<Vm[]>([]);
 	let accountId = $state<number | null>(null);
 	let resourceGroup = $state('');
-	let loading = $state(false);
-	let toast = $state('');
+let loading = $state(false);
+let toast = $state('');
+	const accountSelectId = 'account-select';
+	const resourceGroupInputId = 'resource-group-input';
 
 	async function loadAccounts() {
 		accounts = await api<Account[]>('/api/user/azure/account/list');
@@ -28,6 +30,7 @@
 			vms = [];
 			return;
 		}
+
 		loading = true;
 		try {
 			const params = new URLSearchParams({ account_id: String(accountId) });
@@ -52,7 +55,9 @@
 				})
 			});
 			toast = `已触发 ${vm.name} 操作`;
-			setTimeout(loadVms, 1500);
+			setTimeout(() => {
+				void loadVms();
+			}, 1500);
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '操作失败';
 		}
@@ -78,11 +83,12 @@
 
 <div class="mb-4 flex flex-wrap items-end gap-3">
 	<div>
-		<label class="text-sm text-muted">Azure 账号</label>
+		<label class="text-sm text-muted" for={accountSelectId}>Azure 账号</label>
 		<select
+			id={accountSelectId}
 			class="input mt-1 min-w-[220px]"
 			bind:value={accountId}
-			onchange={loadVms}
+			onchange={() => void loadVms()}
 		>
 			<option value={null}>选择账号</option>
 			{#each accounts as account}
@@ -91,10 +97,10 @@
 		</select>
 	</div>
 	<div>
-		<label class="text-sm text-muted">资源组（可选）</label>
-		<input class="input mt-1" bind:value={resourceGroup} placeholder="my-rg" />
+		<label class="text-sm text-muted" for={resourceGroupInputId}>资源组（可选）</label>
+		<input id={resourceGroupInputId} class="input mt-1" bind:value={resourceGroup} placeholder="my-rg" />
 	</div>
-	<button class="btn-primary" onclick={loadVms} disabled={loading}>刷新 VM</button>
+	<button class="btn-primary" onclick={() => void loadVms()} disabled={loading}>刷新 VM</button>
 </div>
 
 <div class="card overflow-x-auto">
@@ -111,7 +117,9 @@
 		</thead>
 		<tbody>
 			{#if vms.length === 0}
-				<tr><td class="p-3 text-muted" colspan="6">暂无 VM</td></tr>
+				<tr>
+					<td class="p-3 text-muted" colspan="6">暂无 VM</td>
+				</tr>
 			{:else}
 				{#each vms as vm}
 					<tr class="border-b border-border/60">
@@ -120,12 +128,12 @@
 						<td class="p-3">{vm.location}</td>
 						<td class="p-3">{vm.vm_size}</td>
 						<td class="p-3">
-							<span class="badge {badge(vm.power_state)}">{vm.power_state}</span>
+							<span class={`badge ${badge(vm.power_state)}`}>{vm.power_state}</span>
 						</td>
 						<td class="space-x-2 p-3">
-							<button class="btn-primary" onclick={() => power('on', vm)}>开机</button>
-							<button class="btn-secondary" onclick={() => power('off', vm)}>关机</button>
-							<button class="btn-secondary" onclick={() => power('restart', vm)}>重启</button>
+							<button class="btn-primary" onclick={() => void power('on', vm)}>开机</button>
+							<button class="btn-secondary" onclick={() => void power('off', vm)}>关机</button>
+							<button class="btn-secondary" onclick={() => void power('restart', vm)}>重启</button>
 						</td>
 					</tr>
 				{/each}

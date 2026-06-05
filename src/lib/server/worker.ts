@@ -4,28 +4,27 @@ import {
 	findAccountById,
 	insertWorkflowLog,
 	listEnabledWorkflows,
+	listEnabledWorkflowsByUser,
 	updateWorkflowLastRun
 } from './db/repo';
-import {
-	createAzureClients,
-	createVmSimple,
-	getPowerState,
-	isRunning,
-	startVm
-} from './azure';
+import { createAzureClients, createVmSimple, getPowerState, isRunning, startVm } from './azure';
+import type { WorkflowPolicy } from './db/schema';
 
 let timer: NodeJS.Timeout | null = null;
+const activePolicies = new Set<number>();
 
-function shouldRun(policy: { lastRunAt: Date | null; checkIntervalSeconds: number }) {
-	if (!policy.lastRunAt) return true;
+function shouldRun(policy: { lastRunAt: Date | null; checkIntervalSeconds: number }, force: boolean) {
+	if (force || !policy.lastRunAt) return true;
 	return Date.now() - policy.lastRunAt.getTime() >= policy.checkIntervalSeconds * 1000;
 }
 
-export async function runWorkflowOnce() {
-	const policies = await listEnabledWorkflows();
-
+async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 	for (const policy of policies) {
-		if (!shouldRun(policy)) continue;
+		if (!shouldRun(policy, force)) continue;
+		if (activePolicies.has(policy.id)) continue;
+
+		activePolicies.add(policy.id);
+
 		try {
 			const account = await findAccountById(policy.accountId);
 			if (!account) {
@@ -36,14 +35,13 @@ export async function runWorkflowOnce() {
 			const clients = createAzureClients(account);
 			const vmNames = JSON.parse(policy.vmNamesJson || '[]') as string[];
 			const listed = clients.compute.virtualMachines.list(policy.resourceGroup);
-			const existing = new Map<string, string>();
+			const existing = new Set<string>();
+
 			for await (const vm of listed) {
-				if (vm.name) existing.set(vm.name, vm.name);
+				if (vm.name) existing.add(vm.name);
 			}
 
-			const tracked =
-				vmNames.length > 0 ? vmNames.filter((name) => existing.has(name)) : [...existing.keys()];
-
+			const tracked = vmNames.length > 0 ? vmNames.filter((name) => existing.has(name)) : [...existing];
 			let running = 0;
 			const stopped: string[] = [];
 
@@ -67,7 +65,12 @@ export async function runWorkflowOnce() {
 						await insertWorkflowLog(policy.id, 'auto_start', 'success', `已触发开机: ${name}`);
 						running += 1;
 					} catch (err) {
-						await insertWorkflowLog(policy.id, 'auto_start', 'failed', `开机失败 ${name}: ${String(err)}`);
+						await insertWorkflowLog(
+							policy.id,
+							'auto_start',
+							'failed',
+							`开机失败 ${name}: ${String(err)}`
+						);
 					}
 				}
 			}
@@ -76,7 +79,12 @@ export async function runWorkflowOnce() {
 			if (deficit > 0 && policy.autoCreate) {
 				const password = decryptSecret(policy.adminPasswordEncrypted);
 				if (!password) {
-					await insertWorkflowLog(policy.id, 'auto_create', 'failed', '未配置管理员密码，无法自动补机');
+					await insertWorkflowLog(
+						policy.id,
+						'auto_create',
+						'failed',
+						'未配置管理员密码，无法自动补机'
+					);
 				} else {
 					for (let i = 0; i < deficit; i++) {
 						const vmName = `${policy.namePrefix}-${Date.now()}-${i}`;
@@ -106,8 +114,18 @@ export async function runWorkflowOnce() {
 			await updateWorkflowLastRun(policy.id);
 		} catch (err) {
 			await insertWorkflowLog(policy.id, 'policy_error', 'failed', String(err));
+		} finally {
+			activePolicies.delete(policy.id);
 		}
 	}
+}
+
+export async function runWorkflowOnce() {
+	await runPolicies(await listEnabledWorkflows(), false);
+}
+
+export async function runWorkflowOnceForUser(userId: number, options: { force?: boolean } = {}) {
+	await runPolicies(await listEnabledWorkflowsByUser(userId), options.force === true);
 }
 
 export function startWorker() {
