@@ -34,7 +34,7 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	enabled: boolean('enabled').notNull().default(true),
 	resourceGroup: varchar('resource_group', { length: 90 }).notNull(),
 	location: varchar('location', { length: 64 }).notNull().default('eastus'),
-	vmNamesJson: text('vm_names_json').notNull().default('[]'),
+	vmNamesJson: text('vm_names_json').notNull(),
 	minRunningCount: int('min_running_count').notNull().default(1),
 	autoStart: boolean('auto_start').notNull().default(true),
 	autoCreate: boolean('auto_create').notNull().default(false),
@@ -44,7 +44,7 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 		.default('Canonical:ubuntu-24_04-lts:server:latest'),
 	namePrefix: varchar('name_prefix', { length: 32 }).notNull().default('auto-vm'),
 	adminUsername: varchar('admin_username', { length: 32 }).notNull().default('azureuser'),
-	adminPasswordEncrypted: text('admin_password_encrypted').notNull().default(''),
+	adminPasswordEncrypted: text('admin_password_encrypted').notNull(),
 	checkIntervalSeconds: int('check_interval_seconds').notNull().default(120),
 	lastRunAt: timestamp('last_run_at'),
 	createdAt: timestamp('created_at').notNull().defaultNow()
