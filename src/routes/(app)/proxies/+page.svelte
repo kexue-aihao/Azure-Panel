@@ -61,6 +61,7 @@
 	let proxies = $state<ProxyProfile[]>([]);
 	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
 	let shareLink = $state('');
+	let rawProxyType = $state<'socks5' | 'http'>('socks5');
 	let managedCore = $state<'sing-box' | 'xray'>('sing-box');
 	let parsedShareLink = $state<ParsedShareLink | null>(null);
 	let saving = $state(false);
@@ -112,10 +113,16 @@
 		try {
 			await api('/api/user/proxy/add', {
 				method: 'POST',
-				body: JSON.stringify({ ...form, share_link: shareLink, managed_core: managedCore })
+				body: JSON.stringify({
+					...form,
+					share_link: shareLink,
+					raw_type: rawProxyType,
+					managed_core: managedCore
+				})
 			});
 			toast = '代理配置已添加';
 			shareLink = '';
+			rawProxyType = 'socks5';
 			managedCore = 'sing-box';
 			parsedShareLink = null;
 			form = {
@@ -146,7 +153,7 @@
 		try {
 			parsedShareLink = await api<ParsedShareLink>('/api/user/proxy/parse', {
 				method: 'POST',
-				body: JSON.stringify({ share_link: shareLink })
+				body: JSON.stringify({ share_link: shareLink, raw_type: rawProxyType })
 			});
 			toast = parsedShareLink.message;
 			if (parsedShareLink.managed_core === 'sing-box' || parsedShareLink.managed_core === 'xray') {
@@ -259,6 +266,15 @@
 				oninput={clearParsedShareLink}
 				placeholder="支持 http://、socks5://、ss://。VLESS/Reality 可由内置 sing-box/Xray 转换为本地 HTTP 代理端口。"
 			></textarea>
+			<div class="grid gap-2 sm:grid-cols-[160px_1fr]">
+				<select class="input" bind:value={rawProxyType} onchange={clearParsedShareLink}>
+					<option value="socks5">裸格式按 socks5</option>
+					<option value="http">裸格式按 http</option>
+				</select>
+				<div class="text-xs text-muted">
+					支持 us.miyaip.online:1111:用户名:密码 这种 host:port:user:pass 格式；字符串本身不带协议时用左侧选择决定。
+				</div>
+			</div>
 			<div class="flex flex-wrap items-center gap-2">
 				<button class="btn-secondary" type="button" onclick={() => void parseShareLink()}>
 					识别并填入

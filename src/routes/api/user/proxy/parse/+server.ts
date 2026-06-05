@@ -5,7 +5,9 @@ import type { RequestHandler } from './$types';
 export const POST: RequestHandler = async (event) => {
 	await requireUser(event);
 	const body = await event.request.json();
-	const result = parseProxyShareLink(String(body.share_link ?? ''));
+	const result = parseProxyShareLink(String(body.share_link ?? ''), {
+		rawType: String(body.raw_type ?? '')
+	});
 	return ok({
 		supported: result.supported,
 		managed_supported: result.managed_supported,

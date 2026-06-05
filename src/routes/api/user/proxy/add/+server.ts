@@ -20,7 +20,9 @@ export const POST: RequestHandler = async (event) => {
 	const body = await event.request.json();
 
 	const shareLink = String(body.share_link ?? '').trim();
-	const parsedShareLink = shareLink ? parseProxyShareLink(shareLink) : null;
+	const parsedShareLink = shareLink
+		? parseProxyShareLink(shareLink, { rawType: String(body.raw_type ?? body.type ?? '') })
+		: null;
 	if (parsedShareLink && !parsedShareLink.supported) {
 		return fail(parsedShareLink.message);
 	}

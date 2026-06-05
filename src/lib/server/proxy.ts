@@ -191,6 +191,48 @@ function safeDecode(value: string) {
 	}
 }
 
+function normalizeBareProxyType(type?: string): Extract<ProxyType, 'http' | 'socks5'> {
+	const normalized = normalizeProxyType(type || 'socks5');
+	if (normalized !== 'http' && normalized !== 'socks5') {
+		throw new Error('host:port:user:pass 格式仅支持选择 http 或 socks5');
+	}
+	return normalized;
+}
+
+function parseBareHostPortAuthProxy(
+	value: string,
+	rawType?: string
+): ParsedProxyShareLink | null {
+	if (value.includes('://')) return null;
+
+	const match = value.match(/^([^:\s/]+):(\d{1,5}):([^:]+):(.+)$/);
+	if (!match) return null;
+
+	const [, host, port, username, password] = match;
+	const type = normalizeBareProxyType(rawType);
+	const proxy = normalizeProxyRuntime({
+		type,
+		host,
+		port,
+		username: safeDecode(username),
+		password: safeDecode(password)
+	});
+
+	return {
+		supported: true,
+		managed_supported: false,
+		managed_core: '',
+		protocol: type,
+		name: `${type.toUpperCase()} ${proxy.host}`,
+		message: '已识别 host:port:user:pass 代理格式，可直接验证并保存。',
+		proxy,
+		details: {
+			host: proxy.host,
+			port: proxy.port
+		}
+	};
+}
+
 function parseShadowsocksShareLink(link: string, parsed: URL): ParsedProxyShareLink {
 	const remark = parsed.hash ? safeDecode(parsed.hash.slice(1)) : '';
 	const query = parsed.search;
@@ -265,9 +307,15 @@ function unsupportedShareLink(parsed: URL): ParsedProxyShareLink {
 	};
 }
 
-export function parseProxyShareLink(shareLink: string): ParsedProxyShareLink {
+export function parseProxyShareLink(
+	shareLink: string,
+	options: { rawType?: string } = {}
+): ParsedProxyShareLink {
 	const normalized = shareLink.trim();
 	if (!normalized) throw new Error('请粘贴代理分享链接');
+
+	const bareProxy = parseBareHostPortAuthProxy(normalized, options.rawType);
+	if (bareProxy) return bareProxy;
 
 	let parsed: URL;
 	try {
