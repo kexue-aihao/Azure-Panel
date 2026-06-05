@@ -99,7 +99,12 @@ if [[ "$LOCAL" == "$REMOTE" ]]; then
 else
 	log "更新: $LOCAL -> $REMOTE"
 	git checkout "$GIT_BRANCH" 2>/dev/null || git checkout -b "$GIT_BRANCH" "$GIT_REMOTE/$GIT_BRANCH"
-	git pull "$GIT_REMOTE" "$GIT_BRANCH"
+	if [[ "${SKIP_GIT_RESET:-0}" != "1" ]]; then
+		log "同步远程代码（丢弃本地修改）..."
+		git reset --hard "$GIT_REMOTE/$GIT_BRANCH"
+	else
+		git pull "$GIT_REMOTE" "$GIT_BRANCH"
+	fi
 fi
 
 # ---------- 环境文件 ----------
