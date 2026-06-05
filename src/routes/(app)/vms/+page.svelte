@@ -31,6 +31,24 @@
 		highest_core_size: VmCapability | null;
 		largest_memory_size: VmCapability | null;
 	};
+	type RegionOption = {
+		name: string;
+		displayName: string;
+		availableSizeCount: number;
+		highestCoreSize: VmCapability | null;
+		largestMemorySize: VmCapability | null;
+	};
+	type VmImageOption = {
+		label: string;
+		imageReference: string;
+		publisher: string;
+		offer: string;
+		sku: string;
+		version: string;
+		osType: 'Linux' | 'Windows' | 'Unknown';
+		architecture: string;
+		hyperVGeneration: string;
+	};
 	type Quota = {
 		name: string;
 		localizedName: string;
@@ -42,12 +60,16 @@
 
 	let accounts = $state<Account[]>([]);
 	let vms = $state<Vm[]>([]);
+	let regions = $state<RegionOption[]>([]);
+	let images = $state<VmImageOption[]>([]);
 	let capabilities = $state<CapabilityResult | null>(null);
 	let quotas = $state<Quota[]>([]);
 	let accountId = $state<number | null>(null);
 	let resourceGroup = $state('');
 	let location = $state('malaysiawest');
 	let loading = $state(false);
+	let regionsLoading = $state(false);
+	let imagesLoading = $state(false);
 	let capabilityLoading = $state(false);
 	let quotaLoading = $state(false);
 	let createLoading = $state(false);
@@ -72,10 +94,36 @@
 	const accountSelectId = 'account-select';
 	const resourceGroupInputId = 'resource-group-input';
 	const locationInputId = 'location-input';
+	const createLocationSelectId = 'create-location-select';
+	const createSizeSelectId = 'create-size-select';
+	const imageSelectId = 'image-select';
 
 	async function loadAccounts() {
 		accounts = await api<Account[]>('/api/user/azure/account/list');
 		if (!accountId && accounts.length) accountId = accounts[0].id;
+	}
+
+	async function loadRegions() {
+		if (!accountId) {
+			regions = [];
+			return;
+		}
+
+		regionsLoading = true;
+		try {
+			const params = new URLSearchParams({ account_id: String(accountId) });
+			regions = await api<RegionOption[]>(`/api/user/azure/region/list?${params}`);
+			if (regions.length && !regions.some((region) => region.name === location)) {
+				location = regions[0].name;
+			}
+			createForm.location = location;
+			toast = `已识别 ${regions.length} 个当前账号可开机区域`;
+		} catch (err) {
+			regions = [];
+			toast = err instanceof Error ? err.message : '区域查询失败';
+		} finally {
+			regionsLoading = false;
+		}
 	}
 
 	async function loadVms() {
@@ -105,11 +153,39 @@
 				location: location.trim()
 			});
 			capabilities = await api<CapabilityResult>(`/api/user/azure/capability/list?${params}`);
+			if (
+				capabilities.available.length &&
+				!capabilities.available.some((item) => item.name === createForm.vm_size)
+			) {
+				createForm.vm_size = capabilities.available[0].name;
+			}
 			toast = `已识别 ${capabilities.available.length} 个当前账号可用规格`;
 		} catch (err) {
+			capabilities = null;
 			toast = err instanceof Error ? err.message : '规格查询失败';
 		} finally {
 			capabilityLoading = false;
+		}
+	}
+
+	async function loadImages() {
+		if (!accountId || !location.trim()) return;
+		imagesLoading = true;
+		try {
+			const params = new URLSearchParams({
+				account_id: String(accountId),
+				location: location.trim()
+			});
+			images = await api<VmImageOption[]>(`/api/user/azure/image/list?${params}`);
+			if (images.length && !images.some((item) => item.imageReference === createForm.image_reference)) {
+				createForm.image_reference = images[0].imageReference;
+			}
+			toast = `已加载 ${images.length} 个 ${location} 可安装系统`;
+		} catch (err) {
+			images = [];
+			toast = err instanceof Error ? err.message : '系统镜像查询失败';
+		} finally {
+			imagesLoading = false;
 		}
 	}
 
@@ -130,9 +206,38 @@
 		}
 	}
 
+	async function loadRegionDetails() {
+		createForm.location = location;
+		capabilities = null;
+		quotas = [];
+		images = [];
+		await Promise.all([loadCapabilities(), loadQuotas(), loadImages()]);
+	}
+
+	async function changeAccount() {
+		capabilities = null;
+		quotas = [];
+		images = [];
+		await loadRegions();
+		await Promise.all([loadVms(), loadRegionDetails()]);
+	}
+
+	async function changeLocation() {
+		await loadRegionDetails();
+	}
+
 	async function createVm(e: Event) {
 		e.preventDefault();
 		if (!accountId) return;
+		createForm.location = location;
+		if (!capabilities?.available.some((item) => item.name === createForm.vm_size)) {
+			toast = '请先从 Azure 查询并选择当前区域可开的实例规格';
+			return;
+		}
+		if (!images.some((item) => item.imageReference === createForm.image_reference)) {
+			toast = '请先从 Azure 查询并选择当前区域可安装的系统镜像';
+			return;
+		}
 		createLoading = true;
 		try {
 			const result = await api<{
@@ -249,7 +354,10 @@
 
 	onMount(async () => {
 		await loadAccounts();
-		await loadVms();
+		if (accountId) {
+			await loadRegions();
+			await Promise.all([loadVms(), loadRegionDetails()]);
+		}
 	});
 </script>
 
@@ -268,7 +376,7 @@
 					id={accountSelectId}
 					class="input mt-1 min-w-[220px]"
 					bind:value={accountId}
-					onchange={() => void loadVms()}
+					onchange={() => void changeAccount()}
 				>
 					<option value={null}>选择账号</option>
 					{#each accounts as account}
@@ -287,17 +395,38 @@
 			</div>
 			<div>
 				<label class="text-sm text-muted" for={locationInputId}>区域</label>
-				<input id={locationInputId} class="input mt-1" bind:value={location} placeholder="malaysiawest" />
+				<select
+					id={locationInputId}
+					class="input mt-1 min-w-[220px]"
+					bind:value={location}
+					onchange={() => void changeLocation()}
+					disabled={regionsLoading || regions.length === 0}
+				>
+					{#if regionsLoading}
+						<option value={location}>正在识别可开机区域...</option>
+					{:else if regions.length === 0}
+						<option value={location}>请先选择账号并加载区域</option>
+					{:else}
+						{#each regions as region}
+							<option value={region.name}>
+								{region.displayName} ({region.name}) · {region.availableSizeCount} 个规格
+							</option>
+						{/each}
+					{/if}
+				</select>
 			</div>
 			<button class="btn-primary" onclick={() => void loadVms()} disabled={loading}>刷新 VM</button>
 		</div>
 
-		<div class="grid gap-3 md:grid-cols-2">
+		<div class="grid gap-3 md:grid-cols-3">
+			<button class="btn-secondary" onclick={() => void loadRegions()} disabled={regionsLoading}>
+				{regionsLoading ? '识别区域中...' : '重新识别区域'}
+			</button>
 			<button class="btn-secondary" onclick={() => void loadCapabilities()} disabled={capabilityLoading}>
-				查询可开型号
+				{capabilityLoading ? '查询中...' : '查询可开型号'}
 			</button>
 			<button class="btn-secondary" onclick={() => void loadQuotas()} disabled={quotaLoading}>
-				查询区域配额
+				{quotaLoading ? '查询中...' : '查询区域配额'}
 			</button>
 		</div>
 
@@ -374,16 +503,78 @@
 		</div>
 		<div class="grid gap-3 md:grid-cols-2">
 			<input class="input" bind:value={createForm.resource_group} placeholder="资源组" required />
-			<input class="input" bind:value={createForm.location} placeholder="区域，例如 malaysiawest" required />
+			<div>
+				<label class="mb-1 block text-xs text-muted" for={createLocationSelectId}>创建区域</label>
+				<select
+					id={createLocationSelectId}
+					class="input"
+					bind:value={location}
+					onchange={() => void changeLocation()}
+					disabled={regionsLoading || regions.length === 0}
+					required
+				>
+					{#if regionsLoading}
+						<option value={location}>正在识别可开机区域...</option>
+					{:else if regions.length === 0}
+						<option value={createForm.location}>请先加载可开机区域</option>
+					{:else}
+						{#each regions as region}
+							<option value={region.name}>
+								{region.displayName} ({region.name}) · 最大 {region.highestCoreSize?.name ?? '-'}
+							</option>
+						{/each}
+					{/if}
+				</select>
+			</div>
 			<input class="input" bind:value={createForm.vm_name} placeholder="VM 名称" required />
-			<input class="input" bind:value={createForm.vm_size} placeholder="规格，例如 Standard_B1s" required />
+			<div>
+				<label class="mb-1 block text-xs text-muted" for={createSizeSelectId}>实例规格</label>
+				<select
+					id={createSizeSelectId}
+					class="input"
+					bind:value={createForm.vm_size}
+					disabled={capabilityLoading || !capabilities?.available.length}
+					required
+				>
+					{#if capabilityLoading}
+						<option value={createForm.vm_size}>正在从 Azure 查询规格...</option>
+					{:else if capabilities?.available.length}
+						{#each capabilities.available as item}
+							<option value={item.name}>
+								{item.name} · {item.cores} vCPU · {item.memoryGB}GB
+							</option>
+						{/each}
+					{:else}
+						<option value={createForm.vm_size}>请先选择区域并查询可开型号</option>
+					{/if}
+				</select>
+			</div>
 		</div>
-		<input
-			class="input"
-			bind:value={createForm.image_reference}
-			placeholder="镜像 publisher:offer:sku:version"
-			required
-		/>
+		<div>
+			<label class="mb-1 block text-xs text-muted" for={imageSelectId}>安装系统</label>
+			<select
+				id={imageSelectId}
+				class="input"
+				bind:value={createForm.image_reference}
+				disabled={imagesLoading || images.length === 0}
+				required
+			>
+				{#if imagesLoading}
+					<option value={createForm.image_reference}>正在从 Azure 查询可安装系统...</option>
+				{:else if images.length}
+					{#each images as image}
+						<option value={image.imageReference}>
+							{image.label} · {image.osType}{image.architecture ? ` · ${image.architecture}` : ''}{image.hyperVGeneration
+								? ` · ${image.hyperVGeneration}`
+								: ''}
+						</option>
+					{/each}
+				{:else}
+					<option value={createForm.image_reference}>请先选择区域并加载系统镜像</option>
+				{/if}
+			</select>
+			<p class="mt-1 break-all text-xs text-muted">{createForm.image_reference}</p>
+		</div>
 		<div class="grid gap-3 md:grid-cols-2">
 			<input class="input" bind:value={createForm.admin_username} placeholder="管理员用户名" required />
 			<input
@@ -417,7 +608,11 @@
 			bind:value={createForm.userdata}
 			placeholder={`#cloud-config\nruncmd:\n  - curl -fsSL https://example.com/install.sh | bash`}
 		></textarea>
-		<button class="btn-primary" type="submit" disabled={createLoading}>
+		<button
+			class="btn-primary"
+			type="submit"
+			disabled={createLoading || capabilityLoading || imagesLoading || !capabilities?.available.length || !images.length}
+		>
 			{createLoading ? '创建中...' : '创建 VM'}
 		</button>
 	</form>

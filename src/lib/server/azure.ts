@@ -52,6 +52,14 @@ export type VmCapabilitiesResult = {
 	largestMemorySize: VmCapability | null;
 };
 
+export type AzureRegionOption = {
+	name: string;
+	displayName: string;
+	availableSizeCount: number;
+	highestCoreSize: VmCapability | null;
+	largestMemorySize: VmCapability | null;
+};
+
 export type ComputeQuota = {
 	name: string;
 	localizedName: string;
@@ -59,6 +67,18 @@ export type ComputeQuota = {
 	limit: number;
 	remaining: number;
 	unit: string;
+};
+
+export type VmImageOption = {
+	label: string;
+	imageReference: string;
+	publisher: string;
+	offer: string;
+	sku: string;
+	version: string;
+	osType: 'Linux' | 'Windows' | 'Unknown';
+	architecture: string;
+	hyperVGeneration: string;
 };
 
 export type CreateVmOptions = {
@@ -107,6 +127,110 @@ export type AzureClients = {
 };
 
 const RUNNING = new Set(['PowerState/running', 'PowerState/starting']);
+
+const LOCATION_DISPLAY_NAMES: Record<string, string> = {
+	australiacentral: 'Australia Central',
+	australiaeast: 'Australia East',
+	australiasoutheast: 'Australia Southeast',
+	brazilsouth: 'Brazil South',
+	canadacentral: 'Canada Central',
+	canadaeast: 'Canada East',
+	centralindia: 'Central India',
+	centralus: 'Central US',
+	eastasia: 'East Asia',
+	eastus: 'East US',
+	eastus2: 'East US 2',
+	francecentral: 'France Central',
+	germanywestcentral: 'Germany West Central',
+	israelcentral: 'Israel Central',
+	italynorth: 'Italy North',
+	japaneast: 'Japan East',
+	japanwest: 'Japan West',
+	jioindiawest: 'Jio India West',
+	koreacentral: 'Korea Central',
+	koreasouth: 'Korea South',
+	malaysiawest: 'Malaysia West',
+	northcentralus: 'North Central US',
+	northeurope: 'North Europe',
+	norwayeast: 'Norway East',
+	polandcentral: 'Poland Central',
+	qatarcentral: 'Qatar Central',
+	southafricanorth: 'South Africa North',
+	southcentralus: 'South Central US',
+	southeastasia: 'Southeast Asia',
+	southindia: 'South India',
+	spaincentral: 'Spain Central',
+	swedencentral: 'Sweden Central',
+	switzerlandnorth: 'Switzerland North',
+	uaenorth: 'UAE North',
+	uksouth: 'UK South',
+	ukwest: 'UK West',
+	westcentralus: 'West Central US',
+	westeurope: 'West Europe',
+	westindia: 'West India',
+	westus: 'West US',
+	westus2: 'West US 2',
+	westus3: 'West US 3'
+};
+
+const FEATURED_IMAGE_CANDIDATES = [
+	{
+		label: 'Ubuntu 24.04 LTS',
+		publisher: 'Canonical',
+		offer: 'ubuntu-24_04-lts',
+		sku: 'server',
+		osType: 'Linux'
+	},
+	{
+		label: 'Ubuntu 22.04 LTS Gen2',
+		publisher: 'Canonical',
+		offer: '0001-com-ubuntu-server-jammy',
+		sku: '22_04-lts-gen2',
+		osType: 'Linux'
+	},
+	{
+		label: 'Ubuntu 20.04 LTS Gen2',
+		publisher: 'Canonical',
+		offer: '0001-com-ubuntu-server-focal',
+		sku: '20_04-lts-gen2',
+		osType: 'Linux'
+	},
+	{
+		label: 'Debian 12 Gen2',
+		publisher: 'Debian',
+		offer: 'debian-12',
+		sku: '12-gen2',
+		osType: 'Linux'
+	},
+	{
+		label: 'Debian 11 Gen2',
+		publisher: 'Debian',
+		offer: 'debian-11',
+		sku: '11-gen2',
+		osType: 'Linux'
+	},
+	{
+		label: 'Windows Server 2022 Azure Edition',
+		publisher: 'MicrosoftWindowsServer',
+		offer: 'WindowsServer',
+		sku: '2022-datacenter-azure-edition',
+		osType: 'Windows'
+	},
+	{
+		label: 'Windows Server 2022 Datacenter Gen2',
+		publisher: 'MicrosoftWindowsServer',
+		offer: 'WindowsServer',
+		sku: '2022-datacenter-g2',
+		osType: 'Windows'
+	},
+	{
+		label: 'Windows Server 2019 Datacenter Gen2',
+		publisher: 'MicrosoftWindowsServer',
+		offer: 'WindowsServer',
+		sku: '2019-datacenter-gensecond',
+		osType: 'Windows'
+	}
+] as const;
 
 export function validateProxyUrl(proxyUrl: string) {
 	parseProxyUrl(proxyUrl);
@@ -264,6 +388,17 @@ function selectLargest(list: VmCapability[], key: 'cores' | 'memoryGB') {
 	})[0] ?? null;
 }
 
+function displayLocationName(location: string) {
+	return LOCATION_DISPLAY_NAMES[location.toLowerCase()] ?? location;
+}
+
+function latestImageVersion(versions: { name?: string }[]) {
+	return [...versions]
+		.map((version) => version.name ?? '')
+		.filter(Boolean)
+		.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }))[0];
+}
+
 async function collectPublicIps(clients: AzureClients, vm: { networkProfile?: { networkInterfaces?: { id?: string }[] } }) {
 	const ips = { publicIPv4: '', publicIPv6: '' };
 	for (const nicRef of vm.networkProfile?.networkInterfaces ?? []) {
@@ -354,6 +489,85 @@ export async function listVmCapabilities(
 		highestCoreSize: selectLargest(available, 'cores'),
 		largestMemorySize: selectLargest(available, 'memoryGB')
 	};
+}
+
+export async function listAvailableVmRegions(clients: AzureClients): Promise<AzureRegionOption[]> {
+	const byRegion = new Map<string, VmCapability[]>();
+
+	for await (const sku of clients.compute.resourceSkus.list()) {
+		if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
+		for (const region of sku.locations ?? []) {
+			const location = region.toLowerCase();
+			const capability = skuToCapability(sku, location);
+			if (capability.restricted) continue;
+			const list = byRegion.get(location) ?? [];
+			list.push(capability);
+			byRegion.set(location, list);
+		}
+	}
+
+	return [...byRegion.entries()]
+		.map(([name, available]) => ({
+			name,
+			displayName: displayLocationName(name),
+			availableSizeCount: available.length,
+			highestCoreSize: selectLargest(available, 'cores'),
+			largestMemorySize: selectLargest(available, 'memoryGB')
+		}))
+		.sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+export async function listFeaturedVmImages(
+	clients: AzureClients,
+	location: string
+): Promise<VmImageOption[]> {
+	const images: VmImageOption[] = [];
+
+	for (const candidate of FEATURED_IMAGE_CANDIDATES) {
+		try {
+			const versions = await clients.compute.virtualMachineImages.list(
+				location,
+				candidate.publisher,
+				candidate.offer,
+				candidate.sku,
+				{ top: 1, orderby: 'name desc' }
+			);
+			const version = latestImageVersion(versions);
+			if (!version) continue;
+
+			let architecture = '';
+			let hyperVGeneration = '';
+			try {
+				const image = await clients.compute.virtualMachineImages.get(
+					location,
+					candidate.publisher,
+					candidate.offer,
+					candidate.sku,
+					version
+				);
+				architecture = image.architecture ?? '';
+				hyperVGeneration = image.hyperVGeneration ?? '';
+			} catch {
+				// Version listing is enough for creation; details only enrich the dropdown.
+			}
+
+			images.push({
+				label: `${candidate.label} (${version})`,
+				imageReference: `${candidate.publisher}:${candidate.offer}:${candidate.sku}:${version}`,
+				publisher: candidate.publisher,
+				offer: candidate.offer,
+				sku: candidate.sku,
+				version,
+				osType: candidate.osType,
+				architecture,
+				hyperVGeneration
+			});
+		} catch {
+			// Some publishers/offers are not available in every region or subscription.
+		}
+	}
+
+	return images;
 }
 
 function usageToQuota(usage: Usage): ComputeQuota {
