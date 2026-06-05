@@ -119,6 +119,13 @@ SUCCESS_HINTS = (
 )
 
 
+def node_options():
+    return os.environ.get(
+        "NODE_OPTIONS",
+        "--max-old-space-size={}".format(os.environ.get("NODE_MAX_OLD_SPACE_SIZE", "192")),
+    )
+
+
 def text_indicates_success(value):
     if not isinstance(value, str):
         return False
@@ -198,7 +205,9 @@ def restart_node_project(mod_module, project_name, port=None):
 
 
 def build_web_env(port):
-    return "HOST=127.0.0.1\nPORT={}\nNODE_ENV=production".format(port)
+    return "HOST=127.0.0.1\nPORT={}\nNODE_ENV=production\nNODE_OPTIONS={}".format(
+        port, node_options()
+    )
 
 
 def register_nodejs_web(app_dir, domain, port, project_name, node_version):
@@ -282,7 +291,7 @@ def register_general_worker(app_dir, port, worker_name, node_version):
         bind_extranet=0,
         domains=[],
         project_ps="Azure Panel Worker",
-        env="NODE_ENV=production",
+        env="NODE_ENV=production\nNODE_OPTIONS={}".format(node_options()),
     )
 
     print("[aapanel] 创建 Worker 项目: {}".format(worker_name))

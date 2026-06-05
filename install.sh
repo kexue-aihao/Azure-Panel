@@ -10,6 +10,9 @@
 # 非交互安装:
 #   NON_INTERACTIVE=1 sudo ./install.sh
 #
+# 低内存服务器可选:
+#   NODE_MAX_OLD_SPACE_SIZE=192 sudo ./install.sh
+#
 
 set -euo pipefail
 

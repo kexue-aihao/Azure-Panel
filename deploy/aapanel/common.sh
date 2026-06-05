@@ -596,6 +596,52 @@ npm_install_with_registry() {
 	"$npm_bin" install --include=dev --registry="$registry"
 }
 
+node_memory_options() {
+	echo "${NODE_OPTIONS:---max-old-space-size=${NODE_MAX_OLD_SPACE_SIZE:-192}}"
+}
+
+prune_production_dependencies() {
+	local npm_bin="$1"
+	if [[ "${SKIP_NPM_PRUNE:-0}" == "1" ]]; then
+		warn "已跳过 npm production 裁剪 (SKIP_NPM_PRUNE=1)"
+		return 0
+	fi
+	log "裁剪生产依赖，移除 devDependencies..."
+	NODE_ENV=production "$npm_bin" prune --omit=dev --no-audit --no-fund >/dev/null 2>&1 \
+		&& log "生产依赖裁剪完成" \
+		|| warn "npm prune 失败，保留现有 node_modules"
+}
+
+post_deploy_cleanup() {
+	local app_dir="${1:-$(pwd)}"
+	local npm_bin="${2:-}"
+	local target
+
+	if [[ "${SKIP_DEPLOY_CLEANUP:-0}" == "1" ]]; then
+		warn "已跳过升级后清理 (SKIP_DEPLOY_CLEANUP=1)"
+		return 0
+	fi
+
+	log "清理升级/构建临时文件，降低磁盘与内存压力..."
+	for target in \
+		"${app_dir}/.svelte-kit" \
+		"${app_dir}/deploy/aapanel/generated/proxy-core-download" \
+		"${app_dir}/node_modules/.cache"; do
+		[[ -e "$target" ]] || continue
+		rm -rf "$target" 2>/dev/null || warn "清理失败: $target"
+	done
+
+	if [[ -n "$npm_bin" ]]; then
+		"$npm_bin" cache clean --force >/dev/null 2>&1 || true
+	fi
+
+	if [[ "${SKIP_DROP_CACHES:-0}" != "1" && -w /proc/sys/vm/drop_caches ]]; then
+		sync 2>/dev/null || true
+		echo 3 >/proc/sys/vm/drop_caches 2>/dev/null || true
+		log "已请求系统释放文件缓存"
+	fi
+}
+
 npm_build_all() {
 	require_node_tools
 	local npm_bin
@@ -640,6 +686,9 @@ npm_build_all() {
 	[[ -f build/index.js ]] || die "构建失败: 未找到 build/index.js"
 	[[ -f build/worker.js ]]  || die "构建失败: 未找到 build/worker.js"
 	log "构建完成"
+
+	prune_production_dependencies "$npm_bin"
+	post_deploy_cleanup "$(pwd)" "$npm_bin"
 }
 
 detect_arch_label() {
@@ -913,7 +962,9 @@ write_supervisor_configs() {
 	local app_port="$3"
 	local web_program="$4"
 	local worker_program="$5"
-	local conf_dir web_conf worker_conf web_body worker_body
+	local conf_dir web_conf worker_conf web_body worker_body node_opts
+
+	node_opts="$(node_memory_options)"
 
 	web_body="; Azure Panel Web — 由 install.sh 自动生成
 [program:${web_program}]
@@ -927,7 +978,7 @@ startretries=3
 stopwaitsecs=10
 stdout_logfile=/www/wwwlogs/${web_program}.log
 stderr_logfile=/www/wwwlogs/${web_program}-error.log
-environment=NODE_ENV=\"production\",HOST=\"127.0.0.1\",PORT=\"${app_port}\""
+environment=NODE_ENV=\"production\",NODE_OPTIONS=\"${node_opts}\",HOST=\"127.0.0.1\",PORT=\"${app_port}\""
 
 	worker_body="; Azure Panel Worker — 由 install.sh 自动生成
 [program:${worker_program}]
@@ -941,7 +992,7 @@ startretries=3
 stopwaitsecs=10
 stdout_logfile=/www/wwwlogs/${worker_program}.log
 stderr_logfile=/www/wwwlogs/${worker_program}-error.log
-environment=NODE_ENV=\"production\""
+environment=NODE_ENV=\"production\",NODE_OPTIONS=\"${node_opts}\""
 
 	mkdir -p /www/wwwlogs 2>/dev/null || true
 	mkdir -p "${app_dir}/deploy/aapanel/generated"

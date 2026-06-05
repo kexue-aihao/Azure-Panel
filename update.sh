@@ -16,6 +16,10 @@
 #   WORKER_PROGRAM=azure-panel-worker
 #   SKIP_SUPERVISOR=1          # 仅更新代码不重启进程
 #   SKIP_HEALTHCHECK=1         # 跳过健康检查
+#   NODE_MAX_OLD_SPACE_SIZE=192 # 生产 Node 进程 V8 内存上限（MB）
+#   SKIP_NPM_PRUNE=1           # 跳过移除 devDependencies
+#   SKIP_DEPLOY_CLEANUP=1      # 跳过构建缓存/临时目录清理
+#   SKIP_DROP_CACHES=1         # 跳过请求系统释放文件缓存
 #
 
 set -euo pipefail
