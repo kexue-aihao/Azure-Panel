@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { gunzip, inflateRaw as zlibInflateRaw } from 'node:zlib';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { decryptSecret } from './crypto';
 import { getProjectRoot, readEnv } from './runtime-env';
@@ -31,6 +34,7 @@ type VlessShare = {
 const managedProcesses = new Map<string, ManagedProcess>();
 const DEFAULT_MANAGED_PROXY_HOST = '127.0.0.1';
 const SUPPORTED_VLESS_TRANSPORTS = new Set(['tcp', 'ws', 'grpc']);
+const CORE_INSTALL_PROMISES = new Map<ManagedProxyCore, Promise<string>>();
 
 function safeDecode(value: string) {
 	try {
@@ -46,20 +50,179 @@ function managedDir() {
 	return dir;
 }
 
-function resolveCoreBinary(core: ManagedProxyCore) {
+function coreEnvKey(core: ManagedProxyCore) {
+	return core === 'sing-box' ? 'SING_BOX_BIN' : 'XRAY_BIN';
+}
+
+function localCorePath(core: ManagedProxyCore) {
+	const exe = process.platform === 'win32' ? '.exe' : '';
+	return join(getProjectRoot(), 'bin', `${core}${exe}`);
+}
+
+function resolveExistingCoreBinary(core: ManagedProxyCore) {
 	const envKey = core === 'sing-box' ? 'SING_BOX_BIN' : 'XRAY_BIN';
 	const envPath = readEnv(envKey);
 	if (envPath && existsSync(envPath)) return envPath;
 
-	const exe = process.platform === 'win32' ? '.exe' : '';
-	const local = join(getProjectRoot(), 'bin', `${core}${exe}`);
+	const local = localCorePath(core);
 	if (existsSync(local)) return local;
 
-	return core;
+	return '';
+}
+
+async function resolveCoreBinary(core: ManagedProxyCore) {
+	const existing = resolveExistingCoreBinary(core);
+	if (existing) return existing;
+	if (process.platform !== 'linux') {
+		throw new Error(`未找到 ${core} 核心，请在 .env 设置 ${coreEnvKey(core)}，或把核心放到 ${localCorePath(core)}`);
+	}
+	return ensureCoreInstalled(core);
 }
 
 function processKey(core: ManagedProxyCore, shareLink: string) {
 	return `${core}:${createHash('sha256').update(shareLink).digest('hex')}`;
+}
+
+function linuxArch() {
+	switch (process.arch) {
+		case 'x64':
+			return 'amd64';
+		case 'arm64':
+			return 'arm64';
+		default:
+			return '';
+	}
+}
+
+function coreDownloadUrl(core: ManagedProxyCore) {
+	const arch = linuxArch();
+	if (!arch) throw new Error(`当前 CPU 架构 ${process.arch} 暂不支持自动下载 ${core} 核心`);
+	if (core === 'sing-box') {
+		const version = readEnv('SING_BOX_VERSION') ?? '1.12.0';
+		return {
+			version,
+			url: `https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz`
+		};
+	}
+	const version = readEnv('XRAY_VERSION') ?? '25.4.30';
+	return {
+		version,
+		url: `https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${arch}.zip`
+	};
+}
+
+async function ensureCoreInstalled(core: ManagedProxyCore) {
+	const existing = CORE_INSTALL_PROMISES.get(core);
+	if (existing) return existing;
+	const promise = installCore(core).finally(() => CORE_INSTALL_PROMISES.delete(core));
+	CORE_INSTALL_PROMISES.set(core, promise);
+	return promise;
+}
+
+async function installCore(core: ManagedProxyCore) {
+	const target = localCorePath(core);
+	mkdirSync(dirname(target), { recursive: true });
+	const { version, url } = coreDownloadUrl(core);
+	const tempDir = await mkdtemp(join(tmpdir(), `azure-panel-${core}-`));
+	const archivePath = join(tempDir, basename(url));
+
+	try {
+		const response = await fetch(url);
+		if (!response.ok || !response.body) {
+			throw new Error(`下载 ${core} ${version} 失败: HTTP ${response.status}`);
+		}
+		await writeFile(archivePath, Buffer.from(await response.arrayBuffer()));
+
+		if (core === 'sing-box') {
+			await extractTarGzFile(archivePath, 'sing-box', target);
+		} else {
+			await extractZipFile(archivePath, 'xray', target);
+		}
+		await chmod(target, 0o755);
+		return target;
+	} catch (err) {
+		throw new Error(
+			`自动安装 ${core} 核心失败: ${err instanceof Error ? err.message : String(err)}。请运行 ./update.sh，或手动下载后在 .env 设置 ${coreEnvKey(core)}`
+		);
+	} finally {
+		await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+	}
+}
+
+async function extractTarGzFile(archivePath: string, wantedName: string, target: string) {
+	const archive = await gunzipBuffer(readFileSync(archivePath));
+	let offset = 0;
+	while (offset + 512 <= archive.length) {
+		const header = archive.subarray(offset, offset + 512);
+		offset += 512;
+		if (header.every((byte) => byte === 0)) break;
+
+		const fileName = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+		const sizeOctal = header.subarray(124, 136).toString('utf8').replace(/\0.*$/, '').trim();
+		const size = Number.parseInt(sizeOctal || '0', 8);
+		const typeFlag = header.subarray(156, 157).toString('utf8');
+		const dataStart = offset;
+		const dataEnd = dataStart + size;
+		if ((!typeFlag || typeFlag === '0') && basename(fileName) === wantedName) {
+			await writeFile(target, archive.subarray(dataStart, dataEnd));
+			return;
+		}
+		offset = dataStart + size + ((512 - (size % 512)) % 512);
+	}
+	throw new Error(`压缩包中未找到 ${wantedName}`);
+}
+
+async function extractZipFile(archivePath: string, wantedName: string, target: string) {
+	const buffer = readFileSync(archivePath);
+	let offset = 0;
+	while (offset < buffer.length - 30) {
+		if (buffer.readUInt32LE(offset) !== 0x04034b50) {
+			offset += 1;
+			continue;
+		}
+		const flags = buffer.readUInt16LE(offset + 6);
+		const method = buffer.readUInt16LE(offset + 8);
+		const compressedSize = buffer.readUInt32LE(offset + 18);
+		const fileNameLength = buffer.readUInt16LE(offset + 26);
+		const extraLength = buffer.readUInt16LE(offset + 28);
+		const fileName = buffer.subarray(offset + 30, offset + 30 + fileNameLength).toString('utf8');
+		const dataStart = offset + 30 + fileNameLength + extraLength;
+		const dataEnd = dataStart + compressedSize;
+		if ((flags & 0x08) !== 0) throw new Error('暂不支持带 data descriptor 的 zip 包');
+		if (basename(fileName) === wantedName) {
+			const compressed = buffer.subarray(dataStart, dataEnd);
+			let data: Buffer;
+			if (method === 0) {
+				data = compressed;
+			} else if (method === 8) {
+				data = await inflateRawBuffer(compressed);
+			} else {
+				throw new Error(`不支持的 zip 压缩方法: ${method}`);
+			}
+			await writeFile(target, data);
+			return;
+		}
+		offset = dataEnd;
+	}
+	throw new Error(`压缩包中未找到 ${wantedName}`);
+}
+
+function inflateRawBuffer(buffer: Buffer) {
+	return new Promise<Buffer>((resolve, reject) => {
+		zlibInflateRaw(buffer, (err: Error | null, result: Buffer) => {
+			if (err) reject(err);
+			else resolve(result);
+		});
+	});
+}
+
+function gunzipBuffer(buffer: Buffer) {
+	return new Promise<Buffer>((resolve, reject) => {
+		gunzip(buffer, (err, result) => {
+			if (err) reject(err);
+			else resolve(result);
+		});
+	});
 }
 
 async function allocateLocalPort() {
@@ -360,7 +523,7 @@ export async function startManagedProxyFromShareLink(
 	const config = buildConfig(core, shareLink, port);
 	writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 
-	const bin = resolveCoreBinary(core);
+	const bin = await resolveCoreBinary(core);
 	const child = spawn(bin, coreArgs(core, configPath), {
 		stdio: ['ignore', 'pipe', 'pipe'],
 		windowsHide: true

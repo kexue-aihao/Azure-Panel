@@ -259,7 +259,7 @@
 						<option value="xray">Xray</option>
 					</select>
 					<div class="text-xs text-muted">
-						保存时面板会启动所选核心，只监听 127.0.0.1，并把该节点转换成本机 HTTP 代理。
+						保存时面板会自动准备并启动所选核心，只监听 127.0.0.1，并把该节点转换成本机 HTTP 代理。
 					</div>
 				</div>
 			{/if}
