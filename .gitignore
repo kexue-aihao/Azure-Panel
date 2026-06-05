@@ -1,0 +1,13 @@
+node_modules
+.svelte-kit
+build
+.env
+data
+backend/.venv
+backend/data
+backend/**/__pycache__
+**/__pycache__
+*.pyc
+frontend/assets
+*.db
+*.db-*

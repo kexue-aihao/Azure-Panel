@@ -1,0 +1,13 @@
+import { error } from '@sveltejs/kit';
+import { findAccountByUser, listAccountsByUser } from './db/repo';
+import type { AzureAccount, User } from './db/schema';
+
+export async function getUserAccount(userId: number, accountId: number): Promise<AzureAccount> {
+	const account = await findAccountByUser(userId, accountId);
+	if (!account) error(404, 'Azure 账号不存在');
+	return account;
+}
+
+export async function listUserAccounts(user: User) {
+	return listAccountsByUser(user.id);
+}

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Azure Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              background: "hsl(222 47% 7%)",
+              card: "hsl(222 47% 10%)",
+              border: "hsl(217 33% 18%)",
+              primary: "hsl(217 91% 60%)",
+              muted: "hsl(215 20% 65%)",
+            },
+          },
+        },
+      };
+    </script>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body class="dark bg-background text-white min-h-screen">
+    <div id="app"></div>
+    <script src="/assets/app.js" type="module"></script>
+  </body>
+</html>

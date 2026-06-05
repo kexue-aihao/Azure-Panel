@@ -1,0 +1,20 @@
+import { isHttpError } from '@sveltejs/kit';
+import { createToken, registerUser } from '$lib/server/auth';
+import { fail, ok } from '$lib/server/http';
+import type { RequestHandler } from './$types';
+
+export const POST: RequestHandler = async ({ request }) => {
+	const body = await request.json();
+	const email = String(body.email ?? '');
+	const password = String(body.password ?? '');
+	if (!email || password.length < 6) return fail('邮箱无效或密码少于 6 位');
+
+	try {
+		const user = await registerUser(email, password);
+		const token = await createToken(user);
+		return ok({ token, email: user.email });
+	} catch (err) {
+		if (isHttpError(err)) return fail(String(err.body?.message ?? '注册失败'), err.status);
+		return fail('注册失败', 400);
+	}
+};
