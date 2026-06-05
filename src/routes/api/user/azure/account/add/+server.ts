@@ -13,12 +13,11 @@ export const POST: RequestHandler = async (event) => {
 	const tenantId = String(body.tenant_id ?? '');
 	const clientId = String(body.client_id ?? '');
 	const clientSecret = String(body.client_secret ?? '');
-	const subscriptionId = String(body.subscription_id ?? '');
 	const proxyUrl = String(body.proxy_url ?? '').trim();
 	const proxyProfileId = Number(body.proxy_profile_id ?? 0) || null;
 	const remark = String(body.remark ?? '');
 
-	if (!name || !tenantId || !clientId || !clientSecret || !subscriptionId) {
+	if (!name || !tenantId || !clientId || !clientSecret) {
 		return fail('请填写完整 Azure 凭据');
 	}
 
@@ -36,8 +35,10 @@ export const POST: RequestHandler = async (event) => {
 		? proxyProfileToRuntime(proxyProfile, { clientIp: event.getClientAddress() })
 		: proxyUrl;
 
+	let subscriptionId = '';
 	try {
-		await validateAzureCredentials(tenantId, clientId, clientSecret, subscriptionId, runtimeProxy);
+		const validation = await validateAzureCredentials(tenantId, clientId, clientSecret, runtimeProxy);
+		subscriptionId = validation.subscriptionId;
 	} catch (err) {
 		return fail(`Azure 凭据验证失败: ${String(err)}`, 400);
 	}

@@ -15,10 +15,14 @@
 		remark: string;
 	};
 
+	type ProxyMode = 'direct' | 'client_ip' | 'profile';
+	type ProxySource = 'fixed' | 'client_ip';
+
 	type ProxyProfile = {
 		id: number;
 		name: string;
 		type: 'http' | 'https' | 'socks4' | 'socks4a' | 'socks5' | 'shadowsocks';
+		source: ProxySource;
 		label: string;
 	};
 
@@ -29,11 +33,37 @@
 		tenant_id: '',
 		client_id: '',
 		client_secret: '',
-		subscription_id: '',
+		proxy_mode: 'direct' as ProxyMode,
 		proxy_profile_id: '',
 		remark: ''
 	});
 	let toast = $state('');
+	let fixedProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
+	let clientIpProxies = $derived(proxies.filter((proxy) => proxy.source === 'client_ip'));
+
+	function resetForm() {
+		form = {
+			name: '',
+			tenant_id: '',
+			client_id: '',
+			client_secret: '',
+			proxy_mode: 'direct',
+			proxy_profile_id: '',
+			remark: ''
+		};
+	}
+
+	function syncProxySelection() {
+		if (form.proxy_mode === 'direct') {
+			form.proxy_profile_id = '';
+			return;
+		}
+
+		const options = form.proxy_mode === 'client_ip' ? clientIpProxies : fixedProxies;
+		if (!options.some((proxy) => String(proxy.id) === form.proxy_profile_id)) {
+			form.proxy_profile_id = options[0] ? String(options[0].id) : '';
+		}
+	}
 
 	async function load() {
 		const [accountList, proxyList] = await Promise.all([
@@ -42,25 +72,36 @@
 		]);
 		accounts = accountList;
 		proxies = proxyList;
+		syncProxySelection();
 	}
 
 	async function submit(e: Event) {
 		e.preventDefault();
+		syncProxySelection();
+		if (form.proxy_mode !== 'direct' && !form.proxy_profile_id) {
+			toast =
+				form.proxy_mode === 'client_ip'
+					? '请先在“代理配置”添加一个使用当前访问网站 IP 的代理档案'
+					: '请先选择一个自定义代理档案';
+			return;
+		}
+
+		const payload = {
+			name: form.name,
+			tenant_id: form.tenant_id,
+			client_id: form.client_id,
+			client_secret: form.client_secret,
+			proxy_profile_id: form.proxy_mode === 'direct' ? '' : form.proxy_profile_id,
+			remark: form.remark
+		};
+
 		try {
 			await api('/api/user/azure/account/add', {
 				method: 'POST',
-				body: JSON.stringify(form)
+				body: JSON.stringify(payload)
 			});
 			toast = '账号添加成功';
-			form = {
-				name: '',
-				tenant_id: '',
-				client_id: '',
-				client_secret: '',
-				subscription_id: '',
-				proxy_profile_id: '',
-				remark: ''
-			};
+			resetForm();
 			await load();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '添加失败';
@@ -106,15 +147,49 @@
 			placeholder="Client Secret"
 			required
 		/>
-		<input class="input" bind:value={form.subscription_id} placeholder="Subscription ID" required />
-		<select class="input" bind:value={form.proxy_profile_id}>
-			<option value="">不使用代理（服务器源站 IP）</option>
-			{#each proxies as proxy}
-				<option value={String(proxy.id)}>{proxy.name} - {proxy.label}</option>
-			{/each}
-		</select>
+
+		<div class="space-y-2">
+			<label class="text-sm text-muted" for="account-proxy-mode">账号出站方式</label>
+			<select
+				id="account-proxy-mode"
+				class="input"
+				bind:value={form.proxy_mode}
+				onchange={syncProxySelection}
+			>
+				<option value="direct">不使用代理（服务器源站 IP）</option>
+				<option value="client_ip">使用当前访问网站 IP 的代理档案</option>
+				<option value="profile">选择自定义代理档案</option>
+			</select>
+		</div>
+
+		{#if form.proxy_mode === 'client_ip'}
+			{#if clientIpProxies.length === 0}
+				<div class="rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted">
+					还没有“当前访问网站 IP”代理档案，请先到“代理配置”添加。该访问者 IP
+					必须运行对应的 HTTP/SOCKS/Shadowsocks 代理端口。
+				</div>
+			{:else}
+				<select class="input" bind:value={form.proxy_profile_id} required>
+					{#each clientIpProxies as proxy}
+						<option value={String(proxy.id)}>{proxy.name} - {proxy.label}</option>
+					{/each}
+				</select>
+			{/if}
+		{:else if form.proxy_mode === 'profile'}
+			{#if fixedProxies.length === 0}
+				<div class="rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted">
+					还没有自定义固定代理档案，请先到“代理配置”添加 HTTP/SOCKS/Shadowsocks/本机代理。
+				</div>
+			{:else}
+				<select class="input" bind:value={form.proxy_profile_id} required>
+					{#each fixedProxies as proxy}
+						<option value={String(proxy.id)}>{proxy.name} - {proxy.label}</option>
+					{/each}
+				</select>
+			{/if}
+		{/if}
 		<p class="text-xs text-muted">
-			如需 HTTP/SOCKS/Shadowsocks/本机代理，请先到“代理配置”添加，例如 127.0.0.1:7890。
+			订阅 ID 会在保存时从 Azure 官网自动识别。选择代理档案后，此账号的验证、VM 查询、开关机和自动补机会走该代理出口。
 		</p>
 		<input class="input" bind:value={form.remark} placeholder="备注（可选）" />
 		<button class="btn-primary" type="submit">保存账号</button>

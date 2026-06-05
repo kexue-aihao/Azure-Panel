@@ -8,7 +8,14 @@ import type {
 	NetworkInterfaceIPConfiguration,
 	PublicIPAddress
 } from '@azure/arm-network';
-import type { ProxySettings } from '@azure/core-rest-pipeline';
+import {
+	createDefaultHttpClient,
+	createHttpHeaders,
+	createPipelineFromOptions,
+	createPipelineRequest,
+	type PipelineOptions,
+	type ProxySettings
+} from '@azure/core-rest-pipeline';
 import type { TokenCredentialOptions } from '@azure/identity';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import type { AzureAccount } from './db/schema';
@@ -127,7 +134,22 @@ export type AzureClients = {
 	subscriptionId: string;
 };
 
+export type AzureCredentialValidationResult = {
+	subscriptionId: string;
+};
+
+type AzureClientOptions = TokenCredentialOptions & PipelineOptions;
+
+type AzureSubscription = {
+	subscriptionId?: string;
+	displayName?: string;
+	state?: string;
+};
+
 const RUNNING = new Set(['PowerState/running', 'PowerState/starting']);
+const ARM_ENDPOINT = 'https://management.azure.com';
+const ARM_SCOPE = `${ARM_ENDPOINT}/.default`;
+const SUBSCRIPTIONS_API_VERSION = '2020-01-01';
 
 const LOCATION_DISPLAY_NAMES: Record<string, string> = {
 	australiacentral: 'Australia Central',
@@ -255,7 +277,7 @@ function proxySettings(proxy: ProxyRuntimeConfig): ProxySettings {
 	};
 }
 
-function azureClientOptions(proxy?: ProxyRuntimeConfig | null): TokenCredentialOptions {
+function azureClientOptions(proxy?: ProxyRuntimeConfig | null): AzureClientOptions {
 	if (!proxy) return {};
 	if (proxy.type === 'http' || proxy.type === 'https') {
 		return { proxyOptions: proxySettings(proxy) };
@@ -287,18 +309,73 @@ export function createAzureClients(account: AzureAccount, proxy?: ProxyRuntimeCo
 	};
 }
 
+function armResponseError(status: number, bodyAsText?: string | null) {
+	let detail = '';
+	try {
+		const parsed = bodyAsText ? JSON.parse(bodyAsText) : null;
+		detail = parsed?.error?.message ?? parsed?.error?.code ?? '';
+	} catch {
+		detail = bodyAsText ?? '';
+	}
+	return `Azure ARM 请求失败 (${status})${detail ? `: ${detail}` : ''}`;
+}
+
+async function discoverSubscriptionId(
+	credential: ClientSecretCredential,
+	clientOptions: AzureClientOptions
+) {
+	const token = await credential.getToken(ARM_SCOPE);
+	if (!token?.token) throw new Error('无法获取 Azure 访问令牌，请检查 Tenant ID、Client ID 和 Client Secret');
+
+	const pipeline = createPipelineFromOptions(clientOptions);
+	const httpClient = createDefaultHttpClient();
+	const subscriptions: AzureSubscription[] = [];
+	let nextLink = `${ARM_ENDPOINT}/subscriptions?api-version=${SUBSCRIPTIONS_API_VERSION}`;
+
+	while (nextLink) {
+		const response = await pipeline.sendRequest(
+			httpClient,
+			createPipelineRequest({
+				url: nextLink,
+				method: 'GET',
+				headers: createHttpHeaders({
+					accept: 'application/json',
+					authorization: `Bearer ${token.token}`
+				})
+			})
+		);
+
+		if (response.status < 200 || response.status >= 300) {
+			throw new Error(armResponseError(response.status, response.bodyAsText));
+		}
+
+		const payload = response.bodyAsText ? JSON.parse(response.bodyAsText) : {};
+		subscriptions.push(...((payload.value ?? []) as AzureSubscription[]));
+		nextLink = String(payload.nextLink ?? '');
+	}
+
+	const selected =
+		subscriptions.find((subscription) => subscription.state?.toLowerCase() === 'enabled') ??
+		subscriptions[0];
+	if (!selected?.subscriptionId) {
+		throw new Error('未发现可用 Azure 订阅，请确认 Service Principal 已分配订阅权限');
+	}
+	return selected.subscriptionId;
+}
+
 export async function validateAzureCredentials(
 	tenantId: string,
 	clientId: string,
 	clientSecret: string,
-	subscriptionId: string,
 	proxy?: ProxyRuntimeConfig | string | null
-) {
+): Promise<AzureCredentialValidationResult> {
 	const runtimeProxy = typeof proxy === 'string' ? parseProxyUrl(proxy) : proxy;
 	const clientOptions = azureClientOptions(runtimeProxy);
 	const credential = new ClientSecretCredential(tenantId, clientId, clientSecret, clientOptions);
+	const subscriptionId = await discoverSubscriptionId(credential, clientOptions);
 	const client = new ComputeManagementClient(credential, subscriptionId, clientOptions);
 	await client.virtualMachines.listAll().next();
+	return { subscriptionId };
 }
 
 function parseResourceGroup(resourceId: string): string {
