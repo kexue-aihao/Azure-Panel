@@ -49,6 +49,7 @@
 		location: string;
 		available: VmCapability[];
 		restricted: VmCapability[];
+		quotas: Quota[];
 		highest_core_size: VmCapability | null;
 		largest_memory_size: VmCapability | null;
 	};
@@ -293,6 +294,7 @@
 			});
 			appendProxyParams(params);
 			capabilities = await api<CapabilityResult>(`/api/user/azure/capability/list?${params}`);
+			quotas = capabilities.quotas ?? [];
 			if (
 				capabilities.available.length &&
 				!capabilities.available.some((item) => item.name === createForm.vm_size)
@@ -353,7 +355,7 @@
 		capabilities = null;
 		quotas = [];
 		images = [];
-		await Promise.all([loadCapabilities(), loadQuotas(), loadImages()]);
+		await Promise.all([loadCapabilities(), loadImages()]);
 	}
 
 	async function changeAccount() {

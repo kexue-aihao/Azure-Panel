@@ -68,6 +68,7 @@ export type VmCapabilitiesResult = {
 	location: string;
 	available: VmCapability[];
 	restricted: VmCapability[];
+	quotas: ComputeQuota[];
 	highestCoreSize: VmCapability | null;
 	largestMemorySize: VmCapability | null;
 };
@@ -378,6 +379,52 @@ const FEATURED_IMAGE_CANDIDATES = [
 		osType: 'Windows'
 	}
 ] as const;
+
+type TimedCacheEntry<T> = {
+	expiresAt: number;
+	value?: T;
+	promise?: Promise<T>;
+};
+
+const azureQueryCache = new Map<string, TimedCacheEntry<unknown>>();
+
+function cacheTtlMs(name: string, fallbackSeconds: number) {
+	const value = Number(readEnv(name) ?? fallbackSeconds);
+	return (Number.isFinite(value) && value > 0 ? value : fallbackSeconds) * 1000;
+}
+
+async function cachedAzureQuery<T>(
+	key: string,
+	ttlMs: number,
+	loader: () => Promise<T>
+): Promise<T> {
+	const now = Date.now();
+	const existing = azureQueryCache.get(key) as TimedCacheEntry<T> | undefined;
+	if (existing && existing.expiresAt > now) {
+		if (existing.value !== undefined) return existing.value;
+		if (existing.promise) return existing.promise;
+	}
+
+	const promise = loader()
+		.then((value) => {
+			azureQueryCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+			return value;
+		})
+		.catch((err) => {
+			azureQueryCache.delete(key);
+			throw err;
+		});
+	azureQueryCache.set(key, { promise, expiresAt: now + ttlMs });
+
+	if (azureQueryCache.size > 384) {
+		for (const [cacheKey, entry] of azureQueryCache) {
+			if (entry.expiresAt <= now) azureQueryCache.delete(cacheKey);
+			if (azureQueryCache.size <= 256) break;
+		}
+	}
+
+	return promise;
+}
 
 export function validateProxyUrl(proxyUrl: string) {
 	parseProxyUrl(proxyUrl);
@@ -890,7 +937,17 @@ function vmFamilyCandidates(capability: VmCapability) {
 	return { exact: [], fallback };
 }
 
-function quotaFamilyKeys(quota: ComputeQuota) {
+type QuotaIndexEntry = {
+	quota: ComputeQuota;
+	keys: string[];
+};
+
+type QuotaIndex = {
+	totalQuota?: ComputeQuota;
+	entries: QuotaIndexEntry[];
+};
+
+function quotaFamilyKeys(quota: ComputeQuota): string[] {
 	return [
 		quotaKey(quota.name),
 		quotaKey(quota.localizedName),
@@ -907,14 +964,14 @@ function matchesFamilyQuotaKey(candidate: string, keys: string[], allowPrefix: b
 
 function findQuotaByFamilyCandidate(
 	candidates: string[],
-	quotas: ComputeQuota[],
+	entries: QuotaIndexEntry[],
 	options: { allowPrefix: boolean }
 ) {
 	for (const candidate of candidates) {
-		const quota = quotas.find((item) =>
-			matchesFamilyQuotaKey(candidate, quotaFamilyKeys(item), options.allowPrefix)
+		const entry = entries.find((item) =>
+			matchesFamilyQuotaKey(candidate, item.keys, options.allowPrefix)
 		);
-		if (quota) return quota;
+		if (entry) return entry.quota;
 	}
 	return undefined;
 }
@@ -939,22 +996,33 @@ function findTotalRegionalVcpuQuota(quotas: ComputeQuota[]) {
 	return quotas.find(isTotalRegionalVcpuQuota);
 }
 
-function findFamilyQuota(capability: VmCapability, quotas: ComputeQuota[]) {
+function buildQuotaIndex(quotas: ComputeQuota[]): QuotaIndex {
+	return {
+		totalQuota: findTotalRegionalVcpuQuota(quotas),
+		entries: quotas.map((quota) => ({
+			quota,
+			keys: quotaFamilyKeys(quota)
+		}))
+	};
+}
+
+function findFamilyQuota(capability: VmCapability, index: QuotaIndex) {
 	const families = vmFamilyCandidates(capability);
 	return (
-		findQuotaByFamilyCandidate(families.exact, quotas, { allowPrefix: false }) ??
-		findQuotaByFamilyCandidate(families.fallback, quotas, { allowPrefix: true })
+		findQuotaByFamilyCandidate(families.exact, index.entries, { allowPrefix: false }) ??
+		findQuotaByFamilyCandidate(families.fallback, index.entries, { allowPrefix: true })
 	);
 }
 
 function applyQuotaToCapabilities(capabilities: VmCapability[], quotas: ComputeQuota[]) {
-	const totalQuota = findTotalRegionalVcpuQuota(quotas);
+	const quotaIndex = buildQuotaIndex(quotas);
+	const totalQuota = quotaIndex.totalQuota;
 	const totalRemaining = totalQuota?.remaining ?? 0;
 
 	return capabilities.map((capability) => {
 		const reasons = [...capability.restrictionReasons];
 		const required = capability.quotaRequired || capability.cores;
-		const familyQuota = findFamilyQuota(capability, quotas);
+		const familyQuota = findFamilyQuota(capability, quotaIndex);
 		const effectiveQuota = familyQuota ?? totalQuota;
 		let quotaRestricted = false;
 
@@ -1013,27 +1081,47 @@ async function listResourceSkuCapabilitiesForLocation(
 	clients: AzureClients,
 	location: string
 ): Promise<VmCapability[]> {
-	const capabilities: VmCapability[] = [];
-	for await (const sku of clients.compute.resourceSkus.list({
-		filter: `location eq '${location}'`
-	})) {
-		if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
-		if (!skuAppliesToLocation(sku, location)) continue;
-		capabilities.push(skuToCapability(sku, location));
-	}
-	return capabilities;
+	const normalizedLocation = normalizeLocationName(location);
+	const key = `vm-skus:${clients.subscriptionId}:${normalizedLocation}`;
+	const capabilities = await cachedAzureQuery(key, cacheTtlMs('AZURE_SKU_CACHE_TTL_SECONDS', 300), async () => {
+		const list: VmCapability[] = [];
+		for await (const sku of clients.compute.resourceSkus.list({
+			filter: `location eq '${normalizedLocation}'`
+		})) {
+			if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
+			if (!skuAppliesToLocation(sku, normalizedLocation)) continue;
+			list.push(skuToCapability(sku, normalizedLocation));
+		}
+		return list;
+	});
+	return capabilities.map((capability) => ({
+		...capability,
+		restrictionReasons: [...capability.restrictionReasons]
+	}));
 }
 
 async function listVmSizeCapabilitiesForLocation(
 	clients: AzureClients,
 	location: string
 ): Promise<VmCapability[]> {
-	const capabilities: VmCapability[] = [];
-	for await (const size of clients.compute.virtualMachineSizes.list(location)) {
-		if (!size.name) continue;
-		capabilities.push(vmSizeToCapability(size));
-	}
-	return capabilities;
+	const normalizedLocation = normalizeLocationName(location);
+	const key = `vm-sizes:${clients.subscriptionId}:${normalizedLocation}`;
+	const capabilities = await cachedAzureQuery(
+		key,
+		cacheTtlMs('AZURE_VM_SIZE_CACHE_TTL_SECONDS', 300),
+		async () => {
+			const list: VmCapability[] = [];
+			for await (const size of clients.compute.virtualMachineSizes.list(normalizedLocation)) {
+				if (!size.name) continue;
+				list.push(vmSizeToCapability(size));
+			}
+			return list;
+		}
+	);
+	return capabilities.map((capability) => ({
+		...capability,
+		restrictionReasons: [...capability.restrictionReasons]
+	}));
 }
 
 function resourceGroupToInfo(group: ResourceGroup): AzureResourceGroupInfo {
@@ -1162,6 +1250,7 @@ export async function listVmCapabilities(
 		location,
 		available,
 		restricted,
+		quotas,
 		highestCoreSize: selectLargest(available, 'cores'),
 		largestMemorySize: selectLargest(available, 'memoryGB')
 	};
@@ -1205,8 +1294,7 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 		if (quotas.length === 0) {
 			return null;
 		}
-		const legacySizes = await listVmSizeCapabilitiesForLocation(clients, name).catch(() => []);
-		const available = applyQuotaToCapabilities(mergeVisibleVmCapabilities(candidates, legacySizes), quotas)
+		const available = applyQuotaToCapabilities(candidates, quotas)
 			.filter((capability) => !capability.restricted)
 			.sort((a, b) => byCapacity(a, b));
 		if (available.length === 0) return null;
@@ -1383,11 +1471,20 @@ function usageToQuota(usage: Usage): ComputeQuota {
 }
 
 export async function listComputeQuotas(clients: AzureClients, location: string): Promise<ComputeQuota[]> {
-	const quotas: ComputeQuota[] = [];
-	for await (const usage of clients.compute.usageOperations.list(location)) {
-		quotas.push(usageToQuota(usage));
-	}
-	return quotas.sort((a, b) => a.localizedName.localeCompare(b.localizedName));
+	const normalizedLocation = normalizeLocationName(location);
+	const key = `compute-quotas:${clients.subscriptionId}:${normalizedLocation}`;
+	const quotas = await cachedAzureQuery(key, cacheTtlMs('AZURE_QUOTA_CACHE_TTL_SECONDS', 120), async () => {
+		const list: ComputeQuota[] = [];
+		for await (const usage of clients.compute.usageOperations.list(normalizedLocation)) {
+			list.push(usageToQuota(usage));
+		}
+		return list.sort((a, b) => {
+			const nameA = a.localizedName || a.name;
+			const nameB = b.localizedName || b.name;
+			return nameA.localeCompare(nameB);
+		});
+	});
+	return quotas.map((quota) => ({ ...quota }));
 }
 
 function aiAccountToInfo(

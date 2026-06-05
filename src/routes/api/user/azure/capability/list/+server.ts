@@ -20,6 +20,7 @@ export const GET: RequestHandler = async (event) => {
 			location: result.location,
 			available: result.available,
 			restricted: result.restricted,
+			quotas: result.quotas,
 			highest_core_size: result.highestCoreSize,
 			largest_memory_size: result.largestMemorySize
 		});
