@@ -279,6 +279,10 @@ setup_aapanel_resources() {
 		export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-1}"
 		return 0
 	fi
+
+	# aaPanel 注册失败时确保 Supervisor 仍可接管
+	export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-0}"
+	export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-0}"
 	return 1
 }
 

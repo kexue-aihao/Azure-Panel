@@ -433,6 +433,26 @@ detect_nodejs_version_label() {
 	echo "${NODEJS_VERSION:-v20.20.2}"
 }
 
+# 注册 aaPanel 站点前释放端口，避免与已有 Supervisor 进程冲突
+release_app_port() {
+	local port="$1"
+	local web_program="$2"
+	local worker_program="$3"
+
+	if [[ -n "$(find_supervisorctl)" ]]; then
+		log "停止 Supervisor 进程以释放端口 ${port}..."
+		run_supervisorctl stop "$web_program" "$worker_program" 2>/dev/null || true
+		sleep 1
+	fi
+
+	if command -v fuser >/dev/null 2>&1; then
+		fuser -k "${port}/tcp" 2>/dev/null || true
+	elif command -v lsof >/dev/null 2>&1; then
+		lsof -ti:"${port}" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+	fi
+	sleep 1
+}
+
 # 在 aaPanel 面板中注册 Web（Node 项目）与 Worker（通用项目），便于网站列表统一管理
 setup_aapanel_site() {
 	local app_dir="$1"
@@ -466,6 +486,8 @@ setup_aapanel_site() {
 	node_version="$(detect_nodejs_version_label)"
 	log "注册 aaPanel 站点: ${domain} (Node ${node_version})"
 
+	release_app_port "$port" "${WEB_PROGRAM:-azure-panel-web}" "${WORKER_PROGRAM:-azure-panel-worker}"
+
 	chmod +x "$py_script" 2>/dev/null || true
 	if NODEJS_VERSION="$node_version" \
 		WORKER_PROJECT_NAME="${WORKER_PROGRAM:-azure-panel-worker}" \
@@ -482,7 +504,7 @@ EOF
 		return 0
 	fi
 
-	warn "aaPanel 站点注册失败"
+	warn "aaPanel 站点注册失败，将回退 Supervisor 启动"
 	return 1
 }
 

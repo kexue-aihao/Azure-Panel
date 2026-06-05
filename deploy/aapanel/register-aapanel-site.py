@@ -1,19 +1,17 @@
 #!/www/server/panel/pyenv/bin/python3
 # -*- coding: utf-8 -*-
 """
-在 aaPanel 中注册 Azure Panel 资源，使其出现在面板「Node 项目 / 网站」中可管理。
+在 aaPanel 中注册 Azure Panel 资源，使其出现在面板「Node 项目」中可管理。
 
 用法:
   python3 register-aapanel-site.py <app_dir> <domain> <port> [project_name]
-
-示例:
-  python3 register-aapanel-site.py /www/wwwroot/Azure-Panel az.argoa.org 3000 Azure-Panel
 """
 from __future__ import print_function
 
 import json
 import os
 import sys
+import time
 
 
 PANEL_PATH = "/www/server/panel"
@@ -69,19 +67,97 @@ def build_get(**kwargs):
     return get
 
 
-def project_exists(name):
+def parse_project_config(row):
+    raw = row.get("project_config") if isinstance(row, dict) else None
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+def find_site_by_name(name):
     import public
 
-    return public.M("sites").where("name=?", (name,)).count() > 0
+    return public.M("sites").where("name=?", (name,)).find()
+
+
+def find_site_by_domain(domain):
+    import public
+
+    row = public.M("sites").where("name=?", (domain,)).find()
+    if row:
+        return row
+
+    for row in public.M("sites").select():
+        config = parse_project_config(row)
+        domains = config.get("domains") or []
+        if domain in domains:
+            return row
+    return None
+
+
+def is_node_site(row):
+    if not row:
+        return False
+    config = parse_project_config(row)
+    project_type = config.get("project_type") or row.get("project_type")
+    return project_type in ("nodejs", "general", "pm2", "node")
+
+
+def result_ok(res):
+    if isinstance(res, dict):
+        return bool(res.get("status"))
+    return bool(res)
+
+
+def result_message(res):
+    if not isinstance(res, dict):
+        return str(res)
+    for key in ("msg", "message", "error_msg", "data"):
+        if key in res and res[key]:
+            return res[key]
+    return str(res)
+
+
+def restart_node_project(mod_module, project_name):
+    import public
+
+    get = public.dict_obj()
+    get.project_name = project_name
+    try:
+        res = mod_module.main().restart_project(get)
+        if result_ok(res):
+            print("[aapanel] 重启成功: {}".format(project_name))
+            return True
+        print("[aapanel] 重启失败 ({}): {}".format(project_name, result_message(res)))
+        return False
+    except Exception as exc:
+        print("[aapanel] 重启异常 ({}): {}".format(project_name, exc))
+        return False
+
+
+def build_web_env(port):
+    return "HOST=127.0.0.1\nPORT={}\nNODE_ENV=production".format(port)
 
 
 def register_nodejs_web(app_dir, domain, port, project_name, node_version):
-    """注册 aaPanel Node.js 项目（Web，npm run start）"""
+    """注册或修复 aaPanel Node.js 项目（Web，npm run start）"""
     from mod.project.nodejs import nodeMod
 
-    if project_exists(project_name):
-        print("[aapanel] Node 项目已存在，跳过: {}".format(project_name))
-        return True
+    existing = find_site_by_name(project_name)
+    if existing:
+        print("[aapanel] Node 项目已存在，尝试重启: {}".format(project_name))
+        return restart_node_project(nodeMod, project_name)
+
+    domain_site = find_site_by_domain(domain)
+    if domain_site and is_node_site(domain_site):
+        name = domain_site.get("name")
+        print("[aapanel] 域名 {} 已绑定 Node 项目 {}，尝试重启".format(domain, name))
+        return restart_node_project(nodeMod, name)
 
     pkg = os.path.join(app_dir, "package.json")
     if not os.path.isfile(pkg):
@@ -103,7 +179,7 @@ def register_nodejs_web(app_dir, domain, port, project_name, node_version):
         bind_extranet=1 if domain else 0,
         domains=[domain] if domain else [],
         project_ps="Azure Panel Web",
-        env="",
+        env=build_web_env(port),
     )
 
     print("[aapanel] 创建 Node.js 项目: {} ({})".format(project_name, domain))
@@ -111,14 +187,19 @@ def register_nodejs_web(app_dir, domain, port, project_name, node_version):
         nodeMod.main().create_project(get)
         return True
     except SystemExit:
-        return False
+        pass
     except Exception as exc:
-        print("ERROR: Node 项目创建失败: {}".format(exc))
-        return False
+        print("[aapanel] 创建异常: {}".format(exc))
+
+    if find_site_by_name(project_name):
+        print("[aapanel] 项目记录已写入，尝试重启修复...")
+        return restart_node_project(nodeMod, project_name)
+
+    return False
 
 
 def register_general_worker(app_dir, port, worker_name, node_version):
-    """注册 aaPanel 通用 Node 项目（Worker，build/worker.js）"""
+    """注册或修复 aaPanel 通用 Node 项目（Worker）"""
     from mod.project.nodejs import generalMod
 
     worker_file = os.path.join(app_dir, "build", "worker.js")
@@ -126,9 +207,9 @@ def register_general_worker(app_dir, port, worker_name, node_version):
         print("WARN: 未找到 worker.js，跳过 Worker 项目注册")
         return True
 
-    if project_exists(worker_name):
-        print("[aapanel] Worker 项目已存在，跳过: {}".format(worker_name))
-        return True
+    if find_site_by_name(worker_name):
+        print("[aapanel] Worker 项目已存在，尝试重启: {}".format(worker_name))
+        return restart_node_project(generalMod, worker_name)
 
     get = build_get(
         project_type="general",
@@ -144,7 +225,7 @@ def register_general_worker(app_dir, port, worker_name, node_version):
         bind_extranet=0,
         domains=[],
         project_ps="Azure Panel Worker",
-        env="",
+        env="NODE_ENV=production",
     )
 
     print("[aapanel] 创建 Worker 项目: {}".format(worker_name))
@@ -152,53 +233,34 @@ def register_general_worker(app_dir, port, worker_name, node_version):
         generalMod.main().create_project(get)
         return True
     except SystemExit:
-        return False
+        pass
     except Exception as exc:
-        print("ERROR: Worker 项目创建失败: {}".format(exc))
-        return False
+        print("[aapanel] Worker 创建异常: {}".format(exc))
+
+    if find_site_by_name(worker_name):
+        print("[aapanel] Worker 记录已写入，尝试重启修复...")
+        return restart_node_project(generalMod, worker_name)
+
+    return False
 
 
-def register_site_proxy_fallback(domain, app_dir, port):
-    """回退：PHP 网站 + 反向代理（出现在「网站」列表）"""
-    import public
-    import panelSite
-
-    if project_exists(domain):
-        print("[aapanel] 网站已存在: {}".format(domain))
+def verify_local_health(port, retries=8):
+    try:
+        import urllib.request
+    except ImportError:
         return True
 
-    site = panelSite.panelSite()
-    get = build_get(
-        webname=json.dumps({"domain": domain, "domainlist": [], "count": 0}),
-        path=app_dir,
-        type_id=0,
-        type="PHP",
-        version="00",
-        port="80",
-        ps="Azure Panel",
-        ftp="false",
-        sql="false",
-    )
-    result = site.AddSite(get)
-    print("[aapanel] AddSite:", result)
-
-    proxy_get = build_get(
-        sitename=domain,
-        proxyname="azure-panel",
-        proxydir="/",
-        proxysite="http://127.0.0.1:{}".format(port),
-        todomain=domain,
-        type="0",
-        cache="0",
-        subfilter="[]",
-        advanced="0",
-        cachetime="1",
-        nocheck="1",
-    )
-    result = site.CreateProxy(proxy_get)
-    print("[aapanel] CreateProxy:", result)
-    public.serviceReload()
-    return True
+    url = "http://127.0.0.1:{}/api/health".format(port)
+    for _ in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                if resp.status == 200:
+                    print("[aapanel] 健康检查通过: {}".format(url))
+                    return True
+        except Exception:
+            time.sleep(1)
+    print("[aapanel] 健康检查未通过: {}".format(url))
+    return False
 
 
 def main():
@@ -222,17 +284,19 @@ def main():
     node_version = os.environ.get("NODEJS_VERSION", detect_nodejs_version())
     print("[aapanel] Node 版本: {}".format(node_version))
 
-    ok = register_nodejs_web(app_dir, domain, port, web_name, node_version)
-    if not ok:
-        print("[aapanel] Node 项目注册失败，尝试网站+反代回退...")
-        ok = register_site_proxy_fallback(domain, app_dir, port)
+    web_ok = register_nodejs_web(app_dir, domain, port, web_name, node_version)
+    worker_ok = True
+    if web_ok:
+        worker_ok = register_general_worker(app_dir, port, worker_name, node_version)
 
-    if ok:
-        register_general_worker(app_dir, port, worker_name, node_version)
-
-    if ok:
+    if web_ok and worker_ok and verify_local_health(port):
         print("[aapanel] 站点注册完成，请在 aaPanel → 网站 → Node 项目 中查看")
         sys.exit(0)
+
+    if web_ok and not verify_local_health(port):
+        print("[aapanel] 项目已注册但服务未响应，请检查 aaPanel Node 项目日志")
+        sys.exit(1)
+
     sys.exit(1)
 
 
