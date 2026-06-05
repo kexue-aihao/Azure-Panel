@@ -34,6 +34,7 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		client_id varchar(64) NOT NULL,
 		client_secret_encrypted text NOT NULL,
 		subscription_id varchar(64) NOT NULL,
+		proxy_url_encrypted text,
 		remark varchar(255) DEFAULT '',
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
@@ -109,6 +110,9 @@ async function ensureMysqlSchema(pool: Pool) {
 	for (const statement of MYSQL_SCHEMA_STATEMENTS) {
 		await pool.query(statement);
 	}
+	await pool.query('ALTER TABLE azure_accounts ADD COLUMN proxy_url_encrypted text NULL').catch((err) => {
+		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+	});
 }
 
 export async function initDatabase() {
@@ -159,6 +163,7 @@ export async function initDatabase() {
 			client_id TEXT NOT NULL,
 			client_secret_encrypted TEXT NOT NULL,
 			subscription_id TEXT NOT NULL,
+			proxy_url_encrypted TEXT DEFAULT '',
 			remark TEXT DEFAULT '',
 			created_at INTEGER NOT NULL
 		);
@@ -192,5 +197,9 @@ export async function initDatabase() {
 			created_at INTEGER NOT NULL
 		);
 	`);
+	const columns = sqlite.prepare('PRAGMA table_info(azure_accounts)').all() as Array<{ name: string }>;
+	if (!columns.some((column) => column.name === 'proxy_url_encrypted')) {
+		sqlite.exec("ALTER TABLE azure_accounts ADD COLUMN proxy_url_encrypted TEXT DEFAULT ''");
+	}
 	console.log('[db] Connected to SQLite:', dbPath);
 }

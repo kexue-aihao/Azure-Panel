@@ -22,6 +22,7 @@ export const azureAccounts = mysqlTable('azure_accounts', {
 	clientId: varchar('client_id', { length: 64 }).notNull(),
 	clientSecretEncrypted: text('client_secret_encrypted').notNull(),
 	subscriptionId: varchar('subscription_id', { length: 64 }).notNull(),
+	proxyUrlEncrypted: text('proxy_url_encrypted').default(''),
 	remark: varchar('remark', { length: 255 }).default(''),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });

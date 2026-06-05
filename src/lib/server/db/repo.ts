@@ -73,7 +73,9 @@ export async function findAccountByUser(userId: number, accountId: number): Prom
 }
 
 export async function insertAccount(
-	values: Omit<AzureAccount, 'id' | 'createdAt'>
+	values: Omit<AzureAccount, 'id' | 'createdAt' | 'proxyUrlEncrypted'> & {
+		proxyUrlEncrypted?: string | null;
+	}
 ): Promise<AzureAccount> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();

@@ -19,6 +19,7 @@ export const azureAccounts = sqliteTable('azure_accounts', {
 	clientId: text('client_id').notNull(),
 	clientSecretEncrypted: text('client_secret_encrypted').notNull(),
 	subscriptionId: text('subscription_id').notNull(),
+	proxyUrlEncrypted: text('proxy_url_encrypted').default(''),
 	remark: text('remark').default(''),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()

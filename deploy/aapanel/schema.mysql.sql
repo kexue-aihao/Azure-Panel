@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS `azure_accounts` (
   `client_id` varchar(64) NOT NULL,
   `client_secret_encrypted` text NOT NULL,
   `subscription_id` varchar(64) NOT NULL,
+  `proxy_url_encrypted` text,
   `remark` varchar(255) DEFAULT '',
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
