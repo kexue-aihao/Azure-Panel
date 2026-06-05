@@ -2,7 +2,7 @@ import { ClientSecretCredential } from '@azure/identity';
 import { ComputeManagementClient } from '@azure/arm-compute';
 import { NetworkManagementClient } from '@azure/arm-network';
 import { ResourceManagementClient } from '@azure/arm-resources';
-import type { ResourceSku, Usage, VirtualMachineSize } from '@azure/arm-compute';
+import type { ResourceSku, ResourceSkuRestrictions, Usage, VirtualMachineSize } from '@azure/arm-compute';
 import type { GenericResourceExpanded, Provider, ResourceGroup } from '@azure/arm-resources';
 import type {
 	NetworkInterface,
@@ -43,6 +43,7 @@ export type VmInfo = {
 
 export type VmCapability = {
 	name: string;
+	source: string;
 	family: string;
 	tier: string;
 	cores: number;
@@ -621,7 +622,10 @@ function parseResourceName(resourceId: string): string {
 }
 
 function capabilityValue(sku: ResourceSku, name: string): string {
-	return sku.capabilities?.find((capability) => capability.name === name)?.value ?? '';
+	const normalized = name.toLowerCase();
+	return (
+		sku.capabilities?.find((capability) => capability.name?.toLowerCase() === normalized)?.value ?? ''
+	);
 }
 
 function capabilityNumber(sku: ResourceSku, name: string): number {
@@ -629,27 +633,74 @@ function capabilityNumber(sku: ResourceSku, name: string): number {
 	return Number.isFinite(value) ? value : 0;
 }
 
+function capabilityNumberAny(sku: ResourceSku, names: string[]): number {
+	for (const name of names) {
+		const value = capabilityNumber(sku, name);
+		if (value > 0) return value;
+	}
+	return 0;
+}
+
+function normalizeLocationName(location: string) {
+	return location.toLowerCase().replace(/\s+/g, '');
+}
+
+function restrictionLocations(restriction: ResourceSkuRestrictions) {
+	return [
+		...(restriction.restrictionInfo?.locations ?? []),
+		...(restriction.values ?? [])
+	].filter(Boolean);
+}
+
+function restrictionAppliesToLocation(restriction: ResourceSkuRestrictions, location: string): boolean {
+	const normalized = normalizeLocationName(location);
+	const locations = restrictionLocations(restriction);
+	return (
+		locations.length === 0 ||
+		locations.some((item) => normalizeLocationName(item) === normalized)
+	);
+}
+
+function isLocationWideRestriction(restriction: ResourceSkuRestrictions) {
+	return restriction.type !== 'Zone';
+}
+
+function skuLocations(sku: ResourceSku) {
+	return [
+		...(sku.locations ?? []),
+		...(sku.locationInfo?.map((info) => info.location ?? '') ?? [])
+	]
+		.map((location) => normalizeLocationName(location))
+		.filter(Boolean);
+}
+
+function skuAppliesToLocation(sku: ResourceSku, location: string) {
+	const normalized = normalizeLocationName(location);
+	const locations = skuLocations(sku);
+	return locations.length === 0 || locations.some((item) => item === normalized);
+}
+
 function isLocationRestricted(sku: ResourceSku, location: string): boolean {
-	const normalized = location.toLowerCase();
 	return (
 		sku.restrictions?.some((restriction) => {
-			const locations = restriction.restrictionInfo?.locations ?? restriction.values ?? [];
-			const appliesToLocation =
-				locations.length === 0 || locations.some((item) => item.toLowerCase() === normalized);
-			return appliesToLocation && restriction.reasonCode === 'NotAvailableForSubscription';
+			return (
+				restrictionAppliesToLocation(restriction, location) &&
+				isLocationWideRestriction(restriction)
+			);
 		}) ?? false
 	);
 }
 
 function restrictionReasons(sku: ResourceSku, location: string): string[] {
-	const normalized = location.toLowerCase();
 	return (
 		sku.restrictions
 			?.filter((restriction) => {
-				const locations = restriction.restrictionInfo?.locations ?? restriction.values ?? [];
-				return locations.length === 0 || locations.some((item) => item.toLowerCase() === normalized);
+				return restrictionAppliesToLocation(restriction, location);
 			})
-			.map((restriction) => restriction.reasonCode ?? restriction.type ?? 'Restricted')
+			.map((restriction) => {
+				const reason = restriction.reasonCode ?? restriction.type ?? 'Restricted';
+				return restriction.type === 'Zone' ? `Zone:${reason}` : reason;
+			})
 			.filter(Boolean) ?? []
 	);
 }
@@ -658,6 +709,7 @@ function vmSizeToCapability(size: VirtualMachineSize): VmCapability {
 	const memoryGB = Math.round(((size.memoryInMB ?? 0) / 1024) * 100) / 100;
 	return {
 		name: size.name ?? '',
+		source: 'VirtualMachineSizes',
 		family: '',
 		tier: '',
 		cores: size.numberOfCores ?? 0,
@@ -678,11 +730,14 @@ function vmSizeToCapability(size: VirtualMachineSize): VmCapability {
 
 function skuToCapability(sku: ResourceSku, location: string): VmCapability {
 	const accelerated = capabilityValue(sku, 'AcceleratedNetworkingEnabled');
+	const quotaVcpus = capabilityNumber(sku, 'vCPUs');
+	const displayVcpus = capabilityNumberAny(sku, ['vCPUsAvailable', 'vCPUs']);
 	return {
 		name: sku.name ?? '',
+		source: 'ResourceSkus',
 		family: sku.family ?? '',
 		tier: sku.tier ?? '',
-		cores: capabilityNumber(sku, 'vCPUs'),
+		cores: displayVcpus,
 		memoryGB: capabilityNumber(sku, 'MemoryGB'),
 		maxDataDiskCount: capabilityNumber(sku, 'MaxDataDiskCount'),
 		acceleratedNetworking: accelerated ? accelerated.toLowerCase() === 'true' : null,
@@ -693,9 +748,51 @@ function skuToCapability(sku: ResourceSku, location: string): VmCapability {
 		quotaLocalizedName: '',
 		quotaRemaining: 0,
 		totalQuotaRemaining: 0,
-		quotaRequired: capabilityNumber(sku, 'vCPUs'),
+		quotaRequired: quotaVcpus || displayVcpus,
 		quotaRestricted: false
 	};
+}
+
+function mergeSource(a: string, b: string) {
+	return [...new Set([a, b].filter(Boolean).flatMap((source) => source.split('+')))].join('+');
+}
+
+function mergeCapability(a: VmCapability, b: VmCapability): VmCapability {
+	return {
+		...a,
+		source: mergeSource(a.source, b.source),
+		family: a.family || b.family,
+		tier: a.tier || b.tier,
+		cores: a.cores || b.cores,
+		memoryGB: a.memoryGB || b.memoryGB,
+		maxDataDiskCount: a.maxDataDiskCount || b.maxDataDiskCount,
+		acceleratedNetworking: a.acceleratedNetworking ?? b.acceleratedNetworking,
+		hyperVGenerations: a.hyperVGenerations || b.hyperVGenerations,
+		restricted: a.restricted || b.restricted,
+		restrictionReasons: [...new Set([...a.restrictionReasons, ...b.restrictionReasons])],
+		quotaRequired: a.quotaRequired || b.quotaRequired || a.cores || b.cores
+	};
+}
+
+function mergeVmCapabilities(...groups: VmCapability[][]) {
+	const byName = new Map<string, VmCapability>();
+	for (const group of groups) {
+		for (const capability of group) {
+			if (!capability.name) continue;
+			const key = capability.name.toLowerCase();
+			const existing = byName.get(key);
+			byName.set(key, existing ? mergeCapability(existing, capability) : capability);
+		}
+	}
+	return [...byName.values()];
+}
+
+function mergeAuthoritativeCapabilities(authoritative: VmCapability[], supplemental: VmCapability[]) {
+	const authoritativeNames = new Set(authoritative.map((item) => item.name.toLowerCase()));
+	return mergeVmCapabilities(
+		authoritative,
+		supplemental.filter((item) => authoritativeNames.has(item.name.toLowerCase()))
+	);
 }
 
 function byCapacity(a: VmCapability, b: VmCapability) {
@@ -753,6 +850,75 @@ function quotaKey(value: string) {
 	return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+function compactVmFamily(value: string) {
+	let key = quotaKey(value);
+	key = key.replace(/^standard/, '');
+	let previous = '';
+	while (previous !== key) {
+		previous = key;
+		key = key
+			.replace(/families$/, '')
+			.replace(/family$/, '')
+			.replace(/series$/, '')
+			.replace(/vcpus$/, '')
+			.replace(/vcpu$/, '')
+			.replace(/cores$/, '');
+	}
+	return key;
+}
+
+function fallbackVmFamilyCandidatesFromName(name: string) {
+	const candidates = new Set<string>();
+	const raw = name.replace(/^Standard_/i, '');
+	const version = raw.match(/_(v\d+)$/i)?.[1] ?? '';
+	const base = raw.replace(/_(v\d+)$/i, '');
+	const normalized = base.replace(/^([A-Za-z]+)\d+(?:-\d+)?([A-Za-z]*)$/i, '$1$2');
+
+	for (const candidate of [normalized + version, normalized]) {
+		const compact = compactVmFamily(candidate);
+		if (compact) candidates.add(compact);
+	}
+
+	return [...candidates].filter(Boolean);
+}
+
+function vmFamilyCandidates(capability: VmCapability) {
+	const family = compactVmFamily(capability.family);
+	if (family) return { exact: [family], fallback: [] };
+
+	const fallback = fallbackVmFamilyCandidatesFromName(capability.name);
+	return { exact: [], fallback };
+}
+
+function quotaFamilyKeys(quota: ComputeQuota) {
+	return [
+		quotaKey(quota.name),
+		quotaKey(quota.localizedName),
+		compactVmFamily(quota.name),
+		compactVmFamily(quota.localizedName)
+	].filter(Boolean);
+}
+
+function matchesFamilyQuotaKey(candidate: string, keys: string[], allowPrefix: boolean) {
+	if (keys.some((key) => key === candidate || key === `${candidate}vcpus`)) return true;
+	if (!allowPrefix || candidate.length < 2) return false;
+	return keys.some((key) => key.startsWith(candidate) || candidate.startsWith(key));
+}
+
+function findQuotaByFamilyCandidate(
+	candidates: string[],
+	quotas: ComputeQuota[],
+	options: { allowPrefix: boolean }
+) {
+	for (const candidate of candidates) {
+		const quota = quotas.find((item) =>
+			matchesFamilyQuotaKey(candidate, quotaFamilyKeys(item), options.allowPrefix)
+		);
+		if (quota) return quota;
+	}
+	return undefined;
+}
+
 function isTotalRegionalVcpuQuota(quota: ComputeQuota) {
 	const name = quotaKey(quota.name);
 	const localized = quotaKey(quota.localizedName);
@@ -774,19 +940,11 @@ function findTotalRegionalVcpuQuota(quotas: ComputeQuota[]) {
 }
 
 function findFamilyQuota(capability: VmCapability, quotas: ComputeQuota[]) {
-	const family = quotaKey(capability.family);
-	if (!family) return undefined;
-	return quotas.find((quota) => {
-		const name = quotaKey(quota.name);
-		const localized = quotaKey(quota.localizedName);
-		return (
-			name === family ||
-			name === `${family}vcpus` ||
-			localized === family ||
-			localized === `${family}vcpus` ||
-			localized.startsWith(family)
-		);
-	});
+	const families = vmFamilyCandidates(capability);
+	return (
+		findQuotaByFamilyCandidate(families.exact, quotas, { allowPrefix: false }) ??
+		findQuotaByFamilyCandidate(families.fallback, quotas, { allowPrefix: true })
+	);
 }
 
 function applyQuotaToCapabilities(capabilities: VmCapability[], quotas: ComputeQuota[]) {
@@ -795,7 +953,7 @@ function applyQuotaToCapabilities(capabilities: VmCapability[], quotas: ComputeQ
 
 	return capabilities.map((capability) => {
 		const reasons = [...capability.restrictionReasons];
-		const required = capability.cores;
+		const required = capability.quotaRequired || capability.cores;
 		const familyQuota = findFamilyQuota(capability, quotas);
 		const effectiveQuota = familyQuota ?? totalQuota;
 		let quotaRestricted = false;
@@ -849,6 +1007,33 @@ async function mapWithConcurrency<T, R>(
 	});
 	await Promise.all(workers);
 	return results;
+}
+
+async function listResourceSkuCapabilitiesForLocation(
+	clients: AzureClients,
+	location: string
+): Promise<VmCapability[]> {
+	const capabilities: VmCapability[] = [];
+	for await (const sku of clients.compute.resourceSkus.list({
+		filter: `location eq '${location}'`
+	})) {
+		if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
+		if (!skuAppliesToLocation(sku, location)) continue;
+		capabilities.push(skuToCapability(sku, location));
+	}
+	return capabilities;
+}
+
+async function listVmSizeCapabilitiesForLocation(
+	clients: AzureClients,
+	location: string
+): Promise<VmCapability[]> {
+	const capabilities: VmCapability[] = [];
+	for await (const size of clients.compute.virtualMachineSizes.list(location)) {
+		if (!size.name) continue;
+		capabilities.push(vmSizeToCapability(size));
+	}
+	return capabilities;
 }
 
 function resourceGroupToInfo(group: ResourceGroup): AzureResourceGroupInfo {
@@ -959,16 +1144,13 @@ export async function listVmCapabilities(
 	clients: AzureClients,
 	location: string
 ): Promise<VmCapabilitiesResult> {
-	const skus: VmCapability[] = [];
-
-	for await (const sku of clients.compute.resourceSkus.list({
-		filter: `location eq '${location}'`
-	})) {
-		if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
-		skus.push(skuToCapability(sku, location));
-	}
-
-	const quotaAware = applyQuotaToCapabilities(skus, await listComputeQuotas(clients, location));
+	const [resourceSkus, legacySizes, quotas] = await Promise.all([
+		listResourceSkuCapabilitiesForLocation(clients, location),
+		listVmSizeCapabilitiesForLocation(clients, location).catch(() => []),
+		listComputeQuotas(clients, location)
+	]);
+	const merged = mergeAuthoritativeCapabilities(resourceSkus, legacySizes);
+	const quotaAware = applyQuotaToCapabilities(merged, quotas);
 	const available = quotaAware
 		.filter((sku) => !sku.restricted)
 		.sort((a, b) => byCapacity(a, b));
@@ -991,8 +1173,8 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 	try {
 		for await (const sku of clients.compute.resourceSkus.list()) {
 			if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
-			for (const region of sku.locations ?? []) {
-				const location = region.toLowerCase();
+			for (const region of skuLocations(sku)) {
+				const location = normalizeLocationName(region);
 				const capability = skuToCapability(sku, location);
 				if (capability.restricted) continue;
 				const list = byRegion.get(location) ?? [];
@@ -1008,8 +1190,11 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 		throw new Error('Azure 官方 API 没有返回当前订阅可创建 VM 的区域');
 	}
 
-	const configuredScanLimit = Number(readEnv('AZURE_REGION_SCAN_LIMIT') ?? 24);
-	const maxScan = Number.isFinite(configuredScanLimit) ? Math.max(1, configuredScanLimit) : 24;
+	const configuredScanLimit = Number(readEnv('AZURE_REGION_SCAN_LIMIT') ?? byRegion.size);
+	const maxScan =
+		Number.isFinite(configuredScanLimit) && configuredScanLimit > 0
+			? Math.min(byRegion.size, Math.max(1, configuredScanLimit))
+			: byRegion.size;
 	const entries = rankRegionEntries([...byRegion.entries()]).slice(0, maxScan);
 	const quotaErrors: string[] = [];
 	const regions = await mapWithConcurrency(entries, 3, async ([name, candidates]) => {
@@ -1020,7 +1205,8 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 		if (quotas.length === 0) {
 			return null;
 		}
-		const available = applyQuotaToCapabilities(candidates, quotas)
+		const legacySizes = await listVmSizeCapabilitiesForLocation(clients, name).catch(() => []);
+		const available = applyQuotaToCapabilities(mergeAuthoritativeCapabilities(candidates, legacySizes), quotas)
 			.filter((capability) => !capability.restricted)
 			.sort((a, b) => byCapacity(a, b));
 		if (available.length === 0) return null;

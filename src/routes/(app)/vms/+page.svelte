@@ -14,6 +14,7 @@
 	};
 	type VmCapability = {
 		name: string;
+		source: string;
 		family: string;
 		tier: string;
 		cores: number;
@@ -521,7 +522,7 @@
 							</tr>
 						</thead>
 						<tbody>
-							{#each capabilities.available.slice(-80).reverse() as item}
+							{#each [...capabilities.available].reverse() as item}
 								<tr class="border-b border-border/60">
 									<td class="p-2">{item.name}</td>
 									<td class="p-2">{item.cores}</td>
