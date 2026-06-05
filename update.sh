@@ -118,18 +118,11 @@ if [[ ! -f .env ]]; then
 fi
 
 HEALTH_PORT="$(read_port_from_env .env "$HEALTH_PORT")"
+fix_env_file_permissions ".env"
 
 # ---------- 安装依赖 & 构建 ----------
-env_db_driver="$(get_env_value DB_DRIVER .env)"
-env_mysql_host="$(get_env_value MYSQL_HOST .env)"
-if [[ "${DB_DRIVER:-$env_db_driver}" == "mysql" || -n "$env_mysql_host" ]]; then
-	register_aapanel_database_record \
-		"$env_mysql_host" \
-		"$(get_env_value MYSQL_PORT .env)" \
-		"$(get_env_value MYSQL_USER .env)" \
-		"$(get_env_value MYSQL_PASSWORD .env)" \
-		"$(get_env_value MYSQL_DATABASE .env)" \
-		"${DOMAIN:-Azure Panel}"
+if env_uses_mysql ".env"; then
+	repair_mysql_from_env ".env" "$APP_DIR" || warn "MySQL 自检/修复未完成，后续健康检查可能失败"
 fi
 
 npm_build_all

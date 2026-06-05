@@ -194,7 +194,7 @@ setup_env() {
 	write_env_file ".env" \
 		"$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD" "$MYSQL_DATABASE" \
 		"$SECRET_KEY" "$ENCRYPTION_KEY" "$APP_PORT"
-	chmod 600 .env 2>/dev/null || true
+	fix_env_file_permissions ".env"
 }
 
 setup_mysql() {
@@ -212,7 +212,7 @@ setup_mysql() {
 	fi
 
 	if [[ "${SKIP_CREATE_DB:-0}" != "1" ]]; then
-		if test_mysql_app_connection "$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD"; then
+		if test_mysql_app_connection "$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD" "$MYSQL_DATABASE"; then
 			log "数据库用户已存在且可连接，跳过建库"
 		else
 			create_mysql_database_and_user \
@@ -222,7 +222,7 @@ setup_mysql() {
 		warn "已跳过自动建库 (SKIP_CREATE_DB=1)"
 	fi
 
-	test_mysql_app_connection "$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD" \
+	test_mysql_app_connection "$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD" "$MYSQL_DATABASE" \
 		|| die "数据库连接失败，请检查 MySQL 服务与账号"
 
 	import_mysql_schema "$schema" "$MYSQL_HOST" "$MYSQL_PORT" \

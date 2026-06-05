@@ -206,7 +206,55 @@ rand_hex() {
 get_env_value() {
 	local key="$1"
 	local file="$2"
-	grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'"
+	local line name value first last
+	[[ -f "$file" ]] || return 0
+
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		line="${line%$'\r'}"
+		line="${line#"${line%%[![:space:]]*}"}"
+		line="${line%"${line##*[![:space:]]}"}"
+		[[ -z "$line" || "$line" == \#* ]] && continue
+
+		if [[ "$line" =~ ^export[[:space:]]+(.+)$ ]]; then
+			line="${BASH_REMATCH[1]}"
+		fi
+
+		if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+			name="${BASH_REMATCH[1]}"
+			[[ "$name" == "$key" ]] || continue
+
+			value="${BASH_REMATCH[2]}"
+			value="${value#"${value%%[![:space:]]*}"}"
+			value="${value%"${value##*[![:space:]]}"}"
+			first="${value:0:1}"
+			last="${value: -1}"
+			if [[ ${#value} -ge 2 && ( ( "$first" == '"' && "$last" == '"' ) || ( "$first" == "'" && "$last" == "'" ) ) ]]; then
+				value="${value:1:${#value}-2}"
+			fi
+			printf '%s\n' "$value"
+		fi
+	done <"$file" | tail -1
+}
+
+env_uses_mysql() {
+	local env_file="$1"
+	local db_driver mysql_host database_url
+	db_driver="$(get_env_value DB_DRIVER "$env_file" | tr '[:upper:]' '[:lower:]')"
+	mysql_host="$(get_env_value MYSQL_HOST "$env_file")"
+	database_url="$(get_env_value DATABASE_URL "$env_file")"
+	[[ "$db_driver" == "mysql" || -n "$mysql_host" || "$database_url" == mysql* ]]
+}
+
+fix_env_file_permissions() {
+	local env_file="$1"
+	[[ -f "$env_file" ]] || return 0
+
+	if id -u www >/dev/null 2>&1; then
+		chown root:www "$env_file" 2>/dev/null || chgrp www "$env_file" 2>/dev/null || true
+		chmod 640 "$env_file" 2>/dev/null || true
+	else
+		chmod 600 "$env_file" 2>/dev/null || true
+	fi
 }
 
 read_port_from_env() {
@@ -311,6 +359,8 @@ create_mysql_database_and_user() {
 	local mysql_user="$3"
 	local mysql_password="$4"
 	local mysql_database="$5"
+	local MYSQL_HOST="$mysql_host"
+	local MYSQL_PORT="$mysql_port"
 
 	require_cmd mysql
 	log "创建 MySQL 数据库与用户..."
@@ -466,8 +516,13 @@ test_mysql_app_connection() {
 	local mysql_port="$2"
 	local mysql_user="$3"
 	local mysql_password="$4"
+	local mysql_database="${5:-}"
 
-	MYSQL_PWD="$mysql_password" mysql -h"$mysql_host" -P"$mysql_port" -u"$mysql_user" -e "SELECT 1" >/dev/null 2>&1
+	if [[ -n "$mysql_database" ]]; then
+		MYSQL_PWD="$mysql_password" mysql -h"$mysql_host" -P"$mysql_port" -u"$mysql_user" "$mysql_database" -e "SELECT 1" >/dev/null 2>&1
+	else
+		MYSQL_PWD="$mysql_password" mysql -h"$mysql_host" -P"$mysql_port" -u"$mysql_user" -e "SELECT 1" >/dev/null 2>&1
+	fi
 }
 
 import_mysql_schema() {
@@ -483,6 +538,56 @@ import_mysql_schema() {
 	MYSQL_PWD="$mysql_password" mysql -h"$mysql_host" -P"$mysql_port" -u"$mysql_user" "$mysql_database" < <(
 		sed '/^CREATE DATABASE/d; /^USE /d' "$schema_file"
 	)
+}
+
+repair_mysql_from_env() {
+	local env_file="${1:-.env}"
+	local app_dir="${2:-$(pwd)}"
+	local schema="${app_dir}/deploy/aapanel/schema.mysql.sql"
+	local mysql_host mysql_port mysql_user mysql_password mysql_database
+
+	env_uses_mysql "$env_file" || return 0
+
+	mysql_host="$(get_env_value MYSQL_HOST "$env_file")"
+	mysql_port="$(get_env_value MYSQL_PORT "$env_file")"
+	mysql_user="$(get_env_value MYSQL_USER "$env_file")"
+	mysql_password="$(get_env_value MYSQL_PASSWORD "$env_file")"
+	mysql_database="$(get_env_value MYSQL_DATABASE "$env_file")"
+
+	mysql_host="${mysql_host:-127.0.0.1}"
+	mysql_port="${mysql_port:-3306}"
+	mysql_user="${mysql_user:-azure_panel}"
+	mysql_database="${mysql_database:-azure_panel}"
+
+	if [[ -z "$mysql_password" || "$mysql_password" == "your-mysql-password" ]]; then
+		warn "MySQL 密码为空或仍是占位值，请先运行 install.sh 生成真实 .env，或手动填写 MYSQL_PASSWORD"
+		return 1
+	fi
+
+	if ! command -v mysql >/dev/null 2>&1; then
+		warn "未找到 mysql 客户端，跳过 MySQL 自检/补建；请在 aaPanel 安装 MySQL"
+		return 1
+	fi
+
+	log "检查 MySQL 数据库连接: ${mysql_database} (${mysql_user}@${mysql_host}:${mysql_port})"
+	if ! test_mysql_app_connection "$mysql_host" "$mysql_port" "$mysql_user" "$mysql_password" "$mysql_database"; then
+		warn "应用数据库连接失败，尝试自动创建/修复数据库与用户"
+		create_mysql_database_and_user "$mysql_host" "$mysql_port" "$mysql_user" "$mysql_password" "$mysql_database"
+	fi
+
+	test_mysql_app_connection "$mysql_host" "$mysql_port" "$mysql_user" "$mysql_password" "$mysql_database" \
+		|| { warn "MySQL 连接仍失败，请检查 .env 中 MYSQL_* 配置"; return 1; }
+
+	if [[ -f "$schema" ]]; then
+		import_mysql_schema "$schema" "$mysql_host" "$mysql_port" "$mysql_user" "$mysql_password" "$mysql_database"
+		log "MySQL 表结构已确认"
+	else
+		warn "未找到 schema 文件，跳过表结构导入: $schema"
+	fi
+
+	register_aapanel_database_record \
+		"$mysql_host" "$mysql_port" "$mysql_user" "$mysql_password" "$mysql_database" \
+		"${DOMAIN:-Azure Panel}"
 }
 
 npm_install_with_registry() {
@@ -839,6 +944,7 @@ restart_supervisor_programs() {
 
 health_check() {
 	local port="$1"
+	local body status
 	log "健康检查 http://127.0.0.1:${port}/api/health ..."
 	sleep 2
 	if command -v curl >/dev/null 2>&1; then
@@ -846,7 +952,11 @@ health_check() {
 			log "健康检查通过 ✓"
 			return 0
 		fi
-		warn "健康检查未通过，请查看 /www/wwwlogs/ 下日志"
+		body="$(curl -sS "http://127.0.0.1:${port}/api/health" 2>&1 || true)"
+		status="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}/api/health" 2>/dev/null || true)"
+		[[ -n "$status" ]] && warn "健康检查 HTTP 状态: $status"
+		[[ -n "$body" ]] && warn "健康检查响应: $body"
+		warn "健康检查未通过，请查看 aaPanel Node 项目日志或 /www/wwwlogs/ 下日志"
 		return 1
 	fi
 	warn "未安装 curl，跳过健康检查"

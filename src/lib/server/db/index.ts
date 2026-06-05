@@ -3,8 +3,8 @@ import { drizzle as drizzleSqlite } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzleMysql } from 'drizzle-orm/mysql2';
 import { createPool, type Pool } from 'mysql2/promise';
 import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { readEnv } from '../runtime-env';
+import { dirname, isAbsolute, resolve } from 'node:path';
+import { getProjectRoot, readEnv } from '../runtime-env';
 import * as sqliteSchema from './schema';
 import * as mysqlSchema from './schema.mysql';
 
@@ -115,22 +115,29 @@ export async function initDatabase() {
 	driver = resolveDriver();
 
 	if (driver === 'mysql') {
+		const host = readEnv('MYSQL_HOST') ?? '127.0.0.1';
+		const port = Number(readEnv('MYSQL_PORT') ?? '3306');
+		const user = readEnv('MYSQL_USER') ?? 'azure_panel';
+		const database = readEnv('MYSQL_DATABASE') ?? 'azure_panel';
 		mysqlPool = createPool({
-			host: readEnv('MYSQL_HOST') ?? '127.0.0.1',
-			port: Number(readEnv('MYSQL_PORT') ?? '3306'),
-			user: readEnv('MYSQL_USER') ?? 'azure_panel',
+			host,
+			port,
+			user,
 			password: readEnv('MYSQL_PASSWORD') ?? '',
-			database: readEnv('MYSQL_DATABASE') ?? 'azure_panel',
+			database,
 			waitForConnections: true,
 			connectionLimit: 10
 		});
 		mysqlDb = drizzleMysql(mysqlPool, { schema: mysqlSchema, mode: 'default' }) as unknown as MysqlDb;
 		await ensureMysqlSchema(mysqlPool);
-		console.log('[db] Connected to MySQL');
+		console.log(`[db] Connected to MySQL: ${user}@${host}:${port}/${database}`);
 		return;
 	}
 
-	const dbPath = readEnv('SQLITE_PATH') ?? './data/azure-panel.db';
+	const configuredPath = readEnv('SQLITE_PATH') ?? './data/azure-panel.db';
+	const dbPath = isAbsolute(configuredPath)
+		? configuredPath
+		: resolve(getProjectRoot(), configuredPath);
 	mkdirSync(dirname(dbPath), { recursive: true });
 	const sqlite = new Database(dbPath);
 	sqlite.pragma('journal_mode = WAL');
