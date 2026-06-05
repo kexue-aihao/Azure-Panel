@@ -2,35 +2,51 @@
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
 
-	type ProxyType = 'http' | 'https' | 'socks4' | 'socks5';
+	type ProxyType = 'http' | 'https' | 'socks4' | 'socks4a' | 'socks5' | 'shadowsocks';
+	type ProxySource = 'fixed' | 'client_ip';
 
 	type ProxyProfile = {
 		id: number;
 		name: string;
 		type: ProxyType;
+		source: ProxySource;
 		host: string;
 		port: number;
 		auth_enabled: boolean;
 		label: string;
+		method: string;
 	};
 
 	let proxies = $state<ProxyProfile[]>([]);
 	let form = $state({
-		name: 'Clash Verge',
+		name: '',
 		type: 'http' as ProxyType,
-		host: '127.0.0.1',
-		port: 7890,
+		source: 'fixed' as ProxySource,
+		host: '',
+		port: 0,
+		method: '',
 		username: '',
 		password: ''
 	});
 	let toast = $state('');
 
 	const typeLabels: Record<ProxyType, string> = {
-		http: 'HTTP',
-		https: 'HTTPS',
-		socks4: 'SOCKS4',
-		socks5: 'SOCKS5'
+		http: 'http',
+		https: 'https',
+		socks4: 'socks4',
+		socks4a: 'socks4a',
+		socks5: 'socks5',
+		shadowsocks: 'shadowsocks'
 	};
+	const shadowMethods = [
+		'aes-128-gcm',
+		'aes-192-gcm',
+		'aes-256-gcm',
+		'chacha20-ietf-poly1305'
+	];
+
+	let requiresUsername = $derived(form.type === 'http' || form.type === 'https' || form.type === 'socks5');
+	let isShadowsocks = $derived(form.type === 'shadowsocks');
 
 	async function load() {
 		proxies = await api<ProxyProfile[]>('/api/user/proxy/list');
@@ -47,8 +63,10 @@
 			form = {
 				name: '',
 				type: 'http',
-				host: '127.0.0.1',
-				port: 7890,
+				source: 'fixed',
+				host: '',
+				port: 0,
+				method: '',
 				username: '',
 				password: ''
 			};
@@ -72,8 +90,24 @@
 	function usePreset(name: string, type: ProxyType, port: number) {
 		form.name = name;
 		form.type = type;
+		form.source = 'fixed';
 		form.host = '127.0.0.1';
 		form.port = port;
+		form.method = '';
+		form.username = '';
+		form.password = '';
+	}
+
+	function changeType() {
+		if (isShadowsocks) {
+			form.method ||= shadowMethods[0];
+			form.username = '';
+			if (!form.port) form.port = 8388;
+		} else {
+			form.method = '';
+			if ((form.type === 'socks4' || form.type === 'socks4a') && form.username) form.username = '';
+			if (!form.port) form.port = form.type === 'https' ? 443 : form.type === 'http' ? 80 : 1080;
+		}
 	}
 
 	onMount(() => {
@@ -92,8 +126,8 @@
 		<div>
 			<h2 class="text-lg font-medium">添加自托管代理</h2>
 			<p class="mt-1 text-sm text-muted">
-				这里配置的是后端服务器访问 Azure API 的出站代理。本机代理指部署网站那台服务器的
-				127.0.0.1，不是浏览器电脑的本机。
+				这里配置的是后端访问 Azure API 的出站代理。可用固定主机，也可以使用当前访问网站的
+				IP 作为代理主机，但该 IP 必须真的运行了对应代理端口。
 			</p>
 		</div>
 
@@ -109,37 +143,72 @@
 			</button>
 		</div>
 
-		<input class="input" bind:value={form.name} placeholder="名称，例如 Clash Verge / V2rayN" required />
+		<input class="input" bind:value={form.name} placeholder="标注" required />
 
-		<div class="grid gap-3 sm:grid-cols-3">
-			<select class="input" bind:value={form.type}>
-				<option value="http">HTTP</option>
-				<option value="https">HTTPS</option>
-				<option value="socks4">SOCKS4</option>
-				<option value="socks5">SOCKS5</option>
+		<div class={isShadowsocks ? 'grid gap-3 sm:grid-cols-2' : 'grid gap-3'}>
+			<select class="input" bind:value={form.type} onchange={changeType}>
+				<option value="http">http</option>
+				<option value="https">https</option>
+				<option value="socks5">socks5</option>
+				<option value="socks4a">socks4a</option>
+				<option value="socks4">socks4</option>
+				<option value="shadowsocks">shadowsocks</option>
 			</select>
-			<input class="input sm:col-span-2" bind:value={form.host} placeholder="主机，例如 127.0.0.1" required />
+			{#if isShadowsocks}
+				<select class="input" bind:value={form.method} required>
+					<option value="">方法</option>
+					{#each shadowMethods as method}
+						<option value={method}>{method}</option>
+					{/each}
+				</select>
+			{/if}
 		</div>
-
-		<input
-			class="input"
-			bind:value={form.port}
-			min="1"
-			max="65535"
-			type="number"
-			placeholder="端口，例如 7890"
-			required
-		/>
 
 		<div class="grid gap-3 sm:grid-cols-2">
-			<input class="input" bind:value={form.username} placeholder="用户名（可选）" />
-			<input class="input" bind:value={form.password} type="password" placeholder="密码（可选）" />
+			<label class="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm">
+				<input type="radio" bind:group={form.source} value="fixed" />
+				固定主机
+			</label>
+			<label class="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm">
+				<input type="radio" bind:group={form.source} value="client_ip" />
+				使用当前访问网站 IP
+			</label>
 		</div>
 
+		<div class="grid gap-3 sm:grid-cols-[1fr_130px]">
+			<input
+				class="input"
+				bind:value={form.host}
+				placeholder={form.source === 'client_ip' ? '自动使用当前访问 IP' : '主机名'}
+				disabled={form.source === 'client_ip'}
+				required={form.source === 'fixed'}
+			/>
+			<input
+				class="input"
+				bind:value={form.port}
+				min="1"
+				max="65535"
+				type="number"
+				placeholder="端口"
+				required
+			/>
+		</div>
+
+		{#if requiresUsername}
+			<input class="input" bind:value={form.username} placeholder="用户名" />
+		{/if}
+		<input
+			class="input"
+			bind:value={form.password}
+			type="password"
+			placeholder={isShadowsocks || form.type === 'socks4' || form.type === 'socks4a' ? '密码' : '密码（可选）'}
+			required={isShadowsocks}
+		/>
+
 		<p class="text-xs text-muted">
-			示例：HTTP 127.0.0.1:7890、SOCKS5 127.0.0.1:10808、HTTP proxy.example.com:8080。
+			保存前会验证代理端口可连接。当前访问网站 IP 模式要求访问者 IP 上已开放对应代理端口。
 		</p>
-		<button class="btn-primary" type="submit">保存代理配置</button>
+		<button class="btn-primary" type="submit">验证并提交</button>
 	</form>
 
 	<div class="card overflow-x-auto p-5">
@@ -166,7 +235,7 @@
 				<tr class="border-b border-border/60">
 					<td class="p-3 font-medium">不使用代理</td>
 					<td class="p-3 text-muted">DIRECT</td>
-					<td class="p-3 text-muted">服务器源站</td>
+					<td class="p-3 text-muted">服务器源站 IP</td>
 					<td class="p-3 text-muted">-</td>
 					<td class="p-3 text-muted">-</td>
 					<td class="p-3 text-muted">默认可选</td>
@@ -183,7 +252,12 @@
 								<div class="text-xs text-muted">{proxy.label}</div>
 							</td>
 							<td class="p-3">{typeLabels[proxy.type]}</td>
-							<td class="p-3">{proxy.host}</td>
+							<td class="p-3">
+								<div>{proxy.host}</div>
+								{#if proxy.source === 'client_ip'}
+									<div class="text-xs text-muted">请求时动态解析</div>
+								{/if}
+							</td>
 							<td class="p-3">{proxy.port}</td>
 							<td class="p-3">{proxy.auth_enabled ? '已配置' : '无'}</td>
 							<td class="p-3">

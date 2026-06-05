@@ -1,4 +1,4 @@
-import { getUserAccountWithProxy } from '$lib/server/accounts';
+﻿import { getUserAccountWithProxy } from '$lib/server/accounts';
 import { createAzureClients, listVmCapabilities } from '$lib/server/azure';
 import { fail, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
@@ -9,7 +9,7 @@ export const GET: RequestHandler = async (event) => {
 	const location = String(event.url.searchParams.get('location') ?? '').trim();
 	if (!accountId || !location) return fail('缺少 account_id 或 location');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId);
+	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, { clientIp: event.getClientAddress() });
 	try {
 		const result = await listVmCapabilities(createAzureClients(account, proxy), location);
 		return ok({

@@ -16,13 +16,14 @@ export async function getUserAccount(userId: number, accountId: number): Promise
 
 export async function getUserAccountWithProxy(
 	userId: number,
-	accountId: number
+	accountId: number,
+	options: { clientIp?: string } = {}
 ): Promise<AzureAccountWithProxy> {
 	const account = await getUserAccount(userId, accountId);
 	if (!account.proxyProfileId) return { account, proxy: null };
 
 	const profile = await findProxyProfileByUser(userId, account.proxyProfileId);
-	return { account, proxy: profile ? proxyProfileToRuntime(profile) : null };
+	return { account, proxy: profile ? proxyProfileToRuntime(profile, options) : null };
 }
 
 export async function listUserAccounts(user: User) {

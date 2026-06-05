@@ -1,4 +1,4 @@
-import { getUserAccountWithProxy } from '$lib/server/accounts';
+﻿import { getUserAccountWithProxy } from '$lib/server/accounts';
 import { createAzureClients, replaceVmPublicIPv4 } from '$lib/server/azure';
 import { fail, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
@@ -11,7 +11,7 @@ export const POST: RequestHandler = async (event) => {
 	const vmName = String(body.vm_name ?? '').trim();
 	if (!accountId || !resourceGroup || !vmName) return fail('参数不完整');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId);
+	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, { clientIp: event.getClientAddress() });
 	try {
 		const result = await replaceVmPublicIPv4(createAzureClients(account, proxy), resourceGroup, vmName);
 		return ok({

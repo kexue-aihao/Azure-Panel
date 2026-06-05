@@ -18,7 +18,7 @@
 	type ProxyProfile = {
 		id: number;
 		name: string;
-		type: 'http' | 'https' | 'socks4' | 'socks5';
+		type: 'http' | 'https' | 'socks4' | 'socks4a' | 'socks5' | 'shadowsocks';
 		label: string;
 	};
 
@@ -114,7 +114,7 @@
 			{/each}
 		</select>
 		<p class="text-xs text-muted">
-			如需 HTTP/SOCKS/本机代理，请先到“代理配置”添加，例如 127.0.0.1:7890。
+			如需 HTTP/SOCKS/Shadowsocks/本机代理，请先到“代理配置”添加，例如 127.0.0.1:7890。
 		</p>
 		<input class="input" bind:value={form.remark} placeholder="备注（可选）" />
 		<button class="btn-primary" type="submit">保存账号</button>

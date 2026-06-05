@@ -10,7 +10,7 @@ import {
 } from './db/repo';
 import { createAzureClients, createVmSimple, getPowerState, isRunning, startVm } from './azure';
 import type { WorkflowPolicy } from './db/schema';
-import { proxyProfileToRuntime } from './proxy';
+import { proxyProfileToRuntime, proxySource } from './proxy';
 
 let timer: NodeJS.Timeout | null = null;
 const activePolicies = new Set<number>();
@@ -37,6 +37,15 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 			const proxyProfile = account.proxyProfileId
 				? await findProxyProfileByUser(account.userId, account.proxyProfileId)
 				: null;
+			if (proxyProfile && proxySource(proxyProfile) === 'client_ip') {
+				await insertWorkflowLog(
+					policy.id,
+					'policy_error',
+					'failed',
+					'此账号绑定了“当前访问网站 IP”代理，后台自动补机无法获取访问者 IP，请改用固定代理'
+				);
+				continue;
+			}
 			const clients = createAzureClients(
 				account,
 				proxyProfile ? proxyProfileToRuntime(proxyProfile) : null

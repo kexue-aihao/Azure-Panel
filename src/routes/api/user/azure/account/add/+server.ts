@@ -32,7 +32,9 @@ export const POST: RequestHandler = async (event) => {
 
 	const proxyProfile = proxyProfileId ? await findProxyProfileByUser(user.id, proxyProfileId) : null;
 	if (proxyProfileId && !proxyProfile) return fail('代理配置不存在');
-	const runtimeProxy = proxyProfile ? proxyProfileToRuntime(proxyProfile) : proxyUrl;
+	const runtimeProxy = proxyProfile
+		? proxyProfileToRuntime(proxyProfile, { clientIp: event.getClientAddress() })
+		: proxyUrl;
 
 	try {
 		await validateAzureCredentials(tenantId, clientId, clientSecret, subscriptionId, runtimeProxy);

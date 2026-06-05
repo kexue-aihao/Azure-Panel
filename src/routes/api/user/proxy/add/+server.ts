@@ -1,7 +1,12 @@
 import { encryptSecret } from '$lib/server/crypto';
 import { insertProxyProfile } from '$lib/server/db/repo';
 import { fail, ok, requireUser } from '$lib/server/http';
-import { normalizeProxyRuntime, publicProxyProfile } from '$lib/server/proxy';
+import {
+	CLIENT_IP_PROXY_HOST,
+	normalizeProxyRuntime,
+	publicProxyProfile,
+	validateProxyConnection
+} from '$lib/server/proxy';
 import type { RequestHandler } from './$types';
 
 export const POST: RequestHandler = async (event) => {
@@ -15,11 +20,16 @@ export const POST: RequestHandler = async (event) => {
 	try {
 		proxy = normalizeProxyRuntime({
 			type: String(body.type ?? ''),
-			host: String(body.host ?? ''),
+			host:
+				String(body.source ?? '') === 'client_ip'
+					? CLIENT_IP_PROXY_HOST
+					: String(body.host ?? ''),
 			port: body.port,
 			username: String(body.username ?? ''),
-			password: String(body.password ?? '')
+			password: String(body.password ?? ''),
+			method: String(body.method ?? '')
 		});
+		await validateProxyConnection(proxy, { clientIp: event.getClientAddress() });
 	} catch (err) {
 		return fail(err instanceof Error ? err.message : '代理配置无效');
 	}
@@ -30,7 +40,11 @@ export const POST: RequestHandler = async (event) => {
 		type: proxy.type,
 		host: proxy.host,
 		port: proxy.port,
-		usernameEncrypted: proxy.username ? encryptSecret(proxy.username) : '',
+		usernameEncrypted: proxy.method
+			? encryptSecret(proxy.method)
+			: proxy.username
+				? encryptSecret(proxy.username)
+				: '',
 		passwordEncrypted: proxy.password ? encryptSecret(proxy.password) : ''
 	});
 

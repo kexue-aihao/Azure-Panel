@@ -13,6 +13,7 @@ import type { TokenCredentialOptions } from '@azure/identity';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import type { AzureAccount } from './db/schema';
 import { decryptSecret } from './crypto';
+import { ShadowsocksProxyAgent } from './shadowsocks-agent';
 import {
 	buildProxyUrl,
 	maskProxy,
@@ -258,6 +259,9 @@ function azureClientOptions(proxy?: ProxyRuntimeConfig | null): TokenCredentialO
 	if (!proxy) return {};
 	if (proxy.type === 'http' || proxy.type === 'https') {
 		return { proxyOptions: proxySettings(proxy) };
+	}
+	if (proxy.type === 'shadowsocks') {
+		return { agent: new ShadowsocksProxyAgent(proxy) as TokenCredentialOptions['agent'] };
 	}
 	return { agent: new SocksProxyAgent(buildProxyUrl(proxy)) as TokenCredentialOptions['agent'] };
 }

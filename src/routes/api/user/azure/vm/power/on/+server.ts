@@ -1,4 +1,4 @@
-import { getUserAccountWithProxy } from '$lib/server/accounts';
+﻿import { getUserAccountWithProxy } from '$lib/server/accounts';
 import { createAzureClients, startVm } from '$lib/server/azure';
 import { fail, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
@@ -11,7 +11,7 @@ export const POST: RequestHandler = async (event) => {
 	const vmName = String(body.vm_name ?? '');
 	if (!accountId || !resourceGroup || !vmName) return fail('参数不完整');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId);
+	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, { clientIp: event.getClientAddress() });
 	try {
 		await startVm(createAzureClients(account, proxy), resourceGroup, vmName);
 		return ok({ message: `已触发开机: ${vmName}` });
