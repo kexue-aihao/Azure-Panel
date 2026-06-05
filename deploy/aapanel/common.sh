@@ -584,6 +584,8 @@ print_supervisor_fix_hint() {
 
 EOF
 }
+
+print_nginx_hint() {
 	local port="$1"
 	local domain="${2:-你的域名}"
 
