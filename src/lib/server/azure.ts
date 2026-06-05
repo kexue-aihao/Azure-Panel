@@ -1,4 +1,3 @@
-import { ClientSecretCredential } from '@azure/identity';
 import { ComputeManagementClient } from '@azure/arm-compute';
 import { NetworkManagementClient } from '@azure/arm-network';
 import { ResourceManagementClient } from '@azure/arm-resources';
@@ -17,7 +16,12 @@ import {
 	type PipelineOptions,
 	type ProxySettings
 } from '@azure/core-rest-pipeline';
-import type { TokenCredentialOptions } from '@azure/identity';
+import type {
+	AccessToken,
+	GetTokenOptions,
+	TokenCredential,
+	TokenCredentialOptions
+} from '@azure/identity';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import type { AzureAccount } from './db/schema';
 import { decryptSecret } from './crypto';
@@ -144,7 +148,7 @@ export type AzureClients = {
 	compute: ComputeManagementClient;
 	network: NetworkManagementClient;
 	resources: ResourceManagementClient;
-	credential: ClientSecretCredential;
+	credential: TokenCredential;
 	clientOptions: AzureClientOptions;
 	subscriptionId: string;
 };
@@ -240,6 +244,7 @@ export type CreateAiDeploymentOptions = {
 const RUNNING = new Set(['PowerState/running', 'PowerState/starting']);
 const ARM_ENDPOINT = 'https://management.azure.com';
 const ARM_SCOPE = `${ARM_ENDPOINT}/.default`;
+const AZURE_AUTHORITY_HOST = 'https://login.microsoftonline.com';
 const SUBSCRIPTIONS_API_VERSION = '2020-01-01';
 const COGNITIVE_SERVICES_API_VERSION = '2024-10-01';
 const CAPACITY_QUOTA_API_VERSION = '2020-10-25';
@@ -451,6 +456,12 @@ function proxySettings(proxy: ProxyRuntimeConfig): ProxySettings {
 	};
 }
 
+function socksProxyAgentUrl(proxy: ProxyRuntimeConfig): string {
+	const proxyUrl = buildProxyUrl(proxy);
+	if (proxy.type === 'socks5') return proxyUrl.replace(/^socks5:\/\//i, 'socks5h://');
+	return proxyUrl;
+}
+
 function azureClientOptions(proxy?: ProxyRuntimeConfig | null): AzureClientOptions {
 	if (!proxy) return {};
 	if (proxy.type === 'http' || proxy.type === 'https') {
@@ -459,7 +470,115 @@ function azureClientOptions(proxy?: ProxyRuntimeConfig | null): AzureClientOptio
 	if (proxy.type === 'shadowsocks') {
 		return { agent: new ShadowsocksProxyAgent(proxy) as TokenCredentialOptions['agent'] };
 	}
-	return { agent: new SocksProxyAgent(buildProxyUrl(proxy)) as TokenCredentialOptions['agent'] };
+	return { agent: new SocksProxyAgent(socksProxyAgentUrl(proxy)) as TokenCredentialOptions['agent'] };
+}
+
+function parseTokenJson(bodyAsText?: string | null): Record<string, unknown> {
+	if (!bodyAsText) return {};
+	try {
+		const payload = JSON.parse(bodyAsText);
+		return payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+	} catch {
+		return {};
+	}
+}
+
+function tokenResponseError(status: number, bodyAsText?: string | null) {
+	const payload = parseTokenJson(bodyAsText);
+	const details = [
+		payload.error ? String(payload.error) : '',
+		payload.error_description ? String(payload.error_description) : ''
+	]
+		.filter(Boolean)
+		.join(': ');
+	return `Azure 登录令牌获取失败 (${status})${details ? `: ${details}` : ''}`;
+}
+
+class ProxyAwareClientSecretCredential implements TokenCredential {
+	private readonly tokens = new Map<string, AccessToken>();
+
+	constructor(
+		private readonly tenantId: string,
+		private readonly clientId: string,
+		private readonly clientSecret: string,
+		private readonly clientOptions: AzureClientOptions
+	) {}
+
+	async getToken(scopes: string | string[], options?: GetTokenOptions): Promise<AccessToken | null> {
+		const scopeList = (Array.isArray(scopes) ? scopes : [scopes]).filter(Boolean);
+		const scope = scopeList.join(' ') || ARM_SCOPE;
+		const tenantId = options?.tenantId?.trim() || this.tenantId;
+		const cacheKey = `${tenantId}|${scope}`;
+		const now = Date.now();
+		const cached = this.tokens.get(cacheKey);
+		if (cached && cached.expiresOnTimestamp - now > 120_000) return cached;
+
+		const authorityHost = (this.clientOptions.authorityHost ?? AZURE_AUTHORITY_HOST).replace(
+			/\/+$/,
+			''
+		);
+		const body = new URLSearchParams({
+			client_id: this.clientId,
+			client_secret: this.clientSecret,
+			grant_type: 'client_credentials',
+			scope
+		}).toString();
+
+		const pipeline = createPipelineFromOptions(this.clientOptions);
+		const httpClient = createDefaultHttpClient();
+		let response;
+		try {
+			response = await pipeline.sendRequest(
+				httpClient,
+				createPipelineRequest({
+					url: `${authorityHost}/${encodeURIComponent(tenantId)}/oauth2/v2.0/token`,
+					method: 'POST',
+					body,
+					timeout: options?.requestOptions?.timeout ?? 30_000,
+					abortSignal: options?.abortSignal,
+					headers: createHttpHeaders({
+						accept: 'application/json',
+						'content-type': 'application/x-www-form-urlencoded'
+					})
+				})
+			);
+		} catch (err) {
+			throw new Error(
+				`Azure 登录令牌网络请求失败，请检查代理是否可连通: ${
+					err instanceof Error ? err.message : String(err)
+				}`
+			);
+		}
+
+		if (response.status < 200 || response.status >= 300) {
+			throw new Error(tokenResponseError(response.status, response.bodyAsText));
+		}
+
+		const payload = parseTokenJson(response.bodyAsText);
+		const token = String(payload.access_token ?? '');
+		if (!token) throw new Error('Azure 登录令牌响应缺少 access_token，请检查凭据或代理返回内容');
+
+		const expiresIn = Number(payload.expires_in ?? 3600);
+		const ttlMs = Math.max(60, Number.isFinite(expiresIn) ? expiresIn : 3600) * 1000;
+		const refreshAfterMs = Math.max(30_000, ttlMs - 300_000);
+		const accessToken: AccessToken = {
+			token,
+			expiresOnTimestamp: now + ttlMs,
+			refreshAfterTimestamp: now + refreshAfterMs,
+			tokenType: 'Bearer'
+		};
+		this.tokens.set(cacheKey, accessToken);
+		return accessToken;
+	}
+}
+
+function createProxyAwareCredential(
+	tenantId: string,
+	clientId: string,
+	clientSecret: string,
+	clientOptions: AzureClientOptions
+): TokenCredential {
+	return new ProxyAwareClientSecretCredential(tenantId, clientId, clientSecret, clientOptions);
 }
 
 function decryptLegacyProxy(account: AzureAccount): ProxyRuntimeConfig | null {
@@ -469,7 +588,7 @@ function decryptLegacyProxy(account: AzureAccount): ProxyRuntimeConfig | null {
 export function createAzureClients(account: AzureAccount, proxy?: AzureProxySelection): AzureClients {
 	const runtimeProxy = proxy === DIRECT_PROXY ? null : (proxy ?? decryptLegacyProxy(account));
 	const clientOptions = azureClientOptions(runtimeProxy);
-	const credential = new ClientSecretCredential(
+	const credential = createProxyAwareCredential(
 		account.tenantId,
 		account.clientId,
 		decryptSecret(account.clientSecretEncrypted),
@@ -488,10 +607,10 @@ export function createAzureClients(account: AzureAccount, proxy?: AzureProxySele
 function createCredentialAndOptions(
 	account: AzureAccount,
 	proxy?: AzureProxySelection
-): { credential: ClientSecretCredential; clientOptions: AzureClientOptions } {
+): { credential: TokenCredential; clientOptions: AzureClientOptions } {
 	const runtimeProxy = proxy === DIRECT_PROXY ? null : (proxy ?? decryptLegacyProxy(account));
 	const clientOptions = azureClientOptions(runtimeProxy);
-	const credential = new ClientSecretCredential(
+	const credential = createProxyAwareCredential(
 		account.tenantId,
 		account.clientId,
 		decryptSecret(account.clientSecretEncrypted),
@@ -537,7 +656,7 @@ function parseArmJson(bodyAsText?: string | null): unknown {
 }
 
 async function sendArmRequest(
-	credential: ClientSecretCredential,
+	credential: TokenCredential,
 	clientOptions: AzureClientOptions,
 	options: {
 		method: 'GET' | 'POST' | 'PUT';
@@ -573,7 +692,7 @@ async function sendArmRequest(
 }
 
 async function collectArmPages<T>(
-	credential: ClientSecretCredential,
+	credential: TokenCredential,
 	clientOptions: AzureClientOptions,
 	firstUrl: string
 ): Promise<T[]> {
@@ -591,7 +710,7 @@ async function collectArmPages<T>(
 }
 
 async function discoverSubscriptionId(
-	credential: ClientSecretCredential,
+	credential: TokenCredential,
 	clientOptions: AzureClientOptions
 ) {
 	const token = await credential.getToken(ARM_SCOPE);
@@ -641,7 +760,7 @@ export async function validateAzureCredentials(
 ): Promise<AzureCredentialValidationResult> {
 	const runtimeProxy = typeof proxy === 'string' ? parseProxyUrl(proxy) : proxy;
 	const clientOptions = azureClientOptions(runtimeProxy);
-	const credential = new ClientSecretCredential(tenantId, clientId, clientSecret, clientOptions);
+	const credential = createProxyAwareCredential(tenantId, clientId, clientSecret, clientOptions);
 	const subscriptionId = await discoverSubscriptionId(credential, clientOptions);
 	const client = new ComputeManagementClient(credential, subscriptionId, clientOptions);
 	await client.virtualMachines.listAll().next();
