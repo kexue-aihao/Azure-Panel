@@ -145,9 +145,35 @@ tail -f /www/wwwlogs/azure-panel-worker.log
 
 ## 九、更新部署
 
+推荐使用项目根目录的一键升级脚本：
+
 ```bash
 cd /www/wwwroot/azure-panel
-git pull   # 或重新上传文件
+chmod +x update.sh
+./update.sh
+```
+
+脚本会自动完成：`git pull` → `npm install` → `npm run build:all` → 重启 Supervisor → 健康检查。
+
+自定义配置示例：
+
+```bash
+APP_DIR=/www/wwwroot/azure-panel \
+GIT_BRANCH=master \
+./update.sh
+```
+
+仅更新代码、不重启进程：
+
+```bash
+SKIP_SUPERVISOR=1 ./update.sh
+```
+
+手动更新（不使用脚本时）：
+
+```bash
+cd /www/wwwroot/azure-panel
+git pull
 npm install
 npm run build:all
 # aaPanel Supervisor 中重启 web 和 worker 进程
