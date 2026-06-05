@@ -124,15 +124,72 @@ find_supervisorctl() {
 		echo "$SUPERVISORCTL"
 		return
 	fi
-	if command -v supervisorctl >/dev/null 2>&1; then
-		command -v supervisorctl
-		return
-	fi
 	if [[ -x /www/server/panel/pyenv/bin/supervisorctl ]]; then
 		echo "/www/server/panel/pyenv/bin/supervisorctl"
 		return
 	fi
+	if command -v supervisorctl >/dev/null 2>&1; then
+		command -v supervisorctl
+		return
+	fi
 	echo ""
+}
+
+find_supervisor_main_conf() {
+	local f
+	for f in \
+		/www/server/panel/plugin/supervisor/supervisord.conf \
+		/www/server/panel/plugin/supervisor/supervisor.conf \
+		/etc/supervisor/supervisord.conf; do
+		[[ -f "$f" ]] && { echo "$f"; return 0; }
+	done
+	return 1
+}
+
+run_supervisorctl() {
+	local ctl main_conf
+	ctl="$(find_supervisorctl)"
+	[[ -n "$ctl" ]] || return 127
+	main_conf="$(find_supervisor_main_conf 2>/dev/null || true)"
+	if [[ -n "$main_conf" ]]; then
+		"$ctl" -c "$main_conf" "$@"
+	else
+		"$ctl" "$@"
+	fi
+}
+
+supervisor_conf_dirs() {
+	local dir seen=()
+	if [[ -n "${SUPERVISOR_CONF_DIR:-}" ]]; then
+		seen+=("$SUPERVISOR_CONF_DIR")
+	fi
+	for dir in \
+		/www/server/panel/plugin/supervisor/profile \
+		/www/server/panel/plugin/supervisor/config \
+		/etc/supervisor/conf.d; do
+		[[ -d "$dir" ]] || continue
+		local dup=0 d
+		for d in "${seen[@]}"; do [[ "$d" == "$dir" ]] && dup=1 && break; done
+		[[ "$dup" == "0" ]] && seen+=("$dir")
+	done
+	if [[ ${#seen[@]} -eq 0 ]]; then
+		seen+=("/etc/supervisor/conf.d")
+	fi
+	printf '%s\n' "${seen[@]}"
+}
+
+restart_supervisord_service() {
+	log "尝试重启 Supervisor 服务..."
+	if [[ -x /etc/init.d/supervisord ]]; then
+		/etc/init.d/supervisord restart 2>/dev/null && return 0
+	fi
+	if [[ -x /etc/init.d/supervisor ]]; then
+		/etc/init.d/supervisor restart 2>/dev/null && return 0
+	fi
+	systemctl restart supervisord 2>/dev/null && return 0
+	systemctl restart supervisor 2>/dev/null && return 0
+	run_supervisorctl reload 2>/dev/null && return 0
+	return 1
 }
 
 rand_hex() {
@@ -351,6 +408,9 @@ npm_build_all() {
 
 	[[ -d node_modules ]] || die "npm install 失败。请手动执行: NPM_REGISTRY=https://registry.npmjs.org npm install"
 
+	log "同步 SvelteKit 配置..."
+	"$npm_bin" exec svelte-kit sync 2>/dev/null || true
+
 	log "构建 Web + Worker..."
 	"$npm_bin" run build:all
 	[[ -f build/index.js ]] || die "构建失败: 未找到 build/index.js"
@@ -359,19 +419,7 @@ npm_build_all() {
 }
 
 supervisor_conf_dir() {
-	if [[ -n "${SUPERVISOR_CONF_DIR:-}" ]]; then
-		echo "$SUPERVISOR_CONF_DIR"
-		return
-	fi
-	if [[ -d /etc/supervisor/conf.d ]]; then
-		echo "/etc/supervisor/conf.d"
-		return
-	fi
-	if [[ -d /www/server/panel/plugin/supervisor/config ]]; then
-		echo "/www/server/panel/plugin/supervisor/config"
-		return
-	fi
-	echo "/etc/supervisor/conf.d"
+	supervisor_conf_dirs | head -1
 }
 
 write_supervisor_configs() {
@@ -380,19 +428,9 @@ write_supervisor_configs() {
 	local app_port="$3"
 	local web_program="$4"
 	local worker_program="$5"
-	local conf_dir
-	local web_conf worker_conf
+	local conf_dir web_conf worker_conf web_body worker_body
 
-	conf_dir="$(supervisor_conf_dir)"
-	mkdir -p "$conf_dir" 2>/dev/null || true
-
-	web_conf="${conf_dir}/${web_program}.conf"
-	worker_conf="${conf_dir}/${worker_program}.conf"
-
-	log "写入 Supervisor 配置 -> $conf_dir"
-
-	cat >"$web_conf" <<EOF
-; Azure Panel Web — 由 install.sh 自动生成
+	web_body="; Azure Panel Web — 由 install.sh 自动生成
 [program:${web_program}]
 command=${node_bin} ${app_dir}/build/index.js
 directory=${app_dir}
@@ -404,11 +442,9 @@ startretries=3
 stopwaitsecs=10
 stdout_logfile=/www/wwwlogs/${web_program}.log
 stderr_logfile=/www/wwwlogs/${web_program}-error.log
-environment=NODE_ENV="production",HOST="127.0.0.1",PORT="${app_port}"
-EOF
+environment=NODE_ENV=\"production\",HOST=\"127.0.0.1\",PORT=\"${app_port}\""
 
-	cat >"$worker_conf" <<EOF
-; Azure Panel Worker — 由 install.sh 自动生成
+	worker_body="; Azure Panel Worker — 由 install.sh 自动生成
 [program:${worker_program}]
 command=${node_bin} ${app_dir}/build/worker.js
 directory=${app_dir}
@@ -420,52 +456,89 @@ startretries=3
 stopwaitsecs=10
 stdout_logfile=/www/wwwlogs/${worker_program}.log
 stderr_logfile=/www/wwwlogs/${worker_program}-error.log
-environment=NODE_ENV="production"
-EOF
+environment=NODE_ENV=\"production\""
 
-	# 同步一份到项目目录备查
+	mkdir -p /www/wwwlogs 2>/dev/null || true
 	mkdir -p "${app_dir}/deploy/aapanel/generated"
-	cp "$web_conf" "${app_dir}/deploy/aapanel/generated/${web_program}.conf"
-	cp "$worker_conf" "${app_dir}/deploy/aapanel/generated/${worker_program}.conf"
+
+	while IFS= read -r conf_dir; do
+		[[ -n "$conf_dir" ]] || continue
+		mkdir -p "$conf_dir" 2>/dev/null || continue
+
+		# aaPanel profile 目录常用 .ini 后缀
+		if [[ "$conf_dir" == *"/profile" ]]; then
+			web_conf="${conf_dir}/${web_program}.ini"
+			worker_conf="${conf_dir}/${worker_program}.ini"
+		else
+			web_conf="${conf_dir}/${web_program}.conf"
+			worker_conf="${conf_dir}/${worker_program}.conf"
+		fi
+
+		log "写入 Supervisor 配置 -> $conf_dir"
+		printf '%s\n' "$web_body" >"$web_conf"
+		printf '%s\n' "$worker_body" >"$worker_conf"
+	done < <(supervisor_conf_dirs)
+
+	cp "${app_dir}/deploy/aapanel/generated/${web_program}.conf" 2>/dev/null || true
+	printf '%s\n' "$web_body" >"${app_dir}/deploy/aapanel/generated/${web_program}.conf"
+	printf '%s\n' "$worker_body" >"${app_dir}/deploy/aapanel/generated/${worker_program}.conf"
 }
 
 supervisor_reload_and_start() {
 	local web_program="$1"
 	local worker_program="$2"
-	local ctl
-	ctl="$(find_supervisorctl)"
+	local main_conf update_out
 
-	if [[ -z "$ctl" ]]; then
+	if [[ -z "$(find_supervisorctl)" ]]; then
 		warn "未找到 supervisorctl，请手动在 aaPanel Supervisor 中启动进程"
 		return 1
 	fi
 
+	main_conf="$(find_supervisor_main_conf 2>/dev/null || true)"
+	[[ -n "$main_conf" ]] && log "Supervisor 主配置: $main_conf"
+
 	log "重载 Supervisor 配置..."
-	$ctl reread 2>/dev/null || true
-	$ctl update 2>/dev/null || true
+	run_supervisorctl reread 2>&1 || true
+	update_out="$(run_supervisorctl update 2>&1 || true)"
+	log "$update_out"
+
+	if echo "$update_out" | grep -qi "no config updates"; then
+		warn "Supervisor 未加载新配置，尝试重启 supervisord..."
+		restart_supervisord_service || true
+		run_supervisorctl reread 2>&1 || true
+		update_out="$(run_supervisorctl update 2>&1 || true)"
+		log "$update_out"
+	fi
 
 	log "启动进程: $web_program, $worker_program"
-	$ctl start "$web_program" 2>/dev/null || $ctl restart "$web_program" 2>/dev/null || warn "启动 $web_program 失败"
-	$ctl start "$worker_program" 2>/dev/null || $ctl restart "$worker_program" 2>/dev/null || warn "启动 $worker_program 失败"
+	for prog in "$web_program" "$worker_program"; do
+		if run_supervisorctl status "$prog" 2>/dev/null | grep -q RUNNING; then
+			run_supervisorctl restart "$prog" 2>/dev/null || true
+			continue
+		fi
+		run_supervisorctl start "$prog" 2>/dev/null \
+			|| run_supervisorctl restart "$prog" 2>/dev/null \
+			|| warn "启动 $prog 失败，请查看 aaPanel → Supervisor"
+	done
+
+	run_supervisorctl status "$web_program" "$worker_program" 2>/dev/null || true
 }
 
 restart_supervisor_programs() {
 	local web_program="$1"
 	local worker_program="$2"
-	local ctl
-	ctl="$(find_supervisorctl)"
 
-	if [[ -z "$ctl" ]]; then
+	if [[ -z "$(find_supervisorctl)" ]]; then
 		warn "未找到 supervisorctl，请手动在 aaPanel 重启 $web_program 和 $worker_program"
 		return 1
 	fi
 
 	log "重启 Supervisor 进程: $web_program, $worker_program"
-	if $ctl restart "$web_program" "$worker_program" 2>/dev/null; then
+	if run_supervisorctl restart "$web_program" "$worker_program" 2>/dev/null; then
 		log "Supervisor 重启成功"
 	else
-		$ctl restart "$web_program" || warn "重启 $web_program 失败"
-		$ctl restart "$worker_program" || warn "重启 $worker_program 失败"
+		run_supervisorctl restart "$web_program" || warn "重启 $web_program 失败"
+		run_supervisorctl restart "$worker_program" || warn "重启 $worker_program 失败"
 	fi
 }
 
@@ -485,7 +558,32 @@ health_check() {
 	return 0
 }
 
-print_nginx_hint() {
+print_supervisor_fix_hint() {
+	local app_dir="$1"
+	local web_program="$2"
+	local worker_program="$3"
+
+	warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	warn "Supervisor 未成功启动，请按以下步骤手动处理："
+	warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	cat <<EOF
+
+1) aaPanel → 软件商店 → Supervisor → 设置 → 重载/重启 Supervisor
+
+2) 或 SSH 执行：
+   /www/server/panel/pyenv/bin/supervisorctl -c /www/server/panel/plugin/supervisor/supervisord.conf reread
+   /www/server/panel/pyenv/bin/supervisorctl -c /www/server/panel/plugin/supervisor/supervisord.conf update
+   /www/server/panel/pyenv/bin/supervisorctl -c /www/server/panel/plugin/supervisor/supervisord.conf start ${web_program} ${worker_program}
+
+3) 配置文件位置：
+   ${app_dir}/deploy/aapanel/generated/${web_program}.conf
+   ${app_dir}/deploy/aapanel/generated/${worker_program}.conf
+
+4) 临时验证（不经过 Supervisor）：
+   cd ${app_dir} && node build/index.js
+
+EOF
+}
 	local port="$1"
 	local domain="${2:-你的域名}"
 

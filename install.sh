@@ -254,6 +254,19 @@ setup_supervisor() {
 	supervisor_reload_and_start "$WEB_PROGRAM" "$WORKER_PROGRAM" || true
 }
 
+verify_or_hint_supervisor() {
+	local port
+	port="$(read_port_from_env "${APP_DIR}/.env" "$APP_PORT")"
+	if [[ "${SKIP_HEALTHCHECK:-0}" == "1" ]]; then
+		return
+	fi
+	sleep 2
+	if command -v curl >/dev/null 2>&1 && curl -fsS "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1; then
+		return
+	fi
+	print_supervisor_fix_hint "$APP_DIR" "$WEB_PROGRAM" "$WORKER_PROGRAM"
+}
+
 main() {
 	banner
 	check_prerequisites
@@ -263,6 +276,7 @@ main() {
 	setup_mysql
 	npm_build_all
 	setup_supervisor
+	verify_or_hint_supervisor
 
 	local port
 	port="$(read_port_from_env "${APP_DIR}/.env" "$APP_PORT")"
