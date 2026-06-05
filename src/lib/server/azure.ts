@@ -2201,15 +2201,6 @@ export async function createVmAdvanced(
 		'Microsoft.Storage',
 		'Microsoft.KeyVault'
 	]);
-	const capabilities = await listVmCapabilities(clients, location);
-	const selectedCapability = capabilities.available.find((capability) => capability.name === vmSize);
-	if (!selectedCapability) {
-		const restricted = capabilities.restricted.find((capability) => capability.name === vmSize);
-		const reason = restricted?.restrictionReasons.length
-			? `：${restricted.restrictionReasons.join('、')}`
-			: '';
-		throw new Error(`当前账号在 ${location} 不支持创建 ${vmSize}${reason}`);
-	}
 	const { publisher, offer, sku, version } = parseImageReference(imageReference);
 	const customData = encodeCustomData(options.customData);
 	const network = await createNetworkForVm(clients, {
