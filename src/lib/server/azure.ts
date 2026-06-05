@@ -2,7 +2,7 @@ import { ClientSecretCredential } from '@azure/identity';
 import { ComputeManagementClient } from '@azure/arm-compute';
 import { NetworkManagementClient } from '@azure/arm-network';
 import { ResourceManagementClient } from '@azure/arm-resources';
-import type { ResourceSku, ResourceSkuRestrictions, Usage } from '@azure/arm-compute';
+import type { ResourceSku, ResourceSkuRestrictions, Usage, VirtualMachineSize } from '@azure/arm-compute';
 import type { GenericResourceExpanded, Provider, ResourceGroup } from '@azure/arm-resources';
 import type {
 	NetworkInterface,
@@ -763,6 +763,29 @@ function restrictionReasons(sku: ResourceSku, location: string): string[] {
 	);
 }
 
+function vmSizeToCapability(size: VirtualMachineSize): VmCapability {
+	const memoryGB = Math.round(((size.memoryInMB ?? 0) / 1024) * 100) / 100;
+	return {
+		name: size.name ?? '',
+		source: 'VirtualMachineSizes',
+		family: '',
+		tier: '',
+		cores: size.numberOfCores ?? 0,
+		memoryGB,
+		maxDataDiskCount: size.maxDataDiskCount ?? 0,
+		acceleratedNetworking: null,
+		hyperVGenerations: '',
+		restricted: false,
+		restrictionReasons: [],
+		quotaName: '',
+		quotaLocalizedName: '',
+		quotaRemaining: 0,
+		totalQuotaRemaining: 0,
+		quotaRequired: size.numberOfCores ?? 0,
+		quotaRestricted: false
+	};
+}
+
 function skuToCapability(sku: ResourceSku, location: string): VmCapability {
 	const accelerated = capabilityValue(sku, 'AcceleratedNetworkingEnabled');
 	const quotaVcpus = capabilityNumber(sku, 'vCPUs');
@@ -788,14 +811,45 @@ function skuToCapability(sku: ResourceSku, location: string): VmCapability {
 	};
 }
 
-function dedupeVmCapabilities(capabilities: VmCapability[]) {
+function mergeSource(a: string, b: string) {
+	return [...new Set([a, b].filter(Boolean).flatMap((source) => source.split('+')))].join('+');
+}
+
+function mergeCapability(a: VmCapability, b: VmCapability): VmCapability {
+	const bIsVisibleVmSize = b.source.split('+').includes('VirtualMachineSizes') && !b.restricted;
+	return {
+		...a,
+		source: mergeSource(a.source, b.source),
+		family: a.family || b.family,
+		tier: a.tier || b.tier,
+		cores: a.cores || b.cores,
+		memoryGB: a.memoryGB || b.memoryGB,
+		maxDataDiskCount: a.maxDataDiskCount || b.maxDataDiskCount,
+		acceleratedNetworking: a.acceleratedNetworking ?? b.acceleratedNetworking,
+		hyperVGenerations: a.hyperVGenerations || b.hyperVGenerations,
+		restricted: bIsVisibleVmSize ? false : a.restricted || b.restricted,
+		restrictionReasons: bIsVisibleVmSize
+			? [...new Set(b.restrictionReasons)]
+			: [...new Set([...a.restrictionReasons, ...b.restrictionReasons])],
+		quotaRequired: a.quotaRequired || b.quotaRequired || a.cores || b.cores
+	};
+}
+
+function mergeVmCapabilities(...groups: VmCapability[][]) {
 	const byName = new Map<string, VmCapability>();
-	for (const capability of capabilities) {
-		if (!capability.name) continue;
-		const key = capability.name.toLowerCase();
-		if (!byName.has(key)) byName.set(key, capability);
+	for (const group of groups) {
+		for (const capability of group) {
+			if (!capability.name) continue;
+			const key = capability.name.toLowerCase();
+			const existing = byName.get(key);
+			byName.set(key, existing ? mergeCapability(existing, capability) : capability);
+		}
 	}
 	return [...byName.values()];
+}
+
+function mergeVisibleVmCapabilities(authoritative: VmCapability[], supplemental: VmCapability[]) {
+	return mergeVmCapabilities(authoritative, supplemental);
 }
 
 function byCapacity(a: VmCapability, b: VmCapability) {
@@ -1058,19 +1112,19 @@ function applyQuotaToCapabilities(capabilities: VmCapability[], quotas: ComputeQ
 			quotaRestricted = true;
 			reasons.push('MissingCoreCount');
 		}
-		if (!totalQuota) {
+		if (!totalQuota && !familyQuota) {
 			quotaRestricted = true;
-			reasons.push('MissingTotalRegionalVcpuQuota');
-		} else if (totalQuota.remaining < required) {
+			reasons.push('MissingComputeQuota');
+		} else if (totalQuota && totalQuota.remaining < required) {
 			quotaRestricted = true;
 			reasons.push(`TotalRegionalVcpusRemaining:${totalQuota.remaining}`);
 		}
-		if (capability.family) {
+		if (familyQuota && familyQuota.remaining < required) {
+			quotaRestricted = true;
+			reasons.push(`${familyQuota.name || familyQuota.localizedName}Remaining:${familyQuota.remaining}`);
+		} else if (capability.family) {
 			if (!familyQuota) {
 				reasons.push(`UnmatchedFamilyQuota:${capability.family}`);
-			} else if (familyQuota.remaining < required) {
-				quotaRestricted = true;
-				reasons.push(`${familyQuota.name || familyQuota.localizedName}Remaining:${familyQuota.remaining}`);
 			}
 		}
 
@@ -1163,6 +1217,30 @@ async function listResourceSkuCapabilitiesByRegion(
 		);
 	}
 	return copy;
+}
+
+async function listVmSizeCapabilitiesForLocation(
+	clients: AzureClients,
+	location: string
+): Promise<VmCapability[]> {
+	const normalizedLocation = normalizeLocationName(location);
+	const key = `vm-sizes:${clients.subscriptionId}:${normalizedLocation}`;
+	const capabilities = await cachedAzureQuery(
+		key,
+		cacheTtlMs('AZURE_VM_SIZE_CACHE_TTL_SECONDS', 300),
+		async () => {
+			const list: VmCapability[] = [];
+			for await (const size of clients.compute.virtualMachineSizes.list(normalizedLocation)) {
+				if (!size.name) continue;
+				list.push(vmSizeToCapability(size));
+			}
+			return list;
+		}
+	);
+	return capabilities.map((capability) => ({
+		...capability,
+		restrictionReasons: [...capability.restrictionReasons]
+	}));
 }
 
 function resourceGroupToInfo(group: ResourceGroup): AzureResourceGroupInfo {
@@ -1273,12 +1351,13 @@ export async function listVmCapabilities(
 	clients: AzureClients,
 	location: string
 ): Promise<VmCapabilitiesResult> {
-	const [resourceSkus, quotas] = await Promise.all([
+	const [resourceSkus, legacySizes, quotas] = await Promise.all([
 		listResourceSkuCapabilitiesForLocation(clients, location),
+		listVmSizeCapabilitiesForLocation(clients, location).catch(() => []),
 		listComputeQuotas(clients, location)
 	]);
-	const officialSkus = dedupeVmCapabilities(resourceSkus);
-	const quotaAware = applyQuotaToCapabilities(officialSkus, quotas);
+	const merged = mergeVisibleVmCapabilities(resourceSkus, legacySizes);
+	const quotaAware = applyQuotaToCapabilities(merged, quotas);
 	const available = quotaAware
 		.filter((sku) => !sku.restricted)
 		.sort((a, b) => byCapacity(a, b));
@@ -1329,8 +1408,7 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 		if (quotas.length === 0) {
 			return null;
 		}
-		const officialCandidates = dedupeVmCapabilities(candidates);
-		const available = applyQuotaToCapabilities(officialCandidates, quotas)
+		const available = applyQuotaToCapabilities(candidates, quotas)
 			.filter((capability) => !capability.restricted)
 			.sort((a, b) => byCapacity(a, b));
 		if (available.length === 0) return null;
