@@ -21,11 +21,31 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
+
+# 若 common.sh 不存在，尝试从 GitHub 同步完整代码
+if [[ ! -f "${APP_DIR}/deploy/aapanel/common.sh" ]]; then
+	echo "[bootstrap] 缺少 deploy/aapanel/common.sh，正在同步代码..."
+	command -v git >/dev/null 2>&1 || { echo "[error] 未找到 git"; exit 1; }
+	REPO_URL="${REPO_URL:-https://github.com/kexue-aihao/Azure-Panel.git}"
+	GIT_BRANCH="${GIT_BRANCH:-master}"
+	if [[ -d "${APP_DIR}/.git" ]]; then
+		git -C "$APP_DIR" pull origin "$GIT_BRANCH" || true
+	else
+		cd "$APP_DIR"
+		git init
+		git remote add origin "$REPO_URL" 2>/dev/null || git remote set-url origin "$REPO_URL"
+		git fetch origin "$GIT_BRANCH" --depth=1
+		git reset --hard "origin/${GIT_BRANCH}"
+	fi
+fi
+
+cd "$APP_DIR"
 # shellcheck source=deploy/aapanel/common.sh
-source "${SCRIPT_DIR}/deploy/aapanel/common.sh"
+source "${APP_DIR}/deploy/aapanel/common.sh"
 
 # ---------- 可配置项 ----------
-APP_DIR="${APP_DIR:-/www/wwwroot/azure-panel}"
+APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
 GIT_BRANCH="${GIT_BRANCH:-master}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
 REPO_URL="${REPO_URL:-https://github.com/kexue-aihao/Azure-Panel.git}"

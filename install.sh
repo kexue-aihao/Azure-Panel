@@ -1,51 +1,84 @@
 #!/usr/bin/env bash
 #
 # Azure Panel 一键安装脚本（aaPanel / Linux）
-# 首次部署：克隆代码 → 配置 .env → 导入数据库 → 构建 → Supervisor → 健康检查
+# 首次部署：克隆代码 → 自动建库 → 配置 .env → 构建 → Supervisor → 健康检查
 #
 # 用法:
 #   chmod +x install.sh
 #   sudo ./install.sh
 #
-# 非交互安装（CI / 脚本化）:
+# 非交互安装:
 #   NON_INTERACTIVE=1 sudo ./install.sh
-#   # 数据库密码自动生成；也可指定:
-#   MYSQL_PASSWORD=your-db-pass MYSQL_ROOT_PASSWORD=root-pass sudo ./install.sh
-#
-# 可选环境变量:
-#   APP_DIR=/www/wwwroot/azure-panel
-#   REPO_URL=https://github.com/kexue-aihao/Azure-Panel.git
-#   GIT_BRANCH=master
-#   MYSQL_HOST=127.0.0.1
-#   MYSQL_PORT=3306
-#   MYSQL_USER=azure_panel
-#   MYSQL_PASSWORD=数据库密码（留空则自动生成）
-#   MYSQL_ROOT_PASSWORD=MySQL root 密码（留空则尝试读取 aaPanel 配置）
-#   SKIP_CREATE_DB=1          # 跳过自动建库（数据库已存在时）
-#   MYSQL_DATABASE=azure_panel
-#   APP_PORT=3000
-#   DOMAIN=panel.example.com
-#   SKIP_MYSQL=1              # 跳过数据库导入
-#   SKIP_SUPERVISOR=1         # 跳过 Supervisor 配置
-#   SKIP_HEALTHCHECK=1
 #
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=deploy/aapanel/common.sh
-source "${SCRIPT_DIR}/deploy/aapanel/common.sh"
-
-# ---------- 可配置项 ----------
-# 若在项目目录内执行 install.sh，自动识别当前路径
-if [[ -f "${SCRIPT_DIR}/package.json" ]]; then
-	_DEFAULT_APP_DIR="$SCRIPT_DIR"
-else
-	_DEFAULT_APP_DIR="/www/wwwroot/azure-panel"
-fi
-APP_DIR="${APP_DIR:-$_DEFAULT_APP_DIR}"
 REPO_URL="${REPO_URL:-https://github.com/kexue-aihao/Azure-Panel.git}"
 GIT_BRANCH="${GIT_BRANCH:-master}"
+APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
+
+# ---------- 引导：确保完整项目文件存在（支持仅下载 install.sh 的情况）----------
+bootstrap_repo() {
+	local common_file="${APP_DIR}/deploy/aapanel/common.sh"
+
+	if [[ -f "$common_file" ]]; then
+		return 0
+	fi
+
+	echo "[bootstrap] 项目文件不完整，正在从 GitHub 拉取完整代码..."
+	command -v git >/dev/null 2>&1 || {
+		echo "[error] 未找到 git，请先安装: apt install git / yum install git"
+		exit 1
+	}
+
+	mkdir -p "$APP_DIR"
+
+	if [[ -d "${APP_DIR}/.git" ]]; then
+		echo "[bootstrap] 检测到 Git 仓库，执行 git pull..."
+		git -C "$APP_DIR" fetch origin "$GIT_BRANCH" 2>/dev/null || true
+		git -C "$APP_DIR" checkout "$GIT_BRANCH" 2>/dev/null || true
+		git -C "$APP_DIR" pull origin "$GIT_BRANCH" 2>/dev/null || true
+	elif [[ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]]; then
+		# 目录非空（例如只有 curl 下载的 install.sh），强制同步仓库文件
+		echo "[bootstrap] 目录已有文件，从仓库同步..."
+		cd "$APP_DIR"
+		git init
+		git remote remove origin 2>/dev/null || true
+		git remote add origin "$REPO_URL"
+		git fetch origin "$GIT_BRANCH" --depth=1
+		git reset --hard "origin/${GIT_BRANCH}"
+		git clean -fd
+	else
+		echo "[bootstrap] 克隆仓库 -> $APP_DIR"
+		git clone --branch "$GIT_BRANCH" --depth=1 "$REPO_URL" "$APP_DIR"
+	fi
+
+	[[ -f "$common_file" ]] || {
+		echo "[error] 拉取代码失败，未找到 deploy/aapanel/common.sh"
+		echo "[error] 请手动执行: git clone -b master $REPO_URL $APP_DIR"
+		exit 1
+	}
+
+	echo "[bootstrap] 代码拉取完成"
+}
+
+bootstrap_repo
+
+# 若 install.sh 不在项目根目录，切换到项目根目录并重新执行
+if [[ "$SCRIPT_DIR" != "$APP_DIR" && -f "${APP_DIR}/install.sh" && "${AZURE_PANEL_INSTALL_REEXEC:-}" != "1" ]]; then
+	export AZURE_PANEL_INSTALL_REEXEC=1
+	cd "$APP_DIR"
+	exec bash "${APP_DIR}/install.sh" "$@"
+fi
+
+cd "$APP_DIR"
+
+# shellcheck source=deploy/aapanel/common.sh
+source "${APP_DIR}/deploy/aapanel/common.sh"
+
+# ---------- 可配置项 ----------
+APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
 MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"
 MYSQL_USER="${MYSQL_USER:-azure_panel}"
@@ -79,35 +112,22 @@ check_prerequisites() {
 		die "Node.js 版本过低 ($(node -v))，请安装 Node 20 LTS"
 	fi
 	log "Node $(node -v) | npm $(npm -v)"
+	log "项目目录: $APP_DIR"
 }
 
-clone_or_use_existing() {
-	if [[ -d "$APP_DIR/.git" ]]; then
-		log "使用已有项目目录: $APP_DIR"
-		cd "$APP_DIR"
-		if [[ -d .git ]]; then
-			log "拉取最新代码..."
-			git fetch origin 2>/dev/null || true
-			git checkout "$GIT_BRANCH" 2>/dev/null || true
-			git pull origin "$GIT_BRANCH" 2>/dev/null || warn "git pull 失败，继续使用本地代码"
-		fi
+sync_latest_code() {
+	if [[ ! -d "${APP_DIR}/.git" ]]; then
 		return
 	fi
-
-	if [[ -d "$APP_DIR" && -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]]; then
-		die "目录 $APP_DIR 已存在且非 Git 仓库，请清空后重试或设置其他 APP_DIR"
-	fi
-
-	log "克隆仓库 -> $APP_DIR"
-	mkdir -p "$(dirname "$APP_DIR")"
-	git clone --branch "$GIT_BRANCH" "$REPO_URL" "$APP_DIR"
-	cd "$APP_DIR"
+	log "同步最新代码..."
+	git fetch origin 2>/dev/null || true
+	git checkout "$GIT_BRANCH" 2>/dev/null || true
+	git pull origin "$GIT_BRANCH" 2>/dev/null || warn "git pull 失败，继续使用本地代码"
 }
 
 collect_config() {
 	log "收集安装配置..."
 
-	log "项目目录: $APP_DIR"
 	prompt_or_env MYSQL_HOST "MySQL 主机" "$MYSQL_HOST"
 	prompt_or_env MYSQL_PORT "MySQL 端口" "$MYSQL_PORT"
 	prompt_or_env MYSQL_USER "MySQL 用户名" "$MYSQL_USER"
@@ -115,7 +135,6 @@ collect_config() {
 	prompt_or_env APP_PORT "应用监听端口" "$APP_PORT"
 	prompt_or_env DOMAIN "绑定域名（可留空稍后配置）" "$DOMAIN"
 
-	# 应用数据库密码：未指定则自动生成
 	if [[ -z "${MYSQL_PASSWORD:-}" ]]; then
 		MYSQL_PASSWORD="$(rand_hex 16)"
 		log "已自动生成数据库密码 (${MYSQL_USER})"
@@ -154,7 +173,6 @@ setup_mysql() {
 		die "未找到 mysql 客户端，请先在 aaPanel 安装 MySQL"
 	fi
 
-	# 1) 自动创建数据库与用户
 	if [[ "${SKIP_CREATE_DB:-0}" != "1" ]]; then
 		if test_mysql_app_connection "$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD"; then
 			log "数据库用户已存在且可连接，跳过建库"
@@ -166,16 +184,13 @@ setup_mysql() {
 		warn "已跳过自动建库 (SKIP_CREATE_DB=1)"
 	fi
 
-	# 2) 验证连接
 	test_mysql_app_connection "$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD" \
 		|| die "数据库连接失败，请检查 MySQL 服务与账号"
 
-	# 3) 导入表结构
 	import_mysql_schema "$schema" "$MYSQL_HOST" "$MYSQL_PORT" \
 		"$MYSQL_USER" "$MYSQL_PASSWORD" "$MYSQL_DATABASE"
 	log "数据库表结构导入完成"
 
-	# 4) 保存凭据备查
 	mkdir -p "${APP_DIR}/deploy/aapanel/generated"
 	cat >"$cred_file" <<EOF
 # Azure Panel 数据库凭据（install.sh 自动生成，请妥善保管）
@@ -206,7 +221,7 @@ setup_supervisor() {
 main() {
 	banner
 	check_prerequisites
-	clone_or_use_existing
+	sync_latest_code
 	collect_config
 	setup_env
 	setup_mysql
