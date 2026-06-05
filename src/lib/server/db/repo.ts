@@ -37,8 +37,9 @@ export async function findUserByEmail(email: string): Promise<User | null> {
 export async function createUser(email: string, passwordHash: string): Promise<User> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();
-		const result = await db.insert(mysqlUsers).values({ email, passwordHash });
-		const id = Number(result[0].insertId);
+		const result = await db.insert(mysqlUsers).values({ email, passwordHash }).$returningId();
+		const id = Number(result[0]?.id);
+		if (!id) throw new Error('Failed to create user');
 		return (await findUserById(id))!;
 	}
 
@@ -76,8 +77,9 @@ export async function insertAccount(
 ): Promise<AzureAccount> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();
-		const result = await db.insert(mysqlAzureAccounts).values(values as never);
-		const id = Number(result[0].insertId);
+		const result = await db.insert(mysqlAzureAccounts).values(values as never).$returningId();
+		const id = Number(result[0]?.id);
+		if (!id) throw new Error('Failed to create Azure account');
 		const rows = await db.select().from(mysqlAzureAccounts).where(eq(mysqlAzureAccounts.id, id));
 		return rows[0] as AzureAccount;
 	}
@@ -136,8 +138,9 @@ export async function findWorkflowByUser(
 export async function insertWorkflow(values: Record<string, unknown>): Promise<WorkflowPolicy> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();
-		const result = await db.insert(mysqlWorkflowPolicies).values(values as never);
-		const id = Number(result[0].insertId);
+		const result = await db.insert(mysqlWorkflowPolicies).values(values as never).$returningId();
+		const id = Number(result[0]?.id);
+		if (!id) throw new Error('Failed to create workflow');
 		const rows = await db.select().from(mysqlWorkflowPolicies).where(eq(mysqlWorkflowPolicies.id, id));
 		return rows[0] as WorkflowPolicy;
 	}

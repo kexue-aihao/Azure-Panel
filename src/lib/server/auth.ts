@@ -28,11 +28,14 @@ export async function getUserFromAuthHeader(authHeader: string | null): Promise<
 	if (!authHeader?.startsWith('Bearer ')) {
 		error(401, '未登录');
 	}
+
 	const token = authHeader.slice(7);
 	try {
 		const secret = new TextEncoder().encode(getSecretKey());
 		const { payload } = await jwtVerify(token, secret);
 		const userId = Number(payload.sub);
+		if (!Number.isInteger(userId) || userId <= 0) error(401, '登录已失效');
+
 		const row = await findUserById(userId);
 		if (!row) error(401, '用户不存在');
 		return row;
@@ -42,14 +45,16 @@ export async function getUserFromAuthHeader(authHeader: string | null): Promise<
 }
 
 export async function registerUser(email: string, password: string): Promise<User> {
-	const existing = await findUserByEmail(email);
+	const normalizedEmail = email.trim().toLowerCase();
+	const existing = await findUserByEmail(normalizedEmail);
 	if (existing) error(400, '邮箱已注册');
+
 	const passwordHash = await hashPassword(password);
-	return createUser(email, passwordHash);
+	return createUser(normalizedEmail, passwordHash);
 }
 
 export async function loginUser(email: string, password: string): Promise<User> {
-	const user = await findUserByEmail(email);
+	const user = await findUserByEmail(email.trim().toLowerCase());
 	if (!user || !(await verifyPassword(password, user.passwordHash))) {
 		error(401, '邮箱或密码错误');
 	}
