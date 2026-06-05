@@ -287,6 +287,7 @@
 	async function loadCapabilities() {
 		if (!accountId || !location.trim()) return;
 		capabilityLoading = true;
+		createForm.vm_size = '';
 		try {
 			const params = new URLSearchParams({
 				account_id: String(accountId),
@@ -301,9 +302,13 @@
 			) {
 				createForm.vm_size = capabilities.available[0].name;
 			}
+			if (capabilities.available.length === 0) {
+				createForm.vm_size = '';
+			}
 			toast = `已识别 ${capabilities.available.length} 个当前账号可用规格`;
 		} catch (err) {
 			capabilities = null;
+			createForm.vm_size = '';
 			toast = err instanceof Error ? err.message : '规格查询失败';
 		} finally {
 			capabilityLoading = false;
@@ -355,6 +360,7 @@
 		capabilities = null;
 		quotas = [];
 		images = [];
+		createForm.vm_size = '';
 		await Promise.all([loadCapabilities(), loadImages()]);
 	}
 
