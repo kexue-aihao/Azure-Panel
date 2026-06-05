@@ -4,8 +4,8 @@
 # 从 Git 仓库拉取最新代码，安装依赖、构建并重启 Supervisor 进程。
 #
 # 用法:
-#   chmod +x update.sh
 #   ./update.sh
+#   # 如果旧版本权限已丢失，可临时执行: bash update.sh
 #
 # 可选环境变量（部署前按需 export）:
 #   APP_DIR=/www/wwwroot/azure-panel
@@ -106,6 +106,9 @@ else
 		git pull "$GIT_REMOTE" "$GIT_BRANCH"
 	fi
 fi
+
+# 旧版本仓库未记录可执行位时，更新后会变回 0644；这里兜底恢复，避免下次还要手动 chmod。
+chmod +x "${APP_DIR}/install.sh" "${APP_DIR}/update.sh" 2>/dev/null || true
 
 # ---------- 环境文件 ----------
 if [[ ! -f .env ]]; then

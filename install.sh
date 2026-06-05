@@ -91,6 +91,8 @@ bootstrap_repo() {
 		chmod +x "${APP_DIR}/install.sh" "${APP_DIR}/update.sh" 2>/dev/null || true
 	fi
 
+	chmod +x "${APP_DIR}/install.sh" "${APP_DIR}/update.sh" 2>/dev/null || true
+
 	[[ -f "$common_file" ]] || {
 		echo "[error] 拉取代码失败，未找到 deploy/aapanel/common.sh"
 		echo "[error] 请手动执行: git clone -b master $REPO_URL $APP_DIR"
