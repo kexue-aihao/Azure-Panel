@@ -652,6 +652,16 @@ detect_arch_label() {
 	esac
 }
 
+detect_xray_arch_label() {
+	local machine
+	machine="$(uname -m 2>/dev/null || echo unknown)"
+	case "$machine" in
+		x86_64|amd64) echo "64" ;;
+		aarch64|arm64) echo "arm64-v8a" ;;
+		*) echo "" ;;
+	esac
+}
+
 download_file() {
 	local url="$1"
 	local dest="$2"
@@ -687,12 +697,13 @@ ensure_proxy_cores() {
 		return 0
 	fi
 
-	local arch bin_dir tmp_dir sing_ver xray_ver sing_url xray_url
+	local arch xray_arch bin_dir tmp_dir sing_ver xray_ver sing_url xray_url
 	arch="$(detect_arch_label)"
 	if [[ -z "$arch" ]]; then
 		warn "未识别 CPU 架构，跳过 sing-box/Xray 自动下载"
 		return 0
 	fi
+	xray_arch="$(detect_xray_arch_label)"
 
 	bin_dir="${APP_DIR:-$(pwd)}/bin"
 	tmp_dir="${APP_DIR:-$(pwd)}/deploy/aapanel/generated/proxy-core-download"
@@ -718,9 +729,13 @@ ensure_proxy_cores() {
 	fi
 
 	if [[ ! -x "${bin_dir}/xray" ]]; then
+		if [[ -z "$xray_arch" ]]; then
+			warn "未识别 Xray CPU 架构，跳过 Xray 自动下载"
+			return 0
+		fi
 		xray_ver="${XRAY_VERSION:-$(latest_github_version XTLS/Xray-core 25.4.30)}"
-		xray_url="https://github.com/XTLS/Xray-core/releases/download/v${xray_ver}/Xray-linux-${arch}.zip"
-		log "下载 Xray ${xray_ver} (${arch})..."
+		xray_url="https://github.com/XTLS/Xray-core/releases/download/v${xray_ver}/Xray-linux-${xray_arch}.zip"
+		log "下载 Xray ${xray_ver} (${xray_arch})..."
 		if download_file "$xray_url" "${tmp_dir}/xray.zip"; then
 			if command -v unzip >/dev/null 2>&1; then
 				unzip -o "${tmp_dir}/xray.zip" -d "${tmp_dir}/xray" >/dev/null

@@ -94,6 +94,17 @@ function linuxArch() {
 	}
 }
 
+function xrayLinuxArch() {
+	switch (process.arch) {
+		case 'x64':
+			return '64';
+		case 'arm64':
+			return 'arm64-v8a';
+		default:
+			return '';
+	}
+}
+
 function coreDownloadUrl(core: ManagedProxyCore) {
 	const arch = linuxArch();
 	if (!arch) throw new Error(`当前 CPU 架构 ${process.arch} 暂不支持自动下载 ${core} 核心`);
@@ -104,10 +115,12 @@ function coreDownloadUrl(core: ManagedProxyCore) {
 			url: `https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz`
 		};
 	}
+	const xrayArch = xrayLinuxArch();
+	if (!xrayArch) throw new Error(`当前 CPU 架构 ${process.arch} 暂不支持自动下载 ${core} 核心`);
 	const version = readEnv('XRAY_VERSION') ?? '25.4.30';
 	return {
 		version,
-		url: `https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${arch}.zip`
+		url: `https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${xrayArch}.zip`
 	};
 }
 
