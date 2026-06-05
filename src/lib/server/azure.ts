@@ -144,6 +144,8 @@ export type AzureClients = {
 	compute: ComputeManagementClient;
 	network: NetworkManagementClient;
 	resources: ResourceManagementClient;
+	credential: ClientSecretCredential;
+	clientOptions: AzureClientOptions;
 	subscriptionId: string;
 };
 
@@ -240,6 +242,7 @@ const ARM_ENDPOINT = 'https://management.azure.com';
 const ARM_SCOPE = `${ARM_ENDPOINT}/.default`;
 const SUBSCRIPTIONS_API_VERSION = '2020-01-01';
 const COGNITIVE_SERVICES_API_VERSION = '2024-10-01';
+const CAPACITY_QUOTA_API_VERSION = '2020-10-25';
 export const DEFAULT_PROVIDER_NAMESPACES = [
 	'Microsoft.Compute',
 	'Microsoft.Network',
@@ -476,6 +479,8 @@ export function createAzureClients(account: AzureAccount, proxy?: AzureProxySele
 		compute: new ComputeManagementClient(credential, account.subscriptionId, clientOptions),
 		network: new NetworkManagementClient(credential, account.subscriptionId, clientOptions),
 		resources: new ResourceManagementClient(credential, account.subscriptionId, clientOptions),
+		credential,
+		clientOptions,
 		subscriptionId: account.subscriptionId
 	};
 }
@@ -505,6 +510,8 @@ export function createAzureClientsForSubscription(
 		compute: new ComputeManagementClient(credential, subscriptionId, clientOptions),
 		network: new NetworkManagementClient(credential, subscriptionId, clientOptions),
 		resources: new ResourceManagementClient(credential, subscriptionId, clientOptions),
+		credential,
+		clientOptions,
 		subscriptionId
 	};
 }
@@ -897,6 +904,11 @@ function quotaKey(value: string) {
 	return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+function addQuotaCandidate(target: Set<string>, value: string) {
+	const compact = compactVmFamily(value);
+	if (compact) target.add(compact);
+}
+
 function compactVmFamily(value: string) {
 	let key = quotaKey(value);
 	key = key.replace(/^standard/, '');
@@ -914,27 +926,81 @@ function compactVmFamily(value: string) {
 	return key;
 }
 
+function parseVmSizeFamilyParts(name: string) {
+	const raw = name
+		.replace(/^Standard[_-]/i, '')
+		.replace(/-/g, '_')
+		.trim();
+	const version = raw.match(/_v(\d+)$/i)?.[1] ?? '';
+	const base = raw.replace(/_v\d+$/i, '');
+	const match = base.match(/^([A-Za-z]+)(\d+(?:_\d+)?)(.*)$/);
+	if (!match) return null;
+	return {
+		prefix: match[1],
+		features: (match[3] ?? '').replace(/^_+/, ''),
+		version: version ? `v${version}` : ''
+	};
+}
+
+function vmFeatureVariants(features: string) {
+	const normalized = features.replace(/[^A-Za-z0-9]/g, '');
+	const variants = new Set<string>();
+	if (normalized) variants.add(normalized);
+
+	const letterOnly = normalized.replace(/[0-9]/g, '');
+	const hardware = features
+		.split(/_/)
+		.map((part) => part.replace(/[^A-Za-z0-9]/g, ''))
+		.filter(Boolean)
+		.at(-1);
+	if (hardware && /\d/.test(hardware)) variants.add(hardware);
+
+	const optionalMarkers = ['d', 'l'];
+	const markerMasks = 1 << optionalMarkers.length;
+	for (let mask = 1; mask < markerMasks; mask += 1) {
+		let candidate = normalized;
+		for (let index = 0; index < optionalMarkers.length; index += 1) {
+			if (mask & (1 << index)) {
+				const marker = optionalMarkers[index];
+				candidate = candidate.replace(new RegExp(marker, 'gi'), '');
+			}
+		}
+		if (candidate) variants.add(candidate);
+	}
+
+	if (letterOnly && letterOnly !== normalized) variants.add(letterOnly);
+	return [...variants];
+}
+
 function fallbackVmFamilyCandidatesFromName(name: string) {
 	const candidates = new Set<string>();
-	const raw = name.replace(/^Standard_/i, '');
+	const parts = parseVmSizeFamilyParts(name);
+
+	if (parts) {
+		for (const features of vmFeatureVariants(parts.features)) {
+			addQuotaCandidate(candidates, `${parts.prefix}${features}${parts.version}`);
+			addQuotaCandidate(candidates, `${parts.prefix}${features}`);
+		}
+		addQuotaCandidate(candidates, `${parts.prefix}${parts.version}`);
+		addQuotaCandidate(candidates, parts.prefix);
+	}
+
+	const raw = name.replace(/^Standard[_-]/i, '');
 	const version = raw.match(/_(v\d+)$/i)?.[1] ?? '';
 	const base = raw.replace(/_(v\d+)$/i, '');
 	const normalized = base.replace(/^([A-Za-z]+)\d+(?:-\d+)?([A-Za-z]*)$/i, '$1$2');
-
-	for (const candidate of [normalized + version, normalized]) {
-		const compact = compactVmFamily(candidate);
-		if (compact) candidates.add(compact);
-	}
+	addQuotaCandidate(candidates, normalized + version);
+	addQuotaCandidate(candidates, normalized);
 
 	return [...candidates].filter(Boolean);
 }
 
 function vmFamilyCandidates(capability: VmCapability) {
-	const family = compactVmFamily(capability.family);
-	if (family) return { exact: [family], fallback: [] };
-
+	const exact = new Set<string>();
+	if (capability.family) addQuotaCandidate(exact, capability.family);
 	const fallback = fallbackVmFamilyCandidatesFromName(capability.name);
-	return { exact: [], fallback };
+	for (const candidate of fallback) exact.add(candidate);
+	return { exact: [...exact], fallback };
 }
 
 type QuotaIndexEntry = {
@@ -944,6 +1010,7 @@ type QuotaIndexEntry = {
 
 type QuotaIndex = {
 	totalQuota?: ComputeQuota;
+	byKey: Map<string, ComputeQuota>;
 	entries: QuotaIndexEntry[];
 };
 
@@ -997,17 +1064,29 @@ function findTotalRegionalVcpuQuota(quotas: ComputeQuota[]) {
 }
 
 function buildQuotaIndex(quotas: ComputeQuota[]): QuotaIndex {
+	const entries = quotas.map((quota) => ({
+		quota,
+		keys: [...new Set(quotaFamilyKeys(quota))]
+	}));
+	const byKey = new Map<string, ComputeQuota>();
+	for (const entry of entries) {
+		for (const key of entry.keys) {
+			if (!byKey.has(key)) byKey.set(key, entry.quota);
+		}
+	}
 	return {
 		totalQuota: findTotalRegionalVcpuQuota(quotas),
-		entries: quotas.map((quota) => ({
-			quota,
-			keys: quotaFamilyKeys(quota)
-		}))
+		byKey,
+		entries
 	};
 }
 
 function findFamilyQuota(capability: VmCapability, index: QuotaIndex) {
 	const families = vmFamilyCandidates(capability);
+	for (const candidate of families.exact) {
+		const quota = index.byKey.get(candidate) ?? index.byKey.get(`${candidate}vcpus`);
+		if (quota) return quota;
+	}
 	return (
 		findQuotaByFamilyCandidate(families.exact, index.entries, { allowPrefix: false }) ??
 		findQuotaByFamilyCandidate(families.fallback, index.entries, { allowPrefix: true })
@@ -1098,6 +1177,43 @@ async function listResourceSkuCapabilitiesForLocation(
 		...capability,
 		restrictionReasons: [...capability.restrictionReasons]
 	}));
+}
+
+async function listResourceSkuCapabilitiesByRegion(
+	clients: AzureClients
+): Promise<Map<string, VmCapability[]>> {
+	const key = `vm-skus-by-region:${clients.subscriptionId}`;
+	const byRegion = await cachedAzureQuery(
+		key,
+		cacheTtlMs('AZURE_SKU_CACHE_TTL_SECONDS', 300),
+		async () => {
+			const grouped = new Map<string, VmCapability[]>();
+			for await (const sku of clients.compute.resourceSkus.list()) {
+				if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
+				for (const region of skuLocations(sku)) {
+					const location = normalizeLocationName(region);
+					const capability = skuToCapability(sku, location);
+					if (capability.restricted) continue;
+					const list = grouped.get(location) ?? [];
+					list.push(capability);
+					grouped.set(location, list);
+				}
+			}
+			return grouped;
+		}
+	);
+
+	const copy = new Map<string, VmCapability[]>();
+	for (const [region, capabilities] of byRegion) {
+		copy.set(
+			region,
+			capabilities.map((capability) => ({
+				...capability,
+				restrictionReasons: [...capability.restrictionReasons]
+			}))
+		);
+	}
+	return copy;
 }
 
 async function listVmSizeCapabilitiesForLocation(
@@ -1257,20 +1373,10 @@ export async function listVmCapabilities(
 }
 
 export async function listAvailableVmRegions(clients: AzureClients): Promise<AzureRegionOption[]> {
-	const byRegion = new Map<string, VmCapability[]>();
+	let byRegion: Map<string, VmCapability[]>;
 
 	try {
-		for await (const sku of clients.compute.resourceSkus.list()) {
-			if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
-			for (const region of skuLocations(sku)) {
-				const location = normalizeLocationName(region);
-				const capability = skuToCapability(sku, location);
-				if (capability.restricted) continue;
-				const list = byRegion.get(location) ?? [];
-				list.push(capability);
-				byRegion.set(location, list);
-			}
-		}
+		byRegion = await listResourceSkuCapabilitiesByRegion(clients);
 	} catch (err) {
 		throw new Error(`查询 Azure 官方可用规格失败：${azureErrorMessage(err)}`);
 	}
@@ -1280,13 +1386,18 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 	}
 
 	const configuredScanLimit = Number(readEnv('AZURE_REGION_SCAN_LIMIT') ?? byRegion.size);
+	const configuredConcurrency = Number(readEnv('AZURE_REGION_SCAN_CONCURRENCY') ?? 6);
 	const maxScan =
 		Number.isFinite(configuredScanLimit) && configuredScanLimit > 0
 			? Math.min(byRegion.size, Math.max(1, configuredScanLimit))
 			: byRegion.size;
+	const concurrency =
+		Number.isFinite(configuredConcurrency) && configuredConcurrency > 0
+			? Math.min(12, Math.max(1, configuredConcurrency))
+			: 6;
 	const entries = rankRegionEntries([...byRegion.entries()]).slice(0, maxScan);
 	const quotaErrors: string[] = [];
-	const regions = await mapWithConcurrency(entries, 3, async ([name, candidates]) => {
+	const regions = await mapWithConcurrency(entries, concurrency, async ([name, candidates]) => {
 		const quotas = await listComputeQuotas(clients, name).catch((err) => {
 			quotaErrors.push(`${name}: ${azureErrorMessage(err)}`);
 			return [];
@@ -1470,19 +1581,91 @@ function usageToQuota(usage: Usage): ComputeQuota {
 	};
 }
 
+type CapacityQuotaItem = {
+	name?: string;
+	properties?: {
+		name?: {
+			value?: string;
+			localizedValue?: string;
+		};
+		resourceName?: string;
+		currentValue?: number;
+		limit?: number;
+		unit?: string;
+	};
+};
+
+function numericQuotaValue(value: unknown) {
+	const parsed = Number(value ?? 0);
+	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function capacityQuotaToComputeQuota(item: CapacityQuotaItem): ComputeQuota {
+	const properties = item.properties ?? {};
+	const current = numericQuotaValue(properties.currentValue);
+	const limit = numericQuotaValue(properties.limit);
+	const name = properties.name?.value ?? properties.resourceName ?? item.name ?? '';
+	return {
+		name,
+		localizedName: properties.name?.localizedValue ?? name,
+		current,
+		limit,
+		remaining: Math.max(limit - current, 0),
+		unit: properties.unit ?? 'Count'
+	};
+}
+
+async function listCapacityComputeQuotas(
+	clients: AzureClients,
+	location: string
+): Promise<ComputeQuota[]> {
+	const normalizedLocation = normalizeLocationName(location);
+	const path =
+		`/subscriptions/${encodeURIComponent(clients.subscriptionId)}` +
+		'/providers/Microsoft.Capacity/resourceProviders/Microsoft.Compute' +
+		`/locations/${encodeURIComponent(normalizedLocation)}` +
+		`/serviceLimits?api-version=${CAPACITY_QUOTA_API_VERSION}`;
+	const items = await collectArmPages<CapacityQuotaItem>(
+		clients.credential,
+		clients.clientOptions,
+		path
+	);
+	return items
+		.map(capacityQuotaToComputeQuota)
+		.filter((quota) => quota.name || quota.localizedName);
+}
+
+async function listUsageComputeQuotas(
+	clients: AzureClients,
+	location: string
+): Promise<ComputeQuota[]> {
+	const normalizedLocation = normalizeLocationName(location);
+	const list: ComputeQuota[] = [];
+	for await (const usage of clients.compute.usageOperations.list(normalizedLocation)) {
+		list.push(usageToQuota(usage));
+	}
+	return list;
+}
+
+function sortComputeQuotas(quotas: ComputeQuota[]) {
+	return [...quotas].sort((a, b) => {
+		const nameA = a.localizedName || a.name;
+		const nameB = b.localizedName || b.name;
+		return nameA.localeCompare(nameB);
+	});
+}
+
 export async function listComputeQuotas(clients: AzureClients, location: string): Promise<ComputeQuota[]> {
 	const normalizedLocation = normalizeLocationName(location);
 	const key = `compute-quotas:${clients.subscriptionId}:${normalizedLocation}`;
 	const quotas = await cachedAzureQuery(key, cacheTtlMs('AZURE_QUOTA_CACHE_TTL_SECONDS', 120), async () => {
-		const list: ComputeQuota[] = [];
-		for await (const usage of clients.compute.usageOperations.list(normalizedLocation)) {
-			list.push(usageToQuota(usage));
+		try {
+			const capacityQuotas = await listCapacityComputeQuotas(clients, normalizedLocation);
+			if (capacityQuotas.length > 0) return sortComputeQuotas(capacityQuotas);
+		} catch {
+			// Older tenants can lack Microsoft.Capacity access; Compute usages is the safe fallback.
 		}
-		return list.sort((a, b) => {
-			const nameA = a.localizedName || a.name;
-			const nameB = b.localizedName || b.name;
-			return nameA.localeCompare(nameB);
-		});
+		return sortComputeQuotas(await listUsageComputeQuotas(clients, normalizedLocation));
 	});
 	return quotas.map((quota) => ({ ...quota }));
 }
