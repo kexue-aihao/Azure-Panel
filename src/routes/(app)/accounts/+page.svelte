@@ -7,12 +7,9 @@
 		name: string;
 		tenant_id: string;
 		client_id: string;
-		subscription_id: string;
-		proxy_profile_id: number | null;
 		proxy_enabled: boolean;
 		proxy_name: string;
 		proxy_label: string;
-		remark: string;
 	};
 
 	type ProxyMode = 'direct' | 'client_ip' | 'profile';
@@ -29,13 +26,11 @@
 	let accounts = $state<Account[]>([]);
 	let proxies = $state<ProxyProfile[]>([]);
 	let form = $state({
-		name: '',
 		tenant_id: '',
 		client_id: '',
 		client_secret: '',
 		proxy_mode: 'direct' as ProxyMode,
-		proxy_profile_id: '',
-		remark: ''
+		proxy_profile_id: ''
 	});
 	let toast = $state('');
 	let fixedProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
@@ -43,13 +38,11 @@
 
 	function resetForm() {
 		form = {
-			name: '',
 			tenant_id: '',
 			client_id: '',
 			client_secret: '',
 			proxy_mode: 'direct',
-			proxy_profile_id: '',
-			remark: ''
+			proxy_profile_id: ''
 		};
 	}
 
@@ -87,12 +80,10 @@
 		}
 
 		const payload = {
-			name: form.name,
 			tenant_id: form.tenant_id,
 			client_id: form.client_id,
 			client_secret: form.client_secret,
-			proxy_profile_id: form.proxy_mode === 'direct' ? '' : form.proxy_profile_id,
-			remark: form.remark
+			proxy_profile_id: form.proxy_mode === 'direct' ? '' : form.proxy_profile_id
 		};
 
 		try {
@@ -137,7 +128,6 @@
 			默认由部署本网站的服务器直接请求 Azure API，Azure 侧看到的是服务器源站出站 IP。
 			选择代理配置后，此账号的验证、VM 查询、开关机和自动补机会走代理出口 IP。
 		</p>
-		<input class="input" bind:value={form.name} placeholder="账号名称" required />
 		<input class="input" bind:value={form.tenant_id} placeholder="Tenant ID" required />
 		<input class="input" bind:value={form.client_id} placeholder="Client ID" required />
 		<input
@@ -189,9 +179,8 @@
 			{/if}
 		{/if}
 		<p class="text-xs text-muted">
-			订阅 ID 会在保存时从 Azure 官网自动识别。选择代理档案后，此账号的验证、VM 查询、开关机和自动补机会走该代理出口。
+			这里只需要填写 Azure 登录凭据三项。选择代理档案后，此账号的验证、VM 查询、开关机和自动补机会走该代理出口。
 		</p>
-		<input class="input" bind:value={form.remark} placeholder="备注（可选）" />
 		<button class="btn-primary" type="submit">保存账号</button>
 	</form>
 
@@ -204,8 +193,8 @@
 				<div class="flex items-start justify-between gap-3 rounded-lg border border-border p-3">
 					<div>
 						<div class="font-medium">{account.name}</div>
-						<div class="mt-1 text-xs text-muted">订阅: {account.subscription_id}</div>
-						<div class="text-xs text-muted">租户: {account.tenant_id}</div>
+						<div class="mt-1 text-xs text-muted">租户: {account.tenant_id}</div>
+						<div class="text-xs text-muted">Client ID: {account.client_id}</div>
 						<div class="text-xs text-muted">
 							出站: {account.proxy_enabled
 								? `代理 ${account.proxy_name ? `${account.proxy_name} ` : ''}${account.proxy_label}`

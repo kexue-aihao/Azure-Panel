@@ -9,7 +9,7 @@ export const POST: RequestHandler = async (event) => {
 	const user = await requireUser(event);
 	const body = await event.request.json();
 
-	const name = String(body.name ?? '');
+	const rawName = String(body.name ?? '').trim();
 	const tenantId = String(body.tenant_id ?? '');
 	const clientId = String(body.client_id ?? '');
 	const clientSecret = String(body.client_secret ?? '');
@@ -17,7 +17,7 @@ export const POST: RequestHandler = async (event) => {
 	const proxyProfileId = Number(body.proxy_profile_id ?? 0) || null;
 	const remark = String(body.remark ?? '');
 
-	if (!name || !tenantId || !clientId || !clientSecret) {
+	if (!tenantId || !clientId || !clientSecret) {
 		return fail('请填写完整 Azure 凭据');
 	}
 
@@ -42,6 +42,7 @@ export const POST: RequestHandler = async (event) => {
 	} catch (err) {
 		return fail(`Azure 凭据验证失败: ${String(err)}`, 400);
 	}
+	const name = rawName || `Azure ${clientId.slice(0, 8)}`;
 
 	const account = await insertAccount({
 		userId: user.id,
