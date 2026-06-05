@@ -29,7 +29,9 @@ export const POST: RequestHandler = async (event) => {
 		? requestedCore ?? 'sing-box'
 		: null;
 
-	const name = String(body.name ?? parsedShareLink?.name ?? '').trim();
+	const requestedName = String(body.name ?? '').trim();
+	const parsedName = String(parsedShareLink?.name ?? '').trim();
+	const name = requestedName || parsedName;
 	if (!name) return fail('请填写代理名称');
 
 	let proxy;

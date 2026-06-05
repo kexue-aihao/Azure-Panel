@@ -63,6 +63,7 @@
 	let shareLink = $state('');
 	let managedCore = $state<'sing-box' | 'xray'>('sing-box');
 	let parsedShareLink = $state<ParsedShareLink | null>(null);
+	let saving = $state(false);
 	let form = $state({
 		name: '',
 		type: 'http' as ProxyType,
@@ -92,6 +93,7 @@
 
 	let requiresUsername = $derived(form.type === 'http' || form.type === 'https' || form.type === 'socks5');
 	let isShadowsocks = $derived(form.type === 'shadowsocks');
+	let isManagedShareLink = $derived(Boolean(parsedShareLink?.managed_supported && shareLink.trim()));
 	let customProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
 
 	async function load() {
@@ -105,6 +107,8 @@
 
 	async function submit(e: Event) {
 		e.preventDefault();
+		if (saving) return;
+		saving = true;
 		try {
 			await api('/api/user/proxy/add', {
 				method: 'POST',
@@ -127,6 +131,8 @@
 			await load();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '添加失败';
+		} finally {
+			saving = false;
 		}
 	}
 
@@ -146,6 +152,16 @@
 			if (parsedShareLink.managed_core === 'sing-box' || parsedShareLink.managed_core === 'xray') {
 				managedCore = parsedShareLink.managed_core;
 			}
+			if (parsedShareLink.supported && parsedShareLink.managed_supported) {
+				form.name = form.name || parsedShareLink.name;
+				form.type = 'http';
+				form.source = 'fixed';
+				form.host = '';
+				form.port = 0;
+				form.method = '';
+				form.username = '';
+				form.password = '';
+			}
 			if (parsedShareLink.supported && parsedShareLink.proxy) {
 				form.name = parsedShareLink.name || form.name;
 				form.type = parsedShareLink.proxy.type;
@@ -160,6 +176,10 @@
 			parsedShareLink = null;
 			toast = err instanceof Error ? err.message : '分享链接识别失败';
 		}
+	}
+
+	function clearParsedShareLink() {
+		parsedShareLink = null;
 	}
 
 	async function remove(id: number) {
@@ -236,6 +256,7 @@
 				id="share-link"
 				class="input min-h-24 font-mono text-xs"
 				bind:value={shareLink}
+				oninput={clearParsedShareLink}
 				placeholder="支持 http://、socks5://、ss://。VLESS/Reality 可由内置 sing-box/Xray 转换为本地 HTTP 代理端口。"
 			></textarea>
 			<div class="flex flex-wrap items-center gap-2">
@@ -283,58 +304,73 @@
 
 		<input class="input" bind:value={form.name} placeholder="标注" required />
 
-		<div class={isShadowsocks ? 'grid gap-3 sm:grid-cols-2' : 'grid gap-3'}>
-			<select class="input" bind:value={form.type} onchange={changeType}>
-				<option value="http">http</option>
-				<option value="https">https</option>
-				<option value="socks5">socks5</option>
-				<option value="socks4a">socks4a</option>
-				<option value="socks4">socks4</option>
-				<option value="shadowsocks">shadowsocks</option>
-			</select>
-			{#if isShadowsocks}
-				<select class="input" bind:value={form.method} required>
-					<option value="">方法</option>
-					{#each shadowMethods as method}
-						<option value={method}>{method}</option>
-					{/each}
+		{#if isManagedShareLink}
+			<div class="flex flex-wrap items-center gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
+				<button class="btn-primary" type="submit" disabled={saving}>
+					{saving ? '保存中...' : '保存托管代理'}
+				</button>
+				<span class="text-xs text-emerald-200">
+					无需填写主机和端口，保存后会出现在右侧代理档案中。
+				</span>
+			</div>
+		{:else}
+			<div class={isShadowsocks ? 'grid gap-3 sm:grid-cols-2' : 'grid gap-3'}>
+				<select class="input" bind:value={form.type} onchange={changeType}>
+					<option value="http">http</option>
+					<option value="https">https</option>
+					<option value="socks5">socks5</option>
+					<option value="socks4a">socks4a</option>
+					<option value="socks4">socks4</option>
+					<option value="shadowsocks">shadowsocks</option>
 				</select>
+				{#if isShadowsocks}
+					<select class="input" bind:value={form.method} required>
+						<option value="">方法</option>
+						{#each shadowMethods as method}
+							<option value={method}>{method}</option>
+						{/each}
+					</select>
+				{/if}
+			</div>
+
+			<div class="grid gap-3 sm:grid-cols-[1fr_130px]">
+				<input
+					class="input"
+					bind:value={form.host}
+					placeholder="主机名，例如 127.0.0.1"
+					required
+				/>
+				<input
+					class="input"
+					bind:value={form.port}
+					min="1"
+					max="65535"
+					type="number"
+					placeholder="端口"
+					required
+				/>
+			</div>
+
+			{#if requiresUsername}
+				<input class="input" bind:value={form.username} placeholder="用户名" />
 			{/if}
-		</div>
-
-		<div class="grid gap-3 sm:grid-cols-[1fr_130px]">
 			<input
 				class="input"
-				bind:value={form.host}
-				placeholder="主机名，例如 127.0.0.1"
-				required
+				bind:value={form.password}
+				type="password"
+				placeholder={isShadowsocks || form.type === 'socks4' || form.type === 'socks4a'
+					? '密码'
+					: '密码（可选）'}
+				required={isShadowsocks}
 			/>
-			<input
-				class="input"
-				bind:value={form.port}
-				min="1"
-				max="65535"
-				type="number"
-				placeholder="端口"
-				required
-			/>
-		</div>
 
-		{#if requiresUsername}
-			<input class="input" bind:value={form.username} placeholder="用户名" />
+			<p class="text-xs text-muted">
+				保存前会验证代理端口可连接。账号添加页可直接选择“当前访问网站 IP（自动识别）”。
+			</p>
+			<button class="btn-primary" type="submit" disabled={saving}>
+				{saving ? '提交中...' : '验证并提交'}
+			</button>
 		{/if}
-		<input
-			class="input"
-			bind:value={form.password}
-			type="password"
-			placeholder={isShadowsocks || form.type === 'socks4' || form.type === 'socks4a' ? '密码' : '密码（可选）'}
-			required={isShadowsocks}
-		/>
-
-		<p class="text-xs text-muted">
-			保存前会验证代理端口可连接。账号添加页可直接选择“当前访问网站 IP（自动识别）”。
-		</p>
-		<button class="btn-primary" type="submit">验证并提交</button>
 	</form>
 
 	<div class="card overflow-x-auto p-5">
