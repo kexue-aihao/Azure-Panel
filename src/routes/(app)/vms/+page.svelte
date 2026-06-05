@@ -2,7 +2,21 @@
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
 
-	type Account = { id: number; name: string };
+	type Account = {
+		id: number;
+		name: string;
+		proxy_enabled?: boolean;
+		proxy_name?: string;
+		proxy_label?: string;
+	};
+	type ProxyMode = 'account' | 'direct' | 'client_ip' | 'profile';
+	type ProxyProfile = {
+		id: number;
+		name: string;
+		type: 'http' | 'https' | 'socks4' | 'socks4a' | 'socks5' | 'shadowsocks';
+		source: 'fixed' | 'client_ip';
+		label: string;
+	};
 	type Vm = {
 		name: string;
 		resource_group: string;
@@ -66,6 +80,7 @@
 	};
 
 	let accounts = $state<Account[]>([]);
+	let proxies = $state<ProxyProfile[]>([]);
 	let vms = $state<Vm[]>([]);
 	let regions = $state<RegionOption[]>([]);
 	let images = $state<VmImageOption[]>([]);
@@ -82,6 +97,8 @@
 	let createLoading = $state(false);
 	let ipActionLoading = $state('');
 	let toast = $state('');
+	let proxyMode = $state<ProxyMode>('account');
+	let proxyProfileId = $state('');
 	let brushIpPrefix = $state('85.211');
 	let brushMaxAttempts = $state(30);
 	let createForm = $state({
@@ -99,6 +116,8 @@
 	});
 
 	const accountSelectId = 'account-select';
+	const proxySelectId = 'vm-proxy-select';
+	const proxyProfileSelectId = 'vm-proxy-profile-select';
 	const resourceGroupInputId = 'resource-group-input';
 	const locationInputId = 'location-input';
 	const createLocationSelectId = 'create-location-select';
@@ -151,8 +170,65 @@
 		createForm.admin_password = generateAdminPassword();
 	}
 
+	let fixedProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
+	let clientIpProxy = $derived(proxies.find((proxy) => proxy.source === 'client_ip') ?? null);
+	let selectedAccount = $derived(accounts.find((account) => account.id === accountId) ?? null);
+
+	function syncProxySelection() {
+		if (proxyMode !== 'profile') {
+			proxyProfileId = '';
+			return;
+		}
+
+		if (fixedProxies.length === 0) {
+			proxyMode = 'account';
+			proxyProfileId = '';
+			return;
+		}
+
+		if (!fixedProxies.some((proxy) => String(proxy.id) === proxyProfileId)) {
+			proxyProfileId = fixedProxies[0] ? String(fixedProxies[0].id) : '';
+		}
+	}
+
+	function appendProxyParams(params: URLSearchParams) {
+		params.set('proxy_mode', proxyMode);
+		if (proxyMode === 'profile' && proxyProfileId) {
+			params.set('proxy_profile_id', proxyProfileId);
+		}
+		return params;
+	}
+
+	function proxyPayload() {
+		return {
+			proxy_mode: proxyMode,
+			proxy_profile_id: proxyMode === 'profile' ? proxyProfileId : ''
+		};
+	}
+
+	async function changeProxySelection() {
+		syncProxySelection();
+		if (accountId) {
+			capabilities = null;
+			quotas = [];
+			images = [];
+			const loadedRegions = await loadRegions();
+			if (loadedRegions) {
+				await Promise.all([loadVms(), loadRegionDetails()]);
+			} else {
+				await loadVms();
+			}
+		}
+	}
+
 	async function loadAccounts() {
-		accounts = await api<Account[]>('/api/user/azure/account/list');
+		const [accountList, proxyList] = await Promise.all([
+			api<Account[]>('/api/user/azure/account/list'),
+			api<ProxyProfile[]>('/api/user/proxy/list')
+		]);
+		accounts = accountList;
+		proxies = proxyList;
+		syncProxySelection();
 		if (!accountId && accounts.length) accountId = accounts[0].id;
 	}
 
@@ -165,6 +241,7 @@
 		regionsLoading = true;
 		try {
 			const params = new URLSearchParams({ account_id: String(accountId) });
+			appendProxyParams(params);
 			regions = await api<RegionOption[]>(`/api/user/azure/region/list?${params}`);
 			if (regions.length === 0) {
 				location = '';
@@ -197,6 +274,7 @@
 		try {
 			const params = new URLSearchParams({ account_id: String(accountId) });
 			if (resourceGroup) params.set('resource_group', resourceGroup);
+			appendProxyParams(params);
 			vms = await api<Vm[]>(`/api/user/azure/resource/list?${params}`);
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '加载失败';
@@ -213,6 +291,7 @@
 				account_id: String(accountId),
 				location: location.trim()
 			});
+			appendProxyParams(params);
 			capabilities = await api<CapabilityResult>(`/api/user/azure/capability/list?${params}`);
 			if (
 				capabilities.available.length &&
@@ -237,6 +316,7 @@
 				account_id: String(accountId),
 				location: location.trim()
 			});
+			appendProxyParams(params);
 			images = await api<VmImageOption[]>(`/api/user/azure/image/list?${params}`);
 			if (images.length && !images.some((item) => item.imageReference === createForm.image_reference)) {
 				createForm.image_reference = images[0].imageReference;
@@ -258,6 +338,7 @@
 				account_id: String(accountId),
 				location: location.trim()
 			});
+			appendProxyParams(params);
 			quotas = await api<Quota[]>(`/api/user/azure/quota/list?${params}`);
 			toast = `已加载 ${location} 区域配额`;
 		} catch (err) {
@@ -278,6 +359,7 @@
 	async function changeAccount() {
 		refreshAdminPassword();
 		refreshCreateNames();
+		syncProxySelection();
 		capabilities = null;
 		quotas = [];
 		images = [];
@@ -321,6 +403,7 @@
 				body: JSON.stringify({
 					...createForm,
 					account_id: accountId,
+					...proxyPayload(),
 					ip_brush_max_attempts: Number(createForm.ip_brush_max_attempts)
 				})
 			});
@@ -343,6 +426,7 @@
 				method: 'POST',
 				body: JSON.stringify({
 					account_id: accountId,
+					...proxyPayload(),
 					resource_group: vm.resource_group,
 					vm_name: vm.name
 				})
@@ -367,6 +451,7 @@
 					method: 'POST',
 					body: JSON.stringify({
 						account_id: accountId,
+						...proxyPayload(),
 						resource_group: vm.resource_group,
 						vm_name: vm.name
 					})
@@ -399,6 +484,7 @@
 					method: 'POST',
 					body: JSON.stringify({
 						account_id: accountId,
+						...proxyPayload(),
 						resource_group: vm.resource_group,
 						vm_name: vm.name,
 						ip_prefix: brushIpPrefix,
@@ -459,6 +545,52 @@
 					{/each}
 				</select>
 			</div>
+			<div>
+				<label class="text-sm text-muted" for={proxySelectId}>本次操作代理</label>
+				<select
+					id={proxySelectId}
+					class="input mt-1 min-w-[260px]"
+					bind:value={proxyMode}
+					onchange={() => void changeProxySelection()}
+				>
+					<option value="account">
+						沿用账号绑定{selectedAccount?.proxy_enabled
+							? `：${selectedAccount.proxy_name ? `${selectedAccount.proxy_name} ` : ''}${selectedAccount.proxy_label}`
+							: '：服务器源站 IP'}
+					</option>
+					<option value="direct">强制直连：服务器源站 IP</option>
+					<option value="client_ip">当前访问网站 IP 自动代理</option>
+					<option value="profile" disabled={fixedProxies.length === 0}>选择已保存代理</option>
+				</select>
+			</div>
+			{#if proxyMode === 'profile'}
+				<div>
+					<label class="text-sm text-muted" for={proxyProfileSelectId}>代理档案</label>
+					<select
+						id={proxyProfileSelectId}
+						class="input mt-1 min-w-[300px]"
+						bind:value={proxyProfileId}
+						onchange={() => void changeProxySelection()}
+						disabled={fixedProxies.length === 0}
+					>
+						{#if fixedProxies.length === 0}
+							<option value="">请先到代理配置添加代理</option>
+						{:else}
+							{#each fixedProxies as proxy}
+								<option value={String(proxy.id)}>{proxy.name} - {proxy.label}</option>
+							{/each}
+						{/if}
+					</select>
+				</div>
+			{:else if proxyMode === 'client_ip'}
+				<div class="max-w-sm rounded-lg border border-border bg-background px-3 py-2 text-xs text-muted">
+					{#if clientIpProxy}
+						当前将使用：{clientIpProxy.name} - {clientIpProxy.label}
+					{:else}
+						会自动识别当前访问网站的 IP 并尝试创建可用代理档案
+					{/if}
+				</div>
+			{/if}
 			<div>
 				<label class="text-sm text-muted" for={resourceGroupInputId}>资源组（可选）</label>
 				<input

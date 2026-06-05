@@ -30,6 +30,9 @@ import {
 } from './proxy';
 import { readEnv } from './runtime-env';
 
+export const DIRECT_PROXY = Symbol('DIRECT_PROXY');
+export type AzureProxySelection = ProxyRuntimeConfig | typeof DIRECT_PROXY | null;
+
 export type VmInfo = {
 	name: string;
 	resourceGroup: string;
@@ -413,8 +416,8 @@ function decryptLegacyProxy(account: AzureAccount): ProxyRuntimeConfig | null {
 	return account.proxyUrlEncrypted ? parseProxyUrl(decryptSecret(account.proxyUrlEncrypted)) : null;
 }
 
-export function createAzureClients(account: AzureAccount, proxy?: ProxyRuntimeConfig | null): AzureClients {
-	const runtimeProxy = proxy ?? decryptLegacyProxy(account);
+export function createAzureClients(account: AzureAccount, proxy?: AzureProxySelection): AzureClients {
+	const runtimeProxy = proxy === DIRECT_PROXY ? null : (proxy ?? decryptLegacyProxy(account));
 	const clientOptions = azureClientOptions(runtimeProxy);
 	const credential = new ClientSecretCredential(
 		account.tenantId,
@@ -432,9 +435,9 @@ export function createAzureClients(account: AzureAccount, proxy?: ProxyRuntimeCo
 
 function createCredentialAndOptions(
 	account: AzureAccount,
-	proxy?: ProxyRuntimeConfig | null
+	proxy?: AzureProxySelection
 ): { credential: ClientSecretCredential; clientOptions: AzureClientOptions } {
-	const runtimeProxy = proxy ?? decryptLegacyProxy(account);
+	const runtimeProxy = proxy === DIRECT_PROXY ? null : (proxy ?? decryptLegacyProxy(account));
 	const clientOptions = azureClientOptions(runtimeProxy);
 	const credential = new ClientSecretCredential(
 		account.tenantId,
@@ -448,7 +451,7 @@ function createCredentialAndOptions(
 export function createAzureClientsForSubscription(
 	account: AzureAccount,
 	subscriptionId: string,
-	proxy?: ProxyRuntimeConfig | null
+	proxy?: AzureProxySelection
 ): AzureClients {
 	const { credential, clientOptions } = createCredentialAndOptions(account, proxy);
 	return {

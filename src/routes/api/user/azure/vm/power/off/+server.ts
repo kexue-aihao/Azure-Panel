@@ -1,4 +1,4 @@
-﻿import { getUserAccountWithProxy } from '$lib/server/accounts';
+import { getUserAccountWithSelectedProxy } from '$lib/server/accounts';
 import { createAzureClients, deallocateVm } from '$lib/server/azure';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
@@ -11,13 +11,15 @@ export const POST: RequestHandler = async (event) => {
 	const vmName = String(body.vm_name ?? '');
 	if (!accountId || !resourceGroup || !vmName) return fail('参数不完整');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
-		clientIp: getRequestClientIp(event)
-	});
 	try {
+		const { account, proxy } = await getUserAccountWithSelectedProxy(user.id, accountId, {
+			clientIp: getRequestClientIp(event),
+			proxyMode: String(body.proxy_mode ?? 'account'),
+			proxyProfileId: Number(body.proxy_profile_id ?? 0) || null
+		});
 		await deallocateVm(createAzureClients(account, proxy), resourceGroup, vmName);
 		return ok({ message: `已触发关机(释放): ${vmName}` });
 	} catch (err) {
-		return fail(String(err), 500);
+		return fail(err instanceof Error ? err.message : String(err), 500);
 	}
 };

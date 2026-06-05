@@ -1,4 +1,4 @@
-﻿import { getUserAccountWithProxy } from '$lib/server/accounts';
+import { getUserAccountWithSelectedProxy } from '$lib/server/accounts';
 import { brushVmPublicIPv4Prefix, createAzureClients } from '$lib/server/azure';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
@@ -12,10 +12,12 @@ export const POST: RequestHandler = async (event) => {
 	const ipPrefix = String(body.ip_prefix ?? '').trim();
 	if (!accountId || !resourceGroup || !vmName || !ipPrefix) return fail('参数不完整');
 
-	const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
-		clientIp: getRequestClientIp(event)
-	});
 	try {
+		const { account, proxy } = await getUserAccountWithSelectedProxy(user.id, accountId, {
+			clientIp: getRequestClientIp(event),
+			proxyMode: String(body.proxy_mode ?? 'account'),
+			proxyProfileId: Number(body.proxy_profile_id ?? 0) || null
+		});
 		const result = await brushVmPublicIPv4Prefix(createAzureClients(account, proxy), {
 			resourceGroup,
 			vmName,
@@ -33,6 +35,6 @@ export const POST: RequestHandler = async (event) => {
 			matched: result.matched
 		});
 	} catch (err) {
-		return fail(String(err), 500);
+		return fail(err instanceof Error ? err.message : String(err), 500);
 	}
 };
