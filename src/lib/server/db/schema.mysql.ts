@@ -59,6 +59,10 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	namePrefix: varchar('name_prefix', { length: 32 }).notNull().default('auto-vm'),
 	adminUsername: varchar('admin_username', { length: 32 }).notNull().default('azureuser'),
 	adminPasswordEncrypted: text('admin_password_encrypted').notNull(),
+	userdataEncrypted: text('userdata_encrypted').notNull().default(''),
+	enableIpv6: boolean('enable_ipv6').notNull().default(false),
+	ipPrefix: varchar('ip_prefix', { length: 32 }).notNull().default(''),
+	ipBrushMaxAttempts: int('ip_brush_max_attempts').notNull().default(30),
 	checkIntervalSeconds: int('check_interval_seconds').notNull().default(120),
 	lastRunAt: timestamp('last_run_at'),
 	createdAt: timestamp('created_at').notNull().defaultNow()

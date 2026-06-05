@@ -21,7 +21,9 @@ export const GET: RequestHandler = async (event) => {
 				location: vm.location,
 				vm_size: vm.vmSize,
 				power_state: vm.powerState,
-				provisioning_state: vm.provisioningState
+				provisioning_state: vm.provisioningState,
+				public_ipv4: vm.publicIPv4,
+				public_ipv6: vm.publicIPv6
 			}))
 		);
 	} catch (err) {

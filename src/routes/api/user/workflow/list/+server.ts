@@ -21,6 +21,10 @@ export const GET: RequestHandler = async (event) => {
 			image_reference: p.imageReference,
 			name_prefix: p.namePrefix,
 			admin_username: p.adminUsername,
+			userdata_configured: Boolean(p.userdataEncrypted),
+			enable_ipv6: p.enableIpv6,
+			ip_prefix: p.ipPrefix,
+			ip_brush_max_attempts: p.ipBrushMaxAttempts,
 			check_interval_seconds: p.checkIntervalSeconds,
 			last_run_at: p.lastRunAt,
 			created_at: p.createdAt

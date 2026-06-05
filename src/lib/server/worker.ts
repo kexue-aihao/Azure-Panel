@@ -86,6 +86,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 			const deficit = Math.max(policy.minRunningCount - running, 0);
 			if (deficit > 0 && policy.autoCreate) {
 				const password = decryptSecret(policy.adminPasswordEncrypted);
+				const userdata = decryptSecret(policy.userdataEncrypted ?? '');
 				if (!password) {
 					await insertWorkflowLog(
 						policy.id,
@@ -97,16 +98,25 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 					for (let i = 0; i < deficit; i++) {
 						const vmName = `${policy.namePrefix}-${Date.now()}-${i}`;
 						try {
-							await createVmSimple(clients, {
+							const result = await createVmSimple(clients, {
 								resourceGroup: policy.resourceGroup,
 								location: policy.location,
 								vmName,
 								vmSize: policy.vmSize,
 								imageReference: policy.imageReference,
 								adminUsername: policy.adminUsername,
-								adminPassword: password
+								adminPassword: password,
+								enableIpv6: policy.enableIpv6,
+								customData: userdata,
+								ipPrefix: policy.ipPrefix,
+								ipBrushMaxAttempts: policy.ipBrushMaxAttempts
 							});
-							await insertWorkflowLog(policy.id, 'auto_create', 'success', `已创建 VM: ${vmName}`);
+							await insertWorkflowLog(
+								policy.id,
+								'auto_create',
+								'success',
+								`已创建 VM: ${vmName} IPv4=${result.publicIPv4 || '-'} IPv6=${result.publicIPv6 || '-'} 刷IP次数=${result.ipBrushAttempts}`
+							);
 						} catch (err) {
 							await insertWorkflowLog(
 								policy.id,

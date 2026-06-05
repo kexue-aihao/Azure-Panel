@@ -68,6 +68,10 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	namePrefix: text('name_prefix').notNull().default('auto-vm'),
 	adminUsername: text('admin_username').notNull().default('azureuser'),
 	adminPasswordEncrypted: text('admin_password_encrypted').notNull().default(''),
+	userdataEncrypted: text('userdata_encrypted').notNull().default(''),
+	enableIpv6: integer('enable_ipv6', { mode: 'boolean' }).notNull().default(false),
+	ipPrefix: text('ip_prefix').notNull().default(''),
+	ipBrushMaxAttempts: integer('ip_brush_max_attempts').notNull().default(30),
 	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(120),
 	lastRunAt: integer('last_run_at', { mode: 'timestamp' }),
 	createdAt: integer('created_at', { mode: 'timestamp' })

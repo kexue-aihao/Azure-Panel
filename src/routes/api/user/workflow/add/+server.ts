@@ -27,6 +27,10 @@ export const POST: RequestHandler = async (event) => {
 		namePrefix: String(body.name_prefix ?? 'auto-vm'),
 		adminUsername: String(body.admin_username ?? 'azureuser'),
 		adminPasswordEncrypted: encryptSecret(String(body.admin_password ?? '')),
+		userdataEncrypted: encryptSecret(String(body.userdata ?? '')),
+		enableIpv6: Boolean(body.enable_ipv6),
+		ipPrefix: String(body.ip_prefix ?? ''),
+		ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 30),
 		checkIntervalSeconds: Number(body.check_interval_seconds ?? 120)
 	});
 
@@ -45,6 +49,10 @@ export const POST: RequestHandler = async (event) => {
 		image_reference: policy.imageReference,
 		name_prefix: policy.namePrefix,
 		admin_username: policy.adminUsername,
+		userdata_configured: Boolean(policy.userdataEncrypted),
+		enable_ipv6: policy.enableIpv6,
+		ip_prefix: policy.ipPrefix,
+		ip_brush_max_attempts: policy.ipBrushMaxAttempts,
 		check_interval_seconds: policy.checkIntervalSeconds,
 		last_run_at: policy.lastRunAt,
 		created_at: policy.createdAt

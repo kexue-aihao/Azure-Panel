@@ -23,6 +23,11 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.image_reference !== undefined) updates.imageReference = String(body.image_reference);
 	if (body.name_prefix !== undefined) updates.namePrefix = String(body.name_prefix);
 	if (body.admin_username !== undefined) updates.adminUsername = String(body.admin_username);
+	if (body.userdata !== undefined) updates.userdataEncrypted = encryptSecret(String(body.userdata));
+	if (body.enable_ipv6 !== undefined) updates.enableIpv6 = Boolean(body.enable_ipv6);
+	if (body.ip_prefix !== undefined) updates.ipPrefix = String(body.ip_prefix);
+	if (body.ip_brush_max_attempts !== undefined)
+		updates.ipBrushMaxAttempts = Number(body.ip_brush_max_attempts);
 	if (body.check_interval_seconds !== undefined)
 		updates.checkIntervalSeconds = Number(body.check_interval_seconds);
 	if (body.enabled !== undefined) updates.enabled = Boolean(body.enabled);

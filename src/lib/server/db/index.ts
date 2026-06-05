@@ -72,6 +72,10 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		name_prefix varchar(32) NOT NULL DEFAULT 'auto-vm',
 		admin_username varchar(32) NOT NULL DEFAULT 'azureuser',
 		admin_password_encrypted text NOT NULL,
+		userdata_encrypted text NOT NULL,
+		enable_ipv6 tinyint(1) NOT NULL DEFAULT 0,
+		ip_prefix varchar(32) NOT NULL DEFAULT '',
+		ip_brush_max_attempts int NOT NULL DEFAULT 30,
 		check_interval_seconds int NOT NULL DEFAULT 120,
 		last_run_at timestamp NULL DEFAULT NULL,
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -135,6 +139,29 @@ async function ensureMysqlSchema(pool: Pool) {
 		.query('CREATE INDEX azure_accounts_proxy_profile_id_idx ON azure_accounts (proxy_profile_id)')
 		.catch((err) => {
 			if ((err as { code?: string }).code !== 'ER_DUP_KEYNAME') throw err;
+		});
+	await pool
+		.query('ALTER TABLE workflow_policies ADD COLUMN userdata_encrypted text NULL')
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool.query("UPDATE workflow_policies SET userdata_encrypted = '' WHERE userdata_encrypted IS NULL");
+	await pool
+		.query('ALTER TABLE workflow_policies ADD COLUMN enable_ipv6 tinyint(1) NOT NULL DEFAULT 0')
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
+		.query("ALTER TABLE workflow_policies ADD COLUMN ip_prefix varchar(32) NOT NULL DEFAULT ''")
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
+		.query(
+			'ALTER TABLE workflow_policies ADD COLUMN ip_brush_max_attempts int NOT NULL DEFAULT 30'
+		)
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
 		});
 }
 
@@ -219,6 +246,10 @@ export async function initDatabase() {
 			name_prefix TEXT NOT NULL DEFAULT 'auto-vm',
 			admin_username TEXT NOT NULL DEFAULT 'azureuser',
 			admin_password_encrypted TEXT NOT NULL DEFAULT '',
+			userdata_encrypted TEXT NOT NULL DEFAULT '',
+			enable_ipv6 INTEGER NOT NULL DEFAULT 0,
+			ip_prefix TEXT NOT NULL DEFAULT '',
+			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30,
 			check_interval_seconds INTEGER NOT NULL DEFAULT 120,
 			last_run_at INTEGER,
 			created_at INTEGER NOT NULL
@@ -238,6 +269,23 @@ export async function initDatabase() {
 	}
 	if (!columns.some((column) => column.name === 'proxy_profile_id')) {
 		sqlite.exec('ALTER TABLE azure_accounts ADD COLUMN proxy_profile_id INTEGER');
+	}
+	const workflowColumns = sqlite.prepare('PRAGMA table_info(workflow_policies)').all() as Array<{
+		name: string;
+	}>;
+	if (!workflowColumns.some((column) => column.name === 'userdata_encrypted')) {
+		sqlite.exec("ALTER TABLE workflow_policies ADD COLUMN userdata_encrypted TEXT NOT NULL DEFAULT ''");
+	}
+	if (!workflowColumns.some((column) => column.name === 'enable_ipv6')) {
+		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN enable_ipv6 INTEGER NOT NULL DEFAULT 0');
+	}
+	if (!workflowColumns.some((column) => column.name === 'ip_prefix')) {
+		sqlite.exec("ALTER TABLE workflow_policies ADD COLUMN ip_prefix TEXT NOT NULL DEFAULT ''");
+	}
+	if (!workflowColumns.some((column) => column.name === 'ip_brush_max_attempts')) {
+		sqlite.exec(
+			'ALTER TABLE workflow_policies ADD COLUMN ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30'
+		);
 	}
 	sqlite.exec(`
 		CREATE INDEX IF NOT EXISTS proxy_profiles_user_id_idx ON proxy_profiles(user_id);

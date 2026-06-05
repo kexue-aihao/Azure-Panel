@@ -11,6 +11,10 @@
 		min_running_count: number;
 		auto_start: boolean;
 		auto_create: boolean;
+		enable_ipv6: boolean;
+		ip_prefix: string;
+		ip_brush_max_attempts: number;
+		userdata_configured: boolean;
 		check_interval_seconds: number;
 	};
 
@@ -30,6 +34,10 @@
 		name_prefix: 'auto-vm',
 		admin_username: 'azureuser',
 		admin_password: '',
+		userdata: '',
+		enable_ipv6: true,
+		ip_prefix: '',
+		ip_brush_max_attempts: 30,
 		check_interval_seconds: 120
 	});
 	let toast = $state('');
@@ -54,6 +62,7 @@
 					account_id: Number(form.account_id),
 					vm_names,
 					min_running_count: Number(form.min_running_count),
+					ip_brush_max_attempts: Number(form.ip_brush_max_attempts),
 					check_interval_seconds: Number(form.check_interval_seconds)
 				})
 			});
@@ -138,6 +147,29 @@
 			bind:value={form.admin_password}
 			placeholder="自动创建 VM 密码"
 		/>
+		<label class="flex items-center gap-2 text-sm">
+			<input type="checkbox" bind:checked={form.enable_ipv6} /> 自动补机时同时创建 IPv6 公网地址
+		</label>
+		<div class="grid gap-3 sm:grid-cols-2">
+			<input
+				class="input"
+				bind:value={form.ip_prefix}
+				placeholder="补机目标 IPv4 前缀，可选，例如 85.211"
+			/>
+			<input
+				class="input"
+				type="number"
+				bind:value={form.ip_brush_max_attempts}
+				min="1"
+				max="500"
+				placeholder="最大刷 IP 次数"
+			/>
+		</div>
+		<textarea
+			class="input min-h-36 font-mono text-xs"
+			bind:value={form.userdata}
+			placeholder={`#cloud-config\nruncmd:\n  - curl -fsSL https://example.com/install.sh | bash`}
+		></textarea>
 		<input
 			class="input"
 			type="number"
@@ -176,6 +208,11 @@
 							自动开机: {workflow.auto_start ? '是' : '否'} · 自动补机: {workflow.auto_create
 								? '是'
 								: '否'} · 间隔 {workflow.check_interval_seconds}s
+						</p>
+						<p class="text-xs text-muted">
+							IPv6: {workflow.enable_ipv6 ? '是' : '否'} · IPv4 前缀: {workflow.ip_prefix || '-'} · UserData: {workflow.userdata_configured
+								? '已配置'
+								: '未配置'}
 						</p>
 					</div>
 					<div class="space-y-2">
