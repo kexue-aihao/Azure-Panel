@@ -68,9 +68,37 @@ npm run start          # 启动 Web，默认 127.0.0.1:3000
 npm run start:worker   # 独立启动补机 Worker
 ```
 
-### aaPanel 部署流程
+### aaPanel 一键部署
 
-适用于已安装 **Nginx + MySQL 8.0 + Supervisor** 的 aaPanel（宝塔）服务器。
+适用于已安装 **Nginx + MySQL 8.0 + Supervisor + Node.js 20** 的 aaPanel（宝塔）服务器。
+
+**首次安装（一条龙）：**
+
+```bash
+# 1. 先在 aaPanel 创建数据库：库名/用户 azure_panel，记下密码
+# 2. SSH 执行一键安装
+cd /www/wwwroot
+curl -fsSL https://raw.githubusercontent.com/kexue-aihao/Azure-Panel/master/install.sh -o install.sh
+chmod +x install.sh
+sudo ./install.sh
+```
+
+若已通过 Git 拉取代码，在项目目录内执行：
+
+```bash
+cd /www/wwwroot/Azure-Panel/Azure-Panel   # 你的实际路径
+chmod +x install.sh update.sh
+sudo ./install.sh
+```
+
+`install.sh` 自动完成：代码拉取 → `.env` 生成 → 数据库导入 → 构建 → Supervisor 配置 → 健康检查。
+
+**后续升级：**
+
+```bash
+cd /www/wwwroot/azure-panel   # 或你的项目路径
+./update.sh
+```
 
 #### 架构
 
@@ -80,13 +108,11 @@ npm run start:worker   # 独立启动补机 Worker
                     Supervisor Worker → Azure API
 ```
 
+#### 手动部署（可选）
+
 #### 步骤 1：安装 Node.js
 
 aaPanel → 软件商店 → 安装 **Node.js 版本管理器** → 选择 **Node 20 LTS**
-
-```bash
-node -v && npm -v && which node
-```
 
 #### 步骤 2：克隆项目
 
@@ -168,19 +194,14 @@ curl http://127.0.0.1:3000/api/health
 
 浏览器访问域名，注册账号后即可使用。
 
-### 源站一键升级
+### 部署脚本说明
 
-服务器已部署后，后续更新执行：
+| 脚本 | 用途 |
+|------|------|
+| `install.sh` | **首次安装**：配置环境、数据库、构建、Supervisor |
+| `update.sh` | **后续升级**：`git pull` → 构建 → 重启进程 |
 
-```bash
-cd /www/wwwroot/azure-panel
-chmod +x update.sh
-./update.sh
-```
-
-脚本自动完成：`git pull` → `npm install` → `npm run build:all` → 重启 Supervisor → 健康检查。
-
-可选环境变量：`APP_DIR`、`GIT_BRANCH`、`SKIP_SUPERVISOR=1`
+非交互安装：`NON_INTERACTIVE=1 MYSQL_PASSWORD=xxx sudo ./install.sh`
 
 ### Azure 权限要求
 
@@ -201,6 +222,7 @@ src/
   routes/(app)/     # 面板页面
   worker-entry.ts   # 独立 Worker 入口
 deploy/aapanel/     # aaPanel 部署配置与 SQL
+install.sh          # 首次一键安装脚本
 update.sh           # 源站一键升级脚本
 ```
 
@@ -261,9 +283,35 @@ npm run start          # Start web server, default 127.0.0.1:3000
 npm run start:worker   # Start standalone replenishment worker
 ```
 
-### aaPanel Deployment
+### aaPanel One-Click Deployment
 
-For servers with **Nginx + MySQL 8.0 + Supervisor** (aaPanel / BT Panel).
+For servers with **Nginx + MySQL 8.0 + Supervisor + Node.js 20** (aaPanel / BT Panel).
+
+**First-time install:**
+
+```bash
+# 1. Create database in aaPanel: name/user azure_panel, note the password
+# 2. Run one-click installer
+cd /www/wwwroot
+curl -fsSL https://raw.githubusercontent.com/kexue-aihao/Azure-Panel/master/install.sh -o install.sh
+chmod +x install.sh
+sudo ./install.sh
+```
+
+If code is already cloned:
+
+```bash
+cd /path/to/Azure-Panel
+chmod +x install.sh update.sh
+sudo ./install.sh
+```
+
+**Subsequent updates:**
+
+```bash
+cd /path/to/Azure-Panel
+./update.sh
+```
 
 #### Architecture
 
@@ -273,20 +321,16 @@ Browser → Nginx(:80/443) → Node Web(:3000) → MySQL 8.0
                      Supervisor Worker → Azure API
 ```
 
+#### Manual Deployment (optional)
+
 #### Step 1: Install Node.js
 
 aaPanel → App Store → **Node.js Version Manager** → select **Node 20 LTS**
 
-```bash
-node -v && npm -v && which node
-```
-
 #### Step 2: Clone Repository
 
 ```bash
-cd /www/wwwroot
 git clone -b master https://github.com/kexue-aihao/Azure-Panel.git azure-panel
-cd azure-panel
 ```
 
 #### Step 3: Create Database
@@ -361,19 +405,14 @@ curl http://127.0.0.1:3000/api/health
 
 Visit your domain in a browser and register an account.
 
-### One-Click Update (Production)
+### Deployment Scripts
 
-After initial deployment:
+| Script | Purpose |
+|--------|---------|
+| `install.sh` | **First install**: env, database, build, Supervisor |
+| `update.sh` | **Updates**: `git pull` → build → restart |
 
-```bash
-cd /www/wwwroot/azure-panel
-chmod +x update.sh
-./update.sh
-```
-
-The script runs: `git pull` → `npm install` → `npm run build:all` → restart Supervisor → health check.
-
-Optional env vars: `APP_DIR`, `GIT_BRANCH`, `SKIP_SUPERVISOR=1`
+Non-interactive: `NON_INTERACTIVE=1 MYSQL_PASSWORD=xxx sudo ./install.sh`
 
 ### Azure Permissions
 
@@ -394,6 +433,7 @@ src/
   routes/(app)/     # Dashboard pages
   worker-entry.ts   # Standalone worker entry
 deploy/aapanel/     # aaPanel configs and SQL schema
+install.sh          # First-time install script
 update.sh           # Production update script
 ```
 

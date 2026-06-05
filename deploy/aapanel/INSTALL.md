@@ -26,7 +26,45 @@ which node
 
 记下 `node` 绝对路径（如 `/usr/bin/node`），后续 Supervisor 配置需使用相同路径。
 
-## 二、上传项目
+## 二、一键安装（推荐）
+
+在 aaPanel **终端** 中执行：
+
+```bash
+cd /www/wwwroot
+curl -fsSL https://raw.githubusercontent.com/kexue-aihao/Azure-Panel/master/install.sh -o install.sh
+chmod +x install.sh
+sudo ./install.sh
+```
+
+或已在项目目录内（通过 Git 拉取后）：
+
+```bash
+cd /www/wwwroot/Azure-Panel/Azure-Panel
+chmod +x install.sh update.sh
+sudo ./install.sh
+```
+
+脚本自动完成：拉取/更新代码 → 生成 `.env` → 导入数据库 → `npm install` → `npm run build:all` → 配置 Supervisor → 健康检查。
+
+**安装前请先在 aaPanel 创建数据库：**
+
+- 库名 / 用户名：`azure_panel`
+- 密码：自行设置（安装时输入）
+
+非交互安装：
+
+```bash
+NON_INTERACTIVE=1 MYSQL_PASSWORD=你的密码 sudo ./install.sh
+```
+
+自定义目录：
+
+```bash
+APP_DIR=/www/wwwroot/Azure-Panel/Azure-Panel MYSQL_PASSWORD=xxx sudo ./install.sh
+```
+
+## 三、手动上传项目（可选）
 
 将项目上传到例如：
 
@@ -34,7 +72,7 @@ which node
 /www/wwwroot/azure-panel
 ```
 
-## 三、创建 MySQL 数据库
+## 四、创建 MySQL 数据库
 
 1. aaPanel → **数据库** → 添加数据库
    - 库名：`azure_panel`
@@ -43,7 +81,7 @@ which node
 2. 打开 **phpMyAdmin**，选择 `azure_panel` 库
 3. 导入本目录下的 `schema.mysql.sql`
 
-## 四、配置环境变量
+## 五、配置环境变量（手动安装时）
 
 ```bash
 cd /www/wwwroot/azure-panel
@@ -72,7 +110,7 @@ ENABLE_EMBEDDED_WORKER=false
 
 > `ENABLE_EMBEDDED_WORKER=false` 表示 Web 进程不内嵌补机引擎，由 Supervisor 独立 Worker 负责。
 
-## 五、安装依赖并构建
+## 六、安装依赖并构建（手动安装时）
 
 ```bash
 cd /www/wwwroot/azure-panel
@@ -84,7 +122,7 @@ npm run build:all
 - `build/index.js` — Web 服务
 - `build/worker.js` — 补机 Worker
 
-## 六、配置 Supervisor
+## 七、配置 Supervisor（手动安装时）
 
 aaPanel → **软件商店** → **Supervisor** → **设置** → 添加守护进程。
 
@@ -112,7 +150,7 @@ Worker 会读取同目录下的 `.env` 文件。
 
 添加后执行 **重载配置** 并 **启动** 两个进程。
 
-## 七、配置 Nginx 网站
+## 八、配置 Nginx 网站
 
 1. aaPanel → **网站** → **添加站点**（填写域名）
 2. 站点设置 → **配置文件**，在 `server { }` 块内加入反代（参考 `nginx.conf`）：
@@ -130,7 +168,7 @@ location / {
 
 3. 如需 HTTPS，在 aaPanel 站点中申请 SSL 证书即可。
 
-## 八、验证
+## 九、验证
 
 ```bash
 # 本地健康检查
@@ -143,7 +181,7 @@ tail -f /www/wwwlogs/azure-panel-worker.log
 
 浏览器访问你的域名，注册账号后即可使用。
 
-## 九、更新部署
+## 十、更新部署
 
 推荐使用项目根目录的一键升级脚本：
 
