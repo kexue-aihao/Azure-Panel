@@ -309,12 +309,50 @@ import_mysql_schema() {
 	)
 }
 
+npm_install_with_registry() {
+	local npm_bin="$1"
+	local registry="$2"
+	"$npm_bin" install --include=dev --registry="$registry"
+}
+
 npm_build_all() {
 	require_node_tools
+	local npm_bin
+	local registry
+	local -a registries=()
+
+	npm_bin="$(find_npm_bin)"
+
+	# 优先项目 .npmrc，其次环境变量，最后官方源（避免 aaPanel 全局 npmmirror 缺包）
+	if [[ -f .npmrc ]] && grep -q '^registry=' .npmrc 2>/dev/null; then
+		registry="$(grep '^registry=' .npmrc | tail -1 | cut -d= -f2- | tr -d ' ')"
+		registries+=("$registry")
+	fi
+	[[ -n "${NPM_REGISTRY:-}" ]] && registries+=("$NPM_REGISTRY")
+	registries+=("https://registry.npmjs.org" "https://registry.npmmirror.com")
+
 	log "安装 npm 依赖..."
-	"$(find_npm_bin)" install --production=false
+	local tried=()
+	for registry in "${registries[@]}"; do
+		[[ -z "$registry" ]] && continue
+		# 去重
+		local skip=0 r
+		for r in "${tried[@]}"; do [[ "$r" == "$registry" ]] && skip=1 && break; done
+		[[ "$skip" == "1" ]] && continue
+		tried+=("$registry")
+
+		log "尝试 npm 源: $registry"
+		if npm_install_with_registry "$npm_bin" "$registry"; then
+			log "npm 依赖安装成功"
+			break
+		fi
+		warn "源 $registry 安装失败，尝试下一个..."
+	done
+
+	[[ -d node_modules ]] || die "npm install 失败。请手动执行: NPM_REGISTRY=https://registry.npmjs.org npm install"
+
 	log "构建 Web + Worker..."
-	"$(find_npm_bin)" run build:all
+	"$npm_bin" run build:all
 	[[ -f build/index.js ]] || die "构建失败: 未找到 build/index.js"
 	[[ -f build/worker.js ]]  || die "构建失败: 未找到 build/worker.js"
 	log "构建完成"
