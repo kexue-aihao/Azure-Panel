@@ -3,6 +3,7 @@ import { ComputeManagementClient } from '@azure/arm-compute';
 import { NetworkManagementClient } from '@azure/arm-network';
 import { ResourceManagementClient } from '@azure/arm-resources';
 import type { ResourceSku, Usage, VirtualMachineSize } from '@azure/arm-compute';
+import type { GenericResourceExpanded, Provider, ResourceGroup } from '@azure/arm-resources';
 import type {
 	NetworkInterface,
 	NetworkInterfaceIPConfiguration,
@@ -140,16 +141,101 @@ export type AzureCredentialValidationResult = {
 
 type AzureClientOptions = TokenCredentialOptions & PipelineOptions;
 
-type AzureSubscription = {
+export type AzureSubscription = {
 	subscriptionId?: string;
 	displayName?: string;
 	state?: string;
+};
+
+export type AzureResourceGroupInfo = {
+	id: string;
+	name: string;
+	location: string;
+	provisioningState: string;
+};
+
+export type AzureResourceInfo = {
+	id: string;
+	name: string;
+	type: string;
+	location: string;
+	resourceGroup: string;
+	kind: string;
+	skuName: string;
+	provisioningState: string;
+};
+
+export type AzureProviderStatus = {
+	namespace: string;
+	registrationState: string;
+	registrationPolicy: string;
+	resourceTypeCount: number;
+	locations: string[];
+};
+
+export type AiAccountInfo = {
+	id: string;
+	name: string;
+	resourceGroup: string;
+	location: string;
+	kind: string;
+	skuName: string;
+	endpoint: string;
+	provisioningState: string;
+	publicNetworkAccess: string;
+};
+
+export type AiAccountKeys = {
+	endpoint: string;
+	key1: string;
+	key2: string;
+};
+
+export type AiDeploymentInfo = {
+	id: string;
+	name: string;
+	resourceGroup: string;
+	accountName: string;
+	modelFormat: string;
+	modelName: string;
+	modelVersion: string;
+	scaleType: string;
+	capacity: number;
+	provisioningState: string;
+};
+
+export type CreateAiAccountOptions = {
+	resourceGroup: string;
+	location: string;
+	accountName: string;
+	kind?: string;
+	skuName?: string;
+};
+
+export type CreateAiDeploymentOptions = {
+	resourceGroup: string;
+	accountName: string;
+	deploymentName: string;
+	modelFormat?: string;
+	modelName: string;
+	modelVersion?: string;
+	scaleType?: string;
+	capacity?: number;
 };
 
 const RUNNING = new Set(['PowerState/running', 'PowerState/starting']);
 const ARM_ENDPOINT = 'https://management.azure.com';
 const ARM_SCOPE = `${ARM_ENDPOINT}/.default`;
 const SUBSCRIPTIONS_API_VERSION = '2020-01-01';
+const COGNITIVE_SERVICES_API_VERSION = '2024-10-01';
+export const DEFAULT_PROVIDER_NAMESPACES = [
+	'Microsoft.Compute',
+	'Microsoft.Network',
+	'Microsoft.Storage',
+	'Microsoft.KeyVault',
+	'Microsoft.CognitiveServices',
+	'Microsoft.MachineLearningServices'
+];
 
 const LOCATION_DISPLAY_NAMES: Record<string, string> = {
 	australiacentral: 'Australia Central',
@@ -309,6 +395,35 @@ export function createAzureClients(account: AzureAccount, proxy?: ProxyRuntimeCo
 	};
 }
 
+function createCredentialAndOptions(
+	account: AzureAccount,
+	proxy?: ProxyRuntimeConfig | null
+): { credential: ClientSecretCredential; clientOptions: AzureClientOptions } {
+	const runtimeProxy = proxy ?? decryptLegacyProxy(account);
+	const clientOptions = azureClientOptions(runtimeProxy);
+	const credential = new ClientSecretCredential(
+		account.tenantId,
+		account.clientId,
+		decryptSecret(account.clientSecretEncrypted),
+		clientOptions
+	);
+	return { credential, clientOptions };
+}
+
+export function createAzureClientsForSubscription(
+	account: AzureAccount,
+	subscriptionId: string,
+	proxy?: ProxyRuntimeConfig | null
+): AzureClients {
+	const { credential, clientOptions } = createCredentialAndOptions(account, proxy);
+	return {
+		compute: new ComputeManagementClient(credential, subscriptionId, clientOptions),
+		network: new NetworkManagementClient(credential, subscriptionId, clientOptions),
+		resources: new ResourceManagementClient(credential, subscriptionId, clientOptions),
+		subscriptionId
+	};
+}
+
 function armResponseError(status: number, bodyAsText?: string | null) {
 	let detail = '';
 	try {
@@ -318,6 +433,69 @@ function armResponseError(status: number, bodyAsText?: string | null) {
 		detail = bodyAsText ?? '';
 	}
 	return `Azure ARM 请求失败 (${status})${detail ? `: ${detail}` : ''}`;
+}
+
+function parseArmJson(bodyAsText?: string | null): unknown {
+	if (!bodyAsText) return {};
+	try {
+		return JSON.parse(bodyAsText);
+	} catch {
+		return {};
+	}
+}
+
+async function sendArmRequest(
+	credential: ClientSecretCredential,
+	clientOptions: AzureClientOptions,
+	options: {
+		method: 'GET' | 'POST' | 'PUT';
+		pathOrUrl: string;
+		body?: unknown;
+	}
+) {
+	const token = await credential.getToken(ARM_SCOPE);
+	if (!token?.token) throw new Error('无法获取 Azure 访问令牌，请检查 Tenant ID、Client ID 和 Client Secret');
+
+	const pipeline = createPipelineFromOptions(clientOptions);
+	const httpClient = createDefaultHttpClient();
+	const response = await pipeline.sendRequest(
+		httpClient,
+		createPipelineRequest({
+			url: options.pathOrUrl.startsWith('http')
+				? options.pathOrUrl
+				: `${ARM_ENDPOINT}${options.pathOrUrl}`,
+			method: options.method,
+			body: options.body === undefined ? undefined : JSON.stringify(options.body),
+			headers: createHttpHeaders({
+				accept: 'application/json',
+				authorization: `Bearer ${token.token}`,
+				...(options.body === undefined ? {} : { 'content-type': 'application/json' })
+			})
+		})
+	);
+
+	if (response.status < 200 || response.status >= 300) {
+		throw new Error(armResponseError(response.status, response.bodyAsText));
+	}
+	return parseArmJson(response.bodyAsText);
+}
+
+async function collectArmPages<T>(
+	credential: ClientSecretCredential,
+	clientOptions: AzureClientOptions,
+	firstUrl: string
+): Promise<T[]> {
+	const items: T[] = [];
+	let nextLink = firstUrl;
+	while (nextLink) {
+		const payload = (await sendArmRequest(credential, clientOptions, {
+			method: 'GET',
+			pathOrUrl: nextLink
+		})) as { value?: T[]; nextLink?: string };
+		items.push(...(payload.value ?? []));
+		nextLink = String(payload.nextLink ?? '');
+	}
+	return items;
 }
 
 async function discoverSubscriptionId(
@@ -376,6 +554,26 @@ export async function validateAzureCredentials(
 	const client = new ComputeManagementClient(credential, subscriptionId, clientOptions);
 	await client.virtualMachines.listAll().next();
 	return { subscriptionId };
+}
+
+export async function listAccountSubscriptions(
+	account: AzureAccount,
+	proxy?: ProxyRuntimeConfig | null
+): Promise<AzureSubscription[]> {
+	const { credential, clientOptions } = createCredentialAndOptions(account, proxy);
+	const subscriptions = await collectArmPages<AzureSubscription>(
+		credential,
+		clientOptions,
+		`${ARM_ENDPOINT}/subscriptions?api-version=${SUBSCRIPTIONS_API_VERSION}`
+	);
+	return subscriptions.sort((a, b) => {
+		const enabledA = a.state?.toLowerCase() === 'enabled' ? 0 : 1;
+		const enabledB = b.state?.toLowerCase() === 'enabled' ? 0 : 1;
+		if (enabledA !== enabledB) return enabledA - enabledB;
+		return (a.displayName ?? a.subscriptionId ?? '').localeCompare(
+			b.displayName ?? b.subscriptionId ?? ''
+		);
+	});
 }
 
 function parseResourceGroup(resourceId: string): string {
@@ -471,6 +669,46 @@ function selectLargest(list: VmCapability[], key: 'cores' | 'memoryGB') {
 
 function displayLocationName(location: string) {
 	return LOCATION_DISPLAY_NAMES[location.toLowerCase()] ?? location;
+}
+
+function resourceGroupToInfo(group: ResourceGroup): AzureResourceGroupInfo {
+	return {
+		id: group.id ?? '',
+		name: group.name ?? '',
+		location: group.location ?? '',
+		provisioningState: group.properties?.provisioningState ?? ''
+	};
+}
+
+function resourceToInfo(resource: GenericResourceExpanded): AzureResourceInfo {
+	return {
+		id: resource.id ?? '',
+		name: resource.name ?? parseResourceName(resource.id ?? ''),
+		type: resource.type ?? '',
+		location: resource.location ?? '',
+		resourceGroup: parseResourceGroup(resource.id ?? ''),
+		kind: resource.kind ?? '',
+		skuName: resource.sku?.name ?? '',
+		provisioningState:
+			resource.provisioningState ??
+			((resource.properties as { provisioningState?: string } | undefined)?.provisioningState ?? '')
+	};
+}
+
+function providerToStatus(provider: Provider, fallbackNamespace = ''): AzureProviderStatus {
+	const locations = new Set<string>();
+	for (const resourceType of provider.resourceTypes ?? []) {
+		for (const location of resourceType.locations ?? []) {
+			if (location) locations.add(location);
+		}
+	}
+	return {
+		namespace: provider.namespace ?? fallbackNamespace,
+		registrationState: provider.registrationState ?? '',
+		registrationPolicy: provider.registrationPolicy ?? '',
+		resourceTypeCount: provider.resourceTypes?.length ?? 0,
+		locations: [...locations].sort((a, b) => a.localeCompare(b))
+	};
 }
 
 function latestImageVersion(versions: { name?: string }[]) {
@@ -598,6 +836,87 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 		.sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
+export async function listResourceGroups(clients: AzureClients): Promise<AzureResourceGroupInfo[]> {
+	const groups: AzureResourceGroupInfo[] = [];
+	for await (const group of clients.resources.resourceGroups.list()) {
+		groups.push(resourceGroupToInfo(group));
+	}
+	return groups.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function listGenericResources(
+	clients: AzureClients,
+	resourceGroup?: string,
+	resourceType?: string
+): Promise<AzureResourceInfo[]> {
+	const filter = resourceType ? `resourceType eq '${resourceType.replace(/'/g, "''")}'` : undefined;
+	const iterator = resourceGroup
+		? clients.resources.resources.listByResourceGroup(resourceGroup, {
+				filter,
+				expand: 'createdTime,changedTime,provisioningState'
+			})
+		: clients.resources.resources.list({
+				filter,
+				expand: 'createdTime,changedTime,provisioningState'
+			});
+	const resources: AzureResourceInfo[] = [];
+	for await (const resource of iterator) {
+		resources.push(resourceToInfo(resource));
+	}
+	return resources.sort((a, b) => {
+		if (a.resourceGroup !== b.resourceGroup) return a.resourceGroup.localeCompare(b.resourceGroup);
+		if (a.type !== b.type) return a.type.localeCompare(b.type);
+		return a.name.localeCompare(b.name);
+	});
+}
+
+export async function listProviderStatuses(
+	clients: AzureClients,
+	namespaces = DEFAULT_PROVIDER_NAMESPACES
+): Promise<AzureProviderStatus[]> {
+	const statuses: AzureProviderStatus[] = [];
+	for (const namespace of namespaces) {
+		try {
+			statuses.push(providerToStatus(await clients.resources.providers.get(namespace), namespace));
+		} catch (err) {
+			statuses.push({
+				namespace,
+				registrationState: err instanceof Error ? err.message : 'Unknown',
+				registrationPolicy: '',
+				resourceTypeCount: 0,
+				locations: []
+			});
+		}
+	}
+	return statuses;
+}
+
+export async function registerResourceProviders(
+	clients: AzureClients,
+	namespaces = DEFAULT_PROVIDER_NAMESPACES
+): Promise<AzureProviderStatus[]> {
+	const statuses: AzureProviderStatus[] = [];
+	for (const namespace of namespaces) {
+		try {
+			const provider = await clients.resources.providers.get(namespace).catch(() => null);
+			if (provider?.registrationState?.toLowerCase() === 'registered') {
+				statuses.push(providerToStatus(provider, namespace));
+				continue;
+			}
+			statuses.push(providerToStatus(await clients.resources.providers.register(namespace), namespace));
+		} catch (err) {
+			statuses.push({
+				namespace,
+				registrationState: err instanceof Error ? err.message : 'Failed',
+				registrationPolicy: '',
+				resourceTypeCount: 0,
+				locations: []
+			});
+		}
+	}
+	return statuses;
+}
+
 export async function listFeaturedVmImages(
 	clients: AzureClients,
 	location: string
@@ -670,6 +989,178 @@ export async function listComputeQuotas(clients: AzureClients, location: string)
 		quotas.push(usageToQuota(usage));
 	}
 	return quotas.sort((a, b) => a.localizedName.localeCompare(b.localizedName));
+}
+
+function aiAccountToInfo(
+	resource: AzureResourceInfo | GenericResourceExpanded | Record<string, unknown>
+): AiAccountInfo {
+	const record = resource as Record<string, unknown>;
+	const properties = (record.properties ?? {}) as Record<string, unknown>;
+	const sku = (record.sku ?? {}) as Record<string, unknown>;
+	const id = String(record.id ?? '');
+	return {
+		id,
+		name: String(record.name ?? parseResourceName(id)),
+		resourceGroup: String(record.resourceGroup ?? parseResourceGroup(id)),
+		location: String(record.location ?? ''),
+		kind: String(record.kind ?? ''),
+		skuName: String((record as AzureResourceInfo).skuName ?? sku.name ?? ''),
+		endpoint: String(properties.endpoint ?? ''),
+		provisioningState: String(
+			(record as AzureResourceInfo).provisioningState ?? properties.provisioningState ?? ''
+		),
+		publicNetworkAccess: String(properties.publicNetworkAccess ?? '')
+	};
+}
+
+function aiDeploymentToInfo(
+	deployment: Record<string, unknown>,
+	resourceGroup: string,
+	accountName: string
+): AiDeploymentInfo {
+	const properties = (deployment.properties ?? {}) as Record<string, unknown>;
+	const model = (properties.model ?? {}) as Record<string, unknown>;
+	const scaleSettings = (properties.scaleSettings ?? {}) as Record<string, unknown>;
+	const sku = (deployment.sku ?? {}) as Record<string, unknown>;
+	return {
+		id: String(deployment.id ?? ''),
+		name: String(deployment.name ?? ''),
+		resourceGroup,
+		accountName,
+		modelFormat: String(model.format ?? ''),
+		modelName: String(model.name ?? ''),
+		modelVersion: String(model.version ?? ''),
+		scaleType: String(scaleSettings.scaleType ?? sku.name ?? ''),
+		capacity: Number(sku.capacity ?? scaleSettings.capacity ?? 0),
+		provisioningState: String(properties.provisioningState ?? '')
+	};
+}
+
+export async function listAiAccounts(clients: AzureClients): Promise<AiAccountInfo[]> {
+	const resources: GenericResourceExpanded[] = [];
+	for await (const resource of clients.resources.resources.list({
+		filter: "resourceType eq 'Microsoft.CognitiveServices/accounts'",
+		expand: 'createdTime,changedTime,provisioningState'
+	})) {
+		resources.push(resource);
+	}
+	return resources.map(aiAccountToInfo).sort((a, b) => {
+		if (a.resourceGroup !== b.resourceGroup) return a.resourceGroup.localeCompare(b.resourceGroup);
+		return a.name.localeCompare(b.name);
+	});
+}
+
+export async function createAiAccount(
+	account: AzureAccount,
+	proxy: ProxyRuntimeConfig | null,
+	options: CreateAiAccountOptions
+): Promise<AiAccountInfo> {
+	const { credential, clientOptions } = createCredentialAndOptions(account, proxy);
+	const clients = createAzureClients(account, proxy);
+	await registerResourceProviders(clients, ['Microsoft.CognitiveServices']);
+	await clients.resources.resourceGroups.createOrUpdate(options.resourceGroup, {
+		location: options.location
+	});
+	const payload = (await sendArmRequest(credential, clientOptions, {
+		method: 'PUT',
+		pathOrUrl: `/subscriptions/${account.subscriptionId}/resourceGroups/${encodeURIComponent(
+			options.resourceGroup
+		)}/providers/Microsoft.CognitiveServices/accounts/${encodeURIComponent(
+			options.accountName
+		)}?api-version=${COGNITIVE_SERVICES_API_VERSION}`,
+		body: {
+			location: options.location,
+			kind: options.kind ?? 'OpenAI',
+			sku: { name: options.skuName ?? 'S0' },
+			properties: {
+				customSubDomainName: sanitizeResourceName(options.accountName).toLowerCase(),
+				publicNetworkAccess: 'Enabled'
+			}
+		}
+	})) as Record<string, unknown>;
+	return aiAccountToInfo(payload);
+}
+
+export async function getAiAccountKeys(
+	account: AzureAccount,
+	proxy: ProxyRuntimeConfig | null,
+	resourceGroup: string,
+	accountName: string
+): Promise<AiAccountKeys> {
+	const { credential, clientOptions } = createCredentialAndOptions(account, proxy);
+	const accountResource = (await sendArmRequest(credential, clientOptions, {
+		method: 'GET',
+		pathOrUrl: `/subscriptions/${account.subscriptionId}/resourceGroups/${encodeURIComponent(
+			resourceGroup
+		)}/providers/Microsoft.CognitiveServices/accounts/${encodeURIComponent(
+			accountName
+		)}?api-version=${COGNITIVE_SERVICES_API_VERSION}`
+	})) as Record<string, unknown>;
+	const keys = (await sendArmRequest(credential, clientOptions, {
+		method: 'POST',
+		pathOrUrl: `/subscriptions/${account.subscriptionId}/resourceGroups/${encodeURIComponent(
+			resourceGroup
+		)}/providers/Microsoft.CognitiveServices/accounts/${encodeURIComponent(
+			accountName
+		)}/listKeys?api-version=${COGNITIVE_SERVICES_API_VERSION}`
+	})) as { key1?: string; key2?: string };
+	const properties = (accountResource.properties ?? {}) as Record<string, unknown>;
+	return {
+		endpoint: String(properties.endpoint ?? ''),
+		key1: keys.key1 ?? '',
+		key2: keys.key2 ?? ''
+	};
+}
+
+export async function listAiDeployments(
+	account: AzureAccount,
+	proxy: ProxyRuntimeConfig | null,
+	resourceGroup: string,
+	accountName: string
+): Promise<AiDeploymentInfo[]> {
+	const { credential, clientOptions } = createCredentialAndOptions(account, proxy);
+	const deployments = await collectArmPages<Record<string, unknown>>(
+		credential,
+		clientOptions,
+		`${ARM_ENDPOINT}/subscriptions/${account.subscriptionId}/resourceGroups/${encodeURIComponent(
+			resourceGroup
+		)}/providers/Microsoft.CognitiveServices/accounts/${encodeURIComponent(
+			accountName
+		)}/deployments?api-version=${COGNITIVE_SERVICES_API_VERSION}`
+	);
+	return deployments
+		.map((deployment) => aiDeploymentToInfo(deployment, resourceGroup, accountName))
+		.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function createAiDeployment(
+	account: AzureAccount,
+	proxy: ProxyRuntimeConfig | null,
+	options: CreateAiDeploymentOptions
+): Promise<AiDeploymentInfo> {
+	const { credential, clientOptions } = createCredentialAndOptions(account, proxy);
+	const deployment = (await sendArmRequest(credential, clientOptions, {
+		method: 'PUT',
+		pathOrUrl: `/subscriptions/${account.subscriptionId}/resourceGroups/${encodeURIComponent(
+			options.resourceGroup
+		)}/providers/Microsoft.CognitiveServices/accounts/${encodeURIComponent(
+			options.accountName
+		)}/deployments/${encodeURIComponent(options.deploymentName)}?api-version=${COGNITIVE_SERVICES_API_VERSION}`,
+		body: {
+			sku: {
+				name: options.scaleType ?? 'Standard',
+				capacity: Math.max(1, Number(options.capacity ?? 1))
+			},
+			properties: {
+				model: {
+					format: options.modelFormat ?? 'OpenAI',
+					name: options.modelName,
+					version: options.modelVersion || undefined
+				}
+			}
+		}
+	})) as Record<string, unknown>;
+	return aiDeploymentToInfo(deployment, options.resourceGroup, options.accountName);
 }
 
 export async function getPowerState(clients: AzureClients, resourceGroup: string, vmName: string) {
@@ -985,6 +1476,12 @@ export async function createVmAdvanced(
 		adminUsername,
 		adminPassword
 	} = options;
+	await registerResourceProviders(clients, [
+		'Microsoft.Compute',
+		'Microsoft.Network',
+		'Microsoft.Storage',
+		'Microsoft.KeyVault'
+	]);
 	const { publisher, offer, sku, version } = parseImageReference(imageReference);
 	const customData = encodeCustomData(options.customData);
 	const network = await createNetworkForVm(clients, {

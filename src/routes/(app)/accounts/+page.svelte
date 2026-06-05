@@ -235,7 +235,10 @@
 								: '服务器源站 IP'}
 						</div>
 					</div>
-					<button class="btn-danger" onclick={() => void remove(account.id)}>删除</button>
+					<div class="flex shrink-0 flex-col gap-2">
+						<a class="btn-secondary" href={`/resources?account_id=${account.id}`}>查看资源</a>
+						<button class="btn-danger" onclick={() => void remove(account.id)}>删除</button>
+					</div>
 				</div>
 			{/each}
 		{/if}
