@@ -120,6 +120,18 @@ fi
 HEALTH_PORT="$(read_port_from_env .env "$HEALTH_PORT")"
 
 # ---------- 安装依赖 & 构建 ----------
+env_db_driver="$(get_env_value DB_DRIVER .env)"
+env_mysql_host="$(get_env_value MYSQL_HOST .env)"
+if [[ "${DB_DRIVER:-$env_db_driver}" == "mysql" || -n "$env_mysql_host" ]]; then
+	register_aapanel_database_record \
+		"$env_mysql_host" \
+		"$(get_env_value MYSQL_PORT .env)" \
+		"$(get_env_value MYSQL_USER .env)" \
+		"$(get_env_value MYSQL_PASSWORD .env)" \
+		"$(get_env_value MYSQL_DATABASE .env)" \
+		"${DOMAIN:-Azure Panel}"
+fi
+
 npm_build_all
 
 # ---------- 重启 Supervisor / aaPanel Node 项目 ----------

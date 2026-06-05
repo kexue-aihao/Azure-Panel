@@ -342,6 +342,125 @@ FLUSH PRIVILEGES;
 	log "数据库已创建: ${mysql_database} | 用户: ${mysql_user}"
 }
 
+register_aapanel_database_record() {
+	local mysql_host="$1"
+	local mysql_port="$2"
+	local mysql_user="$3"
+	local mysql_password="$4"
+	local mysql_database="$5"
+	local remark="${6:-Azure Panel}"
+	local panel_db="/www/server/panel/data/default.db"
+	local panel_py=""
+
+	[[ "${REGISTER_AAPANEL_DB:-1}" == "0" ]] && return 0
+	[[ -f "$panel_db" ]] || return 0
+
+	for panel_py in /www/server/panel/pyenv/bin/python3 /usr/bin/python3 python3; do
+		if [[ -x "$panel_py" ]] || command -v "$panel_py" >/dev/null 2>&1; then
+			break
+		fi
+		panel_py=""
+	done
+	[[ -n "$panel_py" ]] || { warn "Python not found; skip aaPanel database list sync"; return 0; }
+
+	log "同步 aaPanel 数据库列表记录: ${mysql_database}"
+	AAPANEL_DB_NAME="$mysql_database" \
+	AAPANEL_DB_USER="$mysql_user" \
+	AAPANEL_DB_PASSWORD="$mysql_password" \
+	AAPANEL_DB_HOST="$mysql_host" \
+	AAPANEL_DB_PORT="$mysql_port" \
+	AAPANEL_DB_REMARK="$remark" \
+	"$panel_py" - <<'PY' || true
+import os
+import sqlite3
+import time
+
+panel_db = "/www/server/panel/data/default.db"
+name = os.environ.get("AAPANEL_DB_NAME", "")
+user = os.environ.get("AAPANEL_DB_USER", "")
+password = os.environ.get("AAPANEL_DB_PASSWORD", "")
+host = os.environ.get("AAPANEL_DB_HOST", "127.0.0.1")
+port = os.environ.get("AAPANEL_DB_PORT", "3306")
+remark = os.environ.get("AAPANEL_DB_REMARK", "Azure Panel")
+accept = "127.0.0.1" if host in ("127.0.0.1", "localhost", "::1") else host
+
+def default_for(column_type):
+    t = (column_type or "").lower()
+    if any(k in t for k in ("int", "real", "numeric", "double", "float")):
+        return 0
+    return ""
+
+known_values = {
+    "name": name,
+    "username": user,
+    "password": password,
+    "accept": accept,
+    "ps": remark,
+    "addtime": time.strftime("%Y-%m-%d %H:%M:%S"),
+    "pid": 0,
+    "sid": 0,
+    "backup_count": 0,
+    "db_type": "MySQL",
+    "type": "MySQL",
+    "host": host,
+    "db_host": host,
+    "port": port,
+    "db_port": port,
+}
+
+try:
+    conn = sqlite3.connect(panel_db)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    exists = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='databases'"
+    ).fetchone()
+    if not exists:
+        print("[aapanel-db] table 'databases' not found; skip")
+        raise SystemExit(0)
+
+    columns = cur.execute("PRAGMA table_info(databases)").fetchall()
+    column_names = [row["name"] for row in columns]
+    if "name" not in column_names:
+        print("[aapanel-db] column 'name' not found; skip")
+        raise SystemExit(0)
+
+    row = cur.execute("SELECT * FROM databases WHERE name=?", (name,)).fetchone()
+    values = {}
+    for column in columns:
+        col = column["name"]
+        if column["pk"]:
+            continue
+        if col in known_values:
+            values[col] = known_values[col]
+        elif row is None and column["notnull"] and column["dflt_value"] is None:
+            values[col] = default_for(column["type"])
+
+    if row is None:
+        cols = list(values)
+        placeholders = ",".join(["?"] * len(cols))
+        quoted = ",".join([f"`{col}`" for col in cols])
+        cur.execute(
+            f"INSERT INTO databases ({quoted}) VALUES ({placeholders})",
+            [values[col] for col in cols],
+        )
+        print(f"[aapanel-db] inserted panel record for {name}")
+    else:
+        update_cols = [col for col in values if col not in ("name", "addtime")]
+        if update_cols:
+            set_clause = ",".join([f"`{col}`=?" for col in update_cols])
+            cur.execute(
+                f"UPDATE databases SET {set_clause} WHERE name=?",
+                [values[col] for col in update_cols] + [name],
+            )
+        print(f"[aapanel-db] updated panel record for {name}")
+
+    conn.commit()
+except Exception as exc:
+    print(f"[aapanel-db] sync failed: {exc}")
+PY
+}
+
 test_mysql_app_connection() {
 	local mysql_host="$1"
 	local mysql_port="$2"

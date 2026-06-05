@@ -229,6 +229,10 @@ setup_mysql() {
 		"$MYSQL_USER" "$MYSQL_PASSWORD" "$MYSQL_DATABASE"
 	log "数据库表结构导入完成"
 
+	register_aapanel_database_record \
+		"$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD" "$MYSQL_DATABASE" \
+		"${DOMAIN:-Azure Panel}"
+
 	mkdir -p "${APP_DIR}/deploy/aapanel/generated"
 	cat >"$cred_file" <<EOF
 # Azure Panel 数据库凭据（install.sh 自动生成，请妥善保管）
