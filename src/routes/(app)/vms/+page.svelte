@@ -43,6 +43,13 @@
 		remaining: number;
 		unit: string;
 	};
+	type AzureRegionOption = {
+		name: string;
+		displayName: string;
+		availableSizeCount: number;
+		highestCoreSize: { name: string; cores: number } | null;
+		largestMemorySize: { name: string; memoryGB: number } | null;
+	};
 	type VmSizeOption = {
 		name: string;
 		cores: number;
@@ -111,12 +118,14 @@
 	let dnsBindings = $state<DnsBinding[]>([]);
 	let vms = $state<Vm[]>([]);
 	let quotas = $state<Quota[]>([]);
+	let regions = $state<AzureRegionOption[]>([]);
 	let vmSizes = $state<VmSizeOption[]>([]);
 	let vmImages = $state<VmImageOption[]>([]);
 	let accountId = $state<number | null>(null);
 	let resourceGroup = $state('');
 	let location = $state('malaysiawest');
 	let loading = $state(false);
+	let regionLoading = $state(false);
 	let quotaLoading = $state(false);
 	let sizeLoading = $state(false);
 	let imageLoading = $state(false);
@@ -125,6 +134,7 @@
 	let firewallLoading = $state(false);
 	let firewallActionLoading = $state('');
 	let toast = $state('');
+	let regionError = $state('');
 	let sizeError = $state('');
 	let imageError = $state('');
 	let createProgress = $state<CreateProgressEvent[]>([]);
@@ -291,6 +301,20 @@
 			.join('，');
 	}
 
+	function regionLabel(region: AzureRegionOption) {
+		const parts = [
+			`${region.displayName || region.name} (${region.name})`,
+			`${region.availableSizeCount} 个可用规格`
+		];
+		if (region.highestCoreSize) {
+			parts.push(`最高 ${region.highestCoreSize.name}/${region.highestCoreSize.cores}C`);
+		}
+		if (region.largestMemorySize) {
+			parts.push(`最大内存 ${region.largestMemorySize.name}/${region.largestMemorySize.memoryGB}GB`);
+		}
+		return parts.join('，');
+	}
+
 	async function createVmWithProgress(payload: Record<string, unknown>) {
 		const token = localStorage.getItem('token');
 		const response = await fetch('/api/user/azure/vm/create', {
@@ -338,7 +362,7 @@
 	async function changeProxySelection() {
 		syncProxySelection();
 		if (accountId) {
-			await Promise.all([loadVms(), loadRegionDetails()]);
+			await Promise.all([loadVms(), loadRegions()]);
 		}
 	}
 
@@ -371,6 +395,35 @@
 			toast = err instanceof Error ? err.message : '加载失败';
 		} finally {
 			loading = false;
+		}
+	}
+
+	async function loadRegions() {
+		if (!accountId) {
+			regions = [];
+			regionError = '';
+			return;
+		}
+		regionLoading = true;
+		regionError = '';
+		try {
+			const params = new URLSearchParams({ account_id: String(accountId) });
+			appendProxyParams(params);
+			regions = await api<AzureRegionOption[]>(`/api/user/azure/region/list?${params}`);
+			if (regions.length && !regions.some((region) => region.name === location)) {
+				location = regions[0].name;
+			}
+			syncCreateLocation();
+			await loadRegionDetails();
+		} catch (err) {
+			regions = [];
+			regionError = err instanceof Error ? err.message : '区域识别失败';
+			toast = regionError;
+			quotas = [];
+			vmSizes = [];
+			vmImages = [];
+		} finally {
+			regionLoading = false;
 		}
 	}
 
@@ -491,7 +544,7 @@
 		refreshAdminPassword();
 		refreshCreateNames();
 		syncProxySelection();
-		await Promise.all([loadVms(), loadRegionDetails()]);
+		await Promise.all([loadVms(), loadRegions()]);
 	}
 
 	async function changeLocation() {
@@ -506,6 +559,10 @@
 		syncCreateLocation();
 		if (!createForm.location.trim() || !createForm.vm_size.trim() || !createForm.image_reference.trim()) {
 			toast = '请填写区域、实例规格和系统镜像';
+			return;
+		}
+		if (!regions.some((region) => region.name === createForm.location)) {
+			toast = '请先从 Azure 官方 API 返回的可开机区域下拉列表中选择区域';
 			return;
 		}
 		if (!vmSizes.some((size) => size.name === createForm.vm_size)) {
@@ -783,7 +840,7 @@
 		refreshCreateNames();
 		await loadAccounts();
 		if (accountId) {
-			await Promise.all([loadVms(), loadRegionDetails()]);
+			await Promise.all([loadVms(), loadRegions()]);
 		}
 	});
 </script>
@@ -868,21 +925,44 @@
 			</div>
 			<div>
 				<label class="text-sm text-muted" for={locationInputId}>区域</label>
-				<input
+				<select
 					id={locationInputId}
 					class="input mt-1 min-w-[220px]"
 					bind:value={location}
 					onchange={() => void changeLocation()}
-					placeholder="malaysiawest"
-				/>
+					disabled={regionLoading || regions.length === 0}
+				>
+					{#if regionLoading}
+						<option value={location}>正在识别当前账号可开机区域...</option>
+					{:else if regions.length === 0}
+						<option value={location}>{regionError || '暂无可选区域，请先选择账号'}</option>
+					{:else}
+						{#each regions as region}
+							<option value={region.name}>{regionLabel(region)}</option>
+						{/each}
+					{/if}
+				</select>
+				{#if regionError}
+					<p class="mt-1 max-w-sm text-xs text-red-300">{regionError}</p>
+				{/if}
 			</div>
 			<button class="btn-primary" onclick={() => void loadVms()} disabled={loading}>刷新 VM</button>
 		</div>
 
 		<div class="grid gap-3 md:grid-cols-3">
-			<button class="btn-secondary" onclick={() => void loadRegionDetails()} disabled={quotaLoading}>
-				{quotaLoading ? '查询中...' : '查询区域配额'}
+			<button
+				class="btn-secondary"
+				onclick={() => void loadRegionDetails()}
+				disabled={regionLoading || quotaLoading || !location || regions.length === 0}
+			>
+				{quotaLoading ? '查询中...' : '查询当前区域配额'}
 			</button>
+			<button class="btn-secondary" onclick={() => void loadRegions()} disabled={!accountId || regionLoading}>
+				{regionLoading ? '识别区域中...' : '重新识别可开机区域'}
+			</button>
+			<p class="self-center text-xs text-muted">
+				区域列表来自 Azure 官方 API 返回的当前账号可创建 VM 区域。
+			</p>
 		</div>
 
 		{#if quotas.length}
@@ -928,14 +1008,24 @@
 			</div>
 			<div>
 				<label class="mb-1 block text-xs text-muted" for={createLocationSelectId}>创建区域</label>
-				<input
+				<select
 					id={createLocationSelectId}
 					class="input"
 					bind:value={location}
 					onchange={() => void changeLocation()}
-					placeholder="malaysiawest"
+					disabled={regionLoading || regions.length === 0}
 					required
-				/>
+				>
+					{#if regionLoading}
+						<option value={location}>正在识别当前账号可开机区域...</option>
+					{:else if regions.length === 0}
+						<option value={location}>{regionError || '暂无可选区域，请先选择账号'}</option>
+					{:else}
+						{#each regions as region}
+							<option value={region.name}>{regionLabel(region)}</option>
+						{/each}
+					{/if}
+				</select>
 			</div>
 			<div class="rounded-lg border border-border bg-background px-3 py-2 text-sm">
 				<div class="text-xs text-muted">本次 VM 名称</div>
