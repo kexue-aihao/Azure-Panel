@@ -1,7 +1,40 @@
 import { getUserAccountWithSelectedProxy } from '$lib/server/accounts';
-import { createAzureClients, createVmAdvanced, randomAzureResourceName } from '$lib/server/azure';
+import {
+	createAzureClients,
+	createVmAdvanced,
+	randomAzureResourceName,
+	type CreateVmProgressEvent,
+	type CreateVmOptions,
+	type CreateVmResult
+} from '$lib/server/azure';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
+
+type VmCreateResponse = {
+	name: string;
+	resource_group: string;
+	location: string;
+	public_ipv4: string;
+	public_ipv6: string;
+	ip_brush_attempts: number;
+	ip_brush_matched: boolean;
+};
+
+function publicResult(result: CreateVmResult): VmCreateResponse {
+	return {
+		name: result.name,
+		resource_group: result.resourceGroup,
+		location: result.location,
+		public_ipv4: result.publicIPv4,
+		public_ipv6: result.publicIPv6,
+		ip_brush_attempts: result.ipBrushAttempts,
+		ip_brush_matched: result.ipBrushMatched
+	};
+}
+
+function streamMessage(controller: ReadableStreamDefaultController<Uint8Array>, payload: unknown) {
+	controller.enqueue(new TextEncoder().encode(`${JSON.stringify(payload)}\n`));
+}
 
 export const POST: RequestHandler = async (event) => {
 	const user = await requireUser(event);
@@ -23,7 +56,7 @@ export const POST: RequestHandler = async (event) => {
 			proxyMode: String(body.proxy_mode ?? 'account'),
 			proxyProfileId: Number(body.proxy_profile_id ?? 0) || null
 		});
-		const result = await createVmAdvanced(createAzureClients(account, proxy), {
+		const vmOptions: CreateVmOptions = {
 			resourceGroup,
 			location,
 			vmName,
@@ -35,16 +68,45 @@ export const POST: RequestHandler = async (event) => {
 			customData: String(body.userdata ?? ''),
 			ipPrefix: String(body.ip_prefix ?? ''),
 			ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 30)
-		});
-		return ok({
-			name: result.name,
-			resource_group: result.resourceGroup,
-			location: result.location,
-			public_ipv4: result.publicIPv4,
-			public_ipv6: result.publicIPv6,
-			ip_brush_attempts: result.ipBrushAttempts,
-			ip_brush_matched: result.ipBrushMatched
-		});
+		};
+		const wantsProgressStream = event.request.headers
+			.get('accept')
+			?.includes('application/x-ndjson');
+
+		if (wantsProgressStream) {
+			const stream = new ReadableStream<Uint8Array>({
+				async start(controller) {
+					const progress = async (progressEvent: CreateVmProgressEvent) => {
+						streamMessage(controller, { type: 'progress', event: progressEvent });
+					};
+
+					try {
+						const result = await createVmAdvanced(createAzureClients(account, proxy), {
+							...vmOptions,
+							progress
+						});
+						streamMessage(controller, { type: 'result', result: publicResult(result) });
+					} catch (err) {
+						streamMessage(controller, {
+							type: 'error',
+							message: err instanceof Error ? err.message : String(err)
+						});
+					} finally {
+						controller.close();
+					}
+				}
+			});
+
+			return new Response(stream, {
+				headers: {
+					'content-type': 'application/x-ndjson; charset=utf-8',
+					'cache-control': 'no-store'
+				}
+			});
+		}
+
+		const result = await createVmAdvanced(createAzureClients(account, proxy), vmOptions);
+		return ok(publicResult(result));
 	} catch (err) {
 		return fail(err instanceof Error ? err.message : String(err), 500);
 	}

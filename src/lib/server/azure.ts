@@ -118,6 +118,7 @@ export type CreateVmOptions = {
 	customData?: string;
 	ipPrefix?: string;
 	ipBrushMaxAttempts?: number;
+	progress?: CreateVmProgressReporter;
 };
 
 export type CreateVmResult = {
@@ -129,6 +130,20 @@ export type CreateVmResult = {
 	ipBrushAttempts: number;
 	ipBrushMatched: boolean;
 };
+
+export type CreateVmProgressStatus = 'running' | 'success' | 'error' | 'info';
+
+export type CreateVmProgressEvent = {
+	step: string;
+	status: CreateVmProgressStatus;
+	message: string;
+	detail?: Record<string, string | number | boolean | null>;
+	timestamp: string;
+};
+
+export type CreateVmProgressReporter = (
+	event: CreateVmProgressEvent
+) => void | Promise<void>;
 
 export type ReplaceIpResult = {
 	vmName: string;
@@ -2073,6 +2088,23 @@ function normalizeAttempts(value?: number, fallback = 30) {
 	return Math.min(parsed, 500);
 }
 
+async function reportCreateVmProgress(
+	reporter: CreateVmProgressReporter | undefined,
+	step: string,
+	status: CreateVmProgressStatus,
+	message: string,
+	detail?: CreateVmProgressEvent['detail']
+) {
+	if (!reporter) return;
+	await reporter({
+		step,
+		status,
+		message,
+		detail,
+		timestamp: new Date().toISOString()
+	});
+}
+
 async function waitForPublicIpAddress(
 	clients: AzureClients,
 	resourceGroup: string,
@@ -2093,8 +2125,15 @@ async function createPublicIp(
 		location: string;
 		name: string;
 		version: 'IPv4' | 'IPv6';
+		progress?: CreateVmProgressReporter;
+		step?: string;
 	}
 ): Promise<PublicIPAddress> {
+	const step = options.step ?? `public-ip-${options.version.toLowerCase()}`;
+	await reportCreateVmProgress(options.progress, step, 'running', `创建 ${options.version} 公网 IP`, {
+		name: options.name,
+		version: options.version
+	});
 	const pip = await clients.network.publicIPAddresses.beginCreateOrUpdateAndWait(
 		options.resourceGroup,
 		options.name,
@@ -2106,7 +2145,12 @@ async function createPublicIp(
 			deleteOption: 'Delete'
 		}
 	);
-	return pip.ipAddress ? pip : waitForPublicIpAddress(clients, options.resourceGroup, options.name);
+	const ready = pip.ipAddress ? pip : await waitForPublicIpAddress(clients, options.resourceGroup, options.name);
+	await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, {
+		name: options.name,
+		ip: ready.ipAddress ?? ''
+	});
+	return ready;
 }
 
 async function deletePublicIpById(clients: AzureClients, publicIpId?: string) {
@@ -2131,14 +2175,29 @@ async function createMatchingIPv4PublicIp(
 		targetPrefix?: string;
 		maxAttempts?: number;
 		nameSalt?: string;
+		progress?: CreateVmProgressReporter;
 	}
 ): Promise<{ pip: PublicIPAddress; attempts: number; matched: boolean }> {
 	const targetPrefix = normalizeIpPrefix(options.targetPrefix);
 	const maxAttempts = targetPrefix ? normalizeAttempts(options.maxAttempts) : 1;
 	const salt = options.nameSalt ?? String(Date.now());
+	await reportCreateVmProgress(
+		options.progress,
+		'public-ipv4',
+		'running',
+		targetPrefix
+			? `开始刷 IPv4 前缀 ${targetPrefix}，最多 ${maxAttempts} 次`
+			: '创建 IPv4 公网 IP',
+		{ targetPrefix: targetPrefix || null, maxAttempts }
+	);
 
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		const name = resourceName(options.vmName, `pip4-${salt}-${attempt}`);
+		await reportCreateVmProgress(options.progress, 'public-ipv4', 'running', `创建 IPv4 公网 IP，第 ${attempt}/${maxAttempts} 次`, {
+			attempt,
+			maxAttempts,
+			name
+		});
 		const pip = await createPublicIp(clients, {
 			resourceGroup: options.resourceGroup,
 			location: options.location,
@@ -2147,8 +2206,24 @@ async function createMatchingIPv4PublicIp(
 		});
 		const address = pip.ipAddress ?? '';
 		const matched = !targetPrefix || address.startsWith(targetPrefix);
-		if (matched) return { pip, attempts: attempt, matched: Boolean(targetPrefix) };
+		if (matched) {
+			await reportCreateVmProgress(
+				options.progress,
+				'public-ipv4',
+				'success',
+				targetPrefix ? `IPv4 ${address} 命中目标前缀` : `IPv4 ${address || '-'} 已创建`,
+				{ attempt, maxAttempts, ip: address, matched: Boolean(targetPrefix) }
+			);
+			return { pip, attempts: attempt, matched: Boolean(targetPrefix) };
+		}
 
+		await reportCreateVmProgress(
+			options.progress,
+			'public-ipv4',
+			'info',
+			`IPv4 ${address || '-'} 未命中 ${targetPrefix}，删除后继续`,
+			{ attempt, maxAttempts, ip: address, targetPrefix }
+		);
 		await deletePublicIpById(clients, pip.id);
 	}
 
@@ -2220,6 +2295,7 @@ async function createNetworkForVm(
 		enableIpv6: boolean;
 		ipPrefix?: string;
 		ipBrushMaxAttempts?: number;
+		progress?: CreateVmProgressReporter;
 	}
 ) {
 	const vnetName = resourceName(options.vmName, 'vnet');
@@ -2232,13 +2308,29 @@ async function createNetworkForVm(
 		? ['10.0.0.0/24', 'fd00:db8:deca:1::/64']
 		: ['10.0.0.0/24'];
 
+	await reportCreateVmProgress(options.progress, 'resource-group', 'running', '创建或确认资源组', {
+		resourceGroup: options.resourceGroup,
+		location: options.location
+	});
 	await clients.resources.resourceGroups.createOrUpdate(options.resourceGroup, {
 		location: options.location
+	});
+	await reportCreateVmProgress(options.progress, 'resource-group', 'success', '资源组已就绪', {
+		resourceGroup: options.resourceGroup
+	});
+	await reportCreateVmProgress(options.progress, 'vnet', 'running', '创建虚拟网络和子网', {
+		vnetName,
+		subnetName,
+		enableIpv6: options.enableIpv6
 	});
 	await clients.network.virtualNetworks.beginCreateOrUpdateAndWait(options.resourceGroup, vnetName, {
 		location: options.location,
 		addressSpace: { addressPrefixes },
 		subnets: [{ name: subnetName, addressPrefixes: subnetAddressPrefixes }]
+	});
+	await reportCreateVmProgress(options.progress, 'vnet', 'success', '虚拟网络和子网已创建', {
+		vnetName,
+		subnetName
 	});
 
 	const ipv4 = await createMatchingIPv4PublicIp(clients, {
@@ -2246,20 +2338,30 @@ async function createNetworkForVm(
 		location: options.location,
 		vmName: options.vmName,
 		targetPrefix: options.ipPrefix,
-		maxAttempts: options.ipBrushMaxAttempts
+		maxAttempts: options.ipBrushMaxAttempts,
+		progress: options.progress
 	});
 	const ipv6 = options.enableIpv6
 		? await createPublicIp(clients, {
 				resourceGroup: options.resourceGroup,
 				location: options.location,
 				name: resourceName(options.vmName, 'pip6'),
-				version: 'IPv6'
+				version: 'IPv6',
+				progress: options.progress,
+				step: 'public-ipv6'
 			})
 		: null;
+	await reportCreateVmProgress(options.progress, 'subnet', 'running', '读取子网信息并准备网卡配置', {
+		vnetName,
+		subnetName
+	});
 	const vnet = await clients.network.virtualNetworks.get(options.resourceGroup, vnetName);
 	const subnetId = vnet.subnets?.[0]?.id;
 	if (!subnetId || !ipv4.pip.id) throw new Error('网络资源创建失败');
 	if (options.enableIpv6 && !ipv6?.id) throw new Error('IPv6 公网 IP 创建失败');
+	await reportCreateVmProgress(options.progress, 'subnet', 'success', '子网信息已确认', {
+		subnetId
+	});
 
 	const ipConfigurations: NetworkInterfaceIPConfiguration[] = [
 		{
@@ -2282,6 +2384,11 @@ async function createNetworkForVm(
 		});
 	}
 
+	await reportCreateVmProgress(options.progress, 'nic', 'running', '创建网卡并绑定公网 IP', {
+		nicName,
+		ipv4: ipv4.pip.ipAddress ?? '',
+		ipv6: ipv6?.ipAddress ?? ''
+	});
 	const nic = await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
 		options.resourceGroup,
 		nicName,
@@ -2291,6 +2398,11 @@ async function createNetworkForVm(
 		}
 	);
 	if (!nic.id) throw new Error('网卡创建失败');
+
+	await reportCreateVmProgress(options.progress, 'nic', 'success', '网卡已创建', {
+		nicName,
+		nicId: nic.id
+	});
 
 	return {
 		nic,
@@ -2314,23 +2426,49 @@ export async function createVmAdvanced(
 		adminUsername,
 		adminPassword
 	} = options;
+	await reportCreateVmProgress(options.progress, 'providers', 'running', '注册并确认 Azure 资源提供商', {
+		providers: 'Microsoft.Compute, Microsoft.Network, Microsoft.Storage, Microsoft.KeyVault'
+	});
 	await registerResourceProviders(clients, [
 		'Microsoft.Compute',
 		'Microsoft.Network',
 		'Microsoft.Storage',
 		'Microsoft.KeyVault'
 	]);
+	await reportCreateVmProgress(options.progress, 'providers', 'success', '资源提供商已就绪');
+	await reportCreateVmProgress(options.progress, 'image', 'running', '解析安装系统镜像', {
+		imageReference
+	});
 	const { publisher, offer, sku, version } = parseImageReference(imageReference);
 	const customData = encodeCustomData(options.customData);
+	await reportCreateVmProgress(options.progress, 'image', 'success', '安装系统镜像已确认', {
+		publisher,
+		offer,
+		sku,
+		version
+	});
+	if (customData) {
+		await reportCreateVmProgress(options.progress, 'userdata', 'success', 'UserData 已编码并准备注入', {
+			bytes: Buffer.byteLength(options.customData ?? '', 'utf8')
+		});
+	} else {
+		await reportCreateVmProgress(options.progress, 'userdata', 'info', '未填写 UserData，跳过脚本注入');
+	}
 	const network = await createNetworkForVm(clients, {
 		resourceGroup,
 		location,
 		vmName,
 		enableIpv6: options.enableIpv6 === true,
 		ipPrefix: options.ipPrefix,
-		ipBrushMaxAttempts: options.ipBrushMaxAttempts
+		ipBrushMaxAttempts: options.ipBrushMaxAttempts,
+		progress: options.progress
 	});
 
+	await reportCreateVmProgress(options.progress, 'vm', 'running', '创建 Azure VM 实例', {
+		vmName,
+		vmSize,
+		location
+	});
 	await clients.compute.virtualMachines.beginCreateOrUpdateAndWait(resourceGroup, vmName, {
 		location,
 		hardwareProfile: { vmSize },
@@ -2348,8 +2486,11 @@ export async function createVmAdvanced(
 			networkInterfaces: [{ id: network.nic.id, primary: true }]
 		}
 	});
+	await reportCreateVmProgress(options.progress, 'vm', 'success', 'Azure VM 实例已创建', {
+		vmName
+	});
 
-	return {
+	const result = {
 		name: vmName,
 		resourceGroup,
 		location,
@@ -2358,6 +2499,14 @@ export async function createVmAdvanced(
 		ipBrushAttempts: network.ipBrushAttempts,
 		ipBrushMatched: network.ipBrushMatched
 	};
+	await reportCreateVmProgress(options.progress, 'complete', 'success', '创建流程完成', {
+		vmName,
+		publicIPv4: result.publicIPv4,
+		publicIPv6: result.publicIPv6,
+		ipBrushAttempts: result.ipBrushAttempts,
+		ipBrushMatched: result.ipBrushMatched
+	});
+	return result;
 }
 
 export async function createVmSimple(

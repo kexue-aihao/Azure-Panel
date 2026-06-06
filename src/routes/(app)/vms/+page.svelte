@@ -55,6 +55,29 @@
 		architecture: string;
 		hyperVGeneration: string;
 	};
+	type CreateProgressStatus = 'running' | 'success' | 'error' | 'info';
+	type CreateProgressEvent = {
+		step: string;
+		status: CreateProgressStatus;
+		message: string;
+		detail?: Record<string, string | number | boolean | null>;
+		timestamp: string;
+	};
+	type CreateStreamMessage =
+		| { type: 'progress'; event: CreateProgressEvent }
+		| {
+				type: 'result';
+				result: {
+					name: string;
+					resource_group: string;
+					location: string;
+					public_ipv4: string;
+					public_ipv6: string;
+					ip_brush_attempts: number;
+					ip_brush_matched: boolean;
+				};
+		  }
+		| { type: 'error'; message: string };
 
 	let accounts = $state<Account[]>([]);
 	let proxies = $state<ProxyProfile[]>([]);
@@ -74,6 +97,7 @@
 	let toast = $state('');
 	let sizeError = $state('');
 	let imageError = $state('');
+	let createProgress = $state<CreateProgressEvent[]>([]);
 	let proxyMode = $state<ProxyMode>('account');
 	let proxyProfileId = $state('');
 	let brushIpPrefix = $state('85.211');
@@ -182,6 +206,83 @@
 			proxy_mode: proxyMode,
 			proxy_profile_id: proxyMode === 'profile' ? proxyProfileId : ''
 		};
+	}
+
+	function mergeCreateProgress(event: CreateProgressEvent) {
+		const index = createProgress.findIndex((item) => item.step === event.step);
+		if (index === -1) {
+			createProgress = [...createProgress, event];
+			return;
+		}
+		createProgress = createProgress.map((item, itemIndex) =>
+			itemIndex === index ? { ...item, ...event } : item
+		);
+	}
+
+	function progressBadge(status: CreateProgressStatus) {
+		if (status === 'success') return 'bg-green-900/50 text-green-300';
+		if (status === 'error') return 'bg-red-900/50 text-red-300';
+		if (status === 'info') return 'bg-blue-900/50 text-blue-300';
+		return 'bg-yellow-900/50 text-yellow-300';
+	}
+
+	function progressText(status: CreateProgressStatus) {
+		if (status === 'success') return '完成';
+		if (status === 'error') return '失败';
+		if (status === 'info') return '信息';
+		return '进行中';
+	}
+
+	function progressDetail(detail?: CreateProgressEvent['detail']) {
+		if (!detail) return '';
+		return Object.entries(detail)
+			.filter(([, value]) => value !== undefined && value !== null && value !== '')
+			.map(([key, value]) => `${key}: ${String(value)}`)
+			.join('，');
+	}
+
+	async function createVmWithProgress(payload: Record<string, unknown>) {
+		const token = localStorage.getItem('token');
+		const response = await fetch('/api/user/azure/vm/create', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'application/x-ndjson',
+				...(token ? { Authorization: `Bearer ${token}` } : {})
+			},
+			body: JSON.stringify(payload)
+		});
+		if (!response.ok) {
+			const body = await response.json().catch(() => null);
+			throw new Error(body?.message ?? `创建请求失败 (${response.status})`);
+		}
+		if (!response.body) throw new Error('浏览器不支持读取创建进度流');
+
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = '';
+		let result: Extract<CreateStreamMessage, { type: 'result' }>['result'] | null = null;
+
+		while (true) {
+			const { value, done } = await reader.read();
+			buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+			const lines = buffer.split('\n');
+			buffer = lines.pop() ?? '';
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				const message = JSON.parse(line) as CreateStreamMessage;
+				if (message.type === 'progress') {
+					mergeCreateProgress(message.event);
+				} else if (message.type === 'result') {
+					result = message.result;
+				} else if (message.type === 'error') {
+					throw new Error(message.message);
+				}
+			}
+			if (done) break;
+		}
+		if (!result) throw new Error('创建流程结束但未返回 VM 结果');
+		return result;
 	}
 
 	async function changeProxySelection() {
@@ -364,22 +465,14 @@
 			return;
 		}
 		createLoading = true;
+		createProgress = [];
 		try {
 			refreshCreateNames();
-			const result = await api<{
-				name: string;
-				resource_group: string;
-				public_ipv4: string;
-				public_ipv6: string;
-				ip_brush_attempts: number;
-			}>('/api/user/azure/vm/create', {
-				method: 'POST',
-				body: JSON.stringify({
-					...createForm,
-					account_id: accountId,
-					...proxyPayload(),
-					ip_brush_max_attempts: Number(createForm.ip_brush_max_attempts)
-				})
+			const result = await createVmWithProgress({
+				...createForm,
+				account_id: accountId,
+				...proxyPayload(),
+				ip_brush_max_attempts: Number(createForm.ip_brush_max_attempts)
 			});
 			toast = `VM ${result.name} 创建完成，IPv4=${result.public_ipv4 || '-'} IPv6=${result.public_ipv6 || '-'}，刷IP次数=${result.ip_brush_attempts}`;
 			resourceGroup = result.resource_group;
@@ -387,7 +480,14 @@
 			refreshAdminPassword();
 			await loadVms();
 		} catch (err) {
-			toast = err instanceof Error ? err.message : '创建失败';
+			const message = err instanceof Error ? err.message : '创建失败';
+			mergeCreateProgress({
+				step: 'failed',
+				status: 'error',
+				message,
+				timestamp: new Date().toISOString()
+			});
+			toast = message;
 		} finally {
 			createLoading = false;
 		}
@@ -740,6 +840,31 @@
 		>
 			{createLoading ? '创建中...' : '创建 VM'}
 		</button>
+		{#if createProgress.length}
+			<div class="rounded-xl border border-border bg-background p-3">
+				<div class="mb-3 flex items-center justify-between gap-3">
+					<div class="text-sm font-medium">创建流程</div>
+					<div class="text-xs text-muted">{createProgress.length} 个步骤</div>
+				</div>
+				<div class="space-y-2">
+					{#each createProgress as item}
+						<div class="rounded-lg border border-border/70 p-3">
+							<div class="flex flex-wrap items-center gap-2">
+								<span class={`badge ${progressBadge(item.status)}`}>{progressText(item.status)}</span>
+								<span class="font-mono text-xs text-muted">{item.step}</span>
+								<span class="text-sm">{item.message}</span>
+							</div>
+							{#if progressDetail(item.detail)}
+								<div class="mt-1 break-all text-xs text-muted">{progressDetail(item.detail)}</div>
+							{/if}
+							<div class="mt-1 text-[11px] text-muted">
+								{new Date(item.timestamp).toLocaleString()}
+							</div>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/if}
 	</form>
 </div>
 
