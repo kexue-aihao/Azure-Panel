@@ -1,7 +1,7 @@
 import { getAccountSubscriptionStatus } from '$lib/server/azure';
 import { getUserAccountWithProxy } from '$lib/server/accounts';
 import { findNotificationSettingsByUser, listAccountsByUser } from '$lib/server/db/repo';
-import { getRequestClientIp, ok, requireUser } from '$lib/server/http';
+import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import {
 	getTelegramCredentials,
 	maskAccountName,
@@ -17,6 +17,16 @@ type NormalAccount = {
 	subscriptionId: string;
 	displayName: string;
 	state: string;
+};
+
+type AccountCheckResult = {
+	account_id: number;
+	status: 'success' | 'failed' | 'check_failed';
+	state: string;
+	subscription_id: string;
+	display_name: string;
+	error: string;
+	checked_at: string;
 };
 
 function buildNormalSubscriptionMessage(input: {
@@ -49,17 +59,25 @@ function buildNormalSubscriptionMessage(input: {
 
 export const POST: RequestHandler = async (event) => {
 	const user = await requireUser(event);
-	const accounts = await listAccountsByUser(user.id);
+	const body = (await event.request.json().catch(() => ({}))) as { account_id?: unknown };
+	const accountId = Number(body.account_id ?? 0) || 0;
+	const allAccounts = await listAccountsByUser(user.id);
+	const accounts = accountId ? allAccounts.filter((account) => account.id === accountId) : allAccounts;
+	if (accountId && accounts.length === 0) return fail('账号不存在或不属于当前用户', 404);
+
 	const clientIp = getRequestClientIp(event);
 	const normalAccounts: NormalAccount[] = [];
 	let abnormalCount = 0;
 	let checkFailedCount = 0;
-	let notifyError = '';
-	let notified = false;
 	let sent = 0;
 	let notifyFailed = 0;
+	const notifyErrors: string[] = [];
+	const accountResults: AccountCheckResult[] = [];
+	const settings = await findNotificationSettingsByUser(user.id);
+	const credentials = getTelegramCredentials(settings);
 
 	for (const account of accounts) {
+		const checkedAt = new Date();
 		try {
 			const { account: runtimeAccount, proxy } = await getUserAccountWithProxy(user.id, account.id, {
 				clientIp,
@@ -68,57 +86,85 @@ export const POST: RequestHandler = async (event) => {
 			});
 			const status = await getAccountSubscriptionStatus(runtimeAccount, proxy);
 			if (!status.abnormal) {
-				normalAccounts.push({
+				const normalAccount: NormalAccount = {
 					account: runtimeAccount,
 					subscriptionId: status.subscriptionId,
 					displayName: status.displayName,
 					state: status.state
+				};
+				normalAccounts.push(normalAccount);
+				accountResults.push({
+					account_id: runtimeAccount.id,
+					status: 'success',
+					state: status.state || 'Enabled',
+					subscription_id: status.subscriptionId || runtimeAccount.subscriptionId,
+					display_name: status.displayName || '',
+					error: '',
+					checked_at: checkedAt.toISOString()
 				});
+				if (!credentials) {
+					notifyErrors.push('Telegram 通知未启用或配置不完整');
+				} else {
+					try {
+						const result = await sendTelegramMessageToTargets({
+							token: credentials.token,
+							chatIds: credentials.chatIds,
+							text: buildNormalSubscriptionMessage({
+								totalCount: 1,
+								normalAccounts: [normalAccount],
+								abnormalCount: 0,
+								failedCount: 0,
+								checkedAt
+							})
+						});
+						sent += result.sent.length;
+						notifyFailed += result.failed.length;
+						notifyErrors.push(...result.failed.map((item) => item.error));
+					} catch (err) {
+						notifyFailed += credentials.chatIds.length;
+						notifyErrors.push(err instanceof Error ? err.message : String(err));
+					}
+				}
 			} else {
 				abnormalCount += 1;
+				accountResults.push({
+					account_id: runtimeAccount.id,
+					status: 'failed',
+					state: status.state || 'Unknown',
+					subscription_id: status.subscriptionId || runtimeAccount.subscriptionId,
+					display_name: status.displayName || '',
+					error: '',
+					checked_at: checkedAt.toISOString()
+				});
 			}
-		} catch {
+		} catch (err) {
 			checkFailedCount += 1;
+			accountResults.push({
+				account_id: account.id,
+				status: 'check_failed',
+				state: '',
+				subscription_id: account.subscriptionId,
+				display_name: '',
+				error: err instanceof Error ? err.message : String(err),
+				checked_at: checkedAt.toISOString()
+			});
 		}
 	}
 
-	if (normalAccounts.length === 0) {
-		notifyError = '没有检测到订阅正常的账号，未发送 Telegram 通知';
-	} else {
-		try {
-			const settings = await findNotificationSettingsByUser(user.id);
-			const credentials = getTelegramCredentials(settings);
-			if (!credentials) {
-				notifyError = 'Telegram 通知未启用或配置不完整';
-			} else {
-				const result = await sendTelegramMessageToTargets({
-					token: credentials.token,
-					chatIds: credentials.chatIds,
-					text: buildNormalSubscriptionMessage({
-						totalCount: accounts.length,
-						normalAccounts,
-						abnormalCount,
-						failedCount: checkFailedCount
-					})
-				});
-				sent = result.sent.length;
-				notifyFailed = result.failed.length;
-				notified = sent > 0;
-				notifyError = result.failed.map((item) => item.error).join('; ');
-			}
-		} catch (err) {
-			notifyError = err instanceof Error ? err.message : String(err);
-		}
-	}
+	const notifyError =
+		normalAccounts.length === 0
+			? '没有检测到订阅正常的账号，未发送 Telegram 通知'
+			: [...new Set(notifyErrors.filter(Boolean))].join('; ');
 
 	return ok({
 		total_count: accounts.length,
 		normal_count: normalAccounts.length,
 		abnormal_count: abnormalCount,
 		check_failed: checkFailedCount,
-		notified,
+		notified: sent > 0,
 		sent,
 		notify_failed: notifyFailed,
-		notify_error: notifyError
+		notify_error: notifyError,
+		accounts: accountResults
 	});
 };

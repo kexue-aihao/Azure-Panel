@@ -62,6 +62,16 @@
 		failed: number;
 		notify_error: string;
 	};
+	type AccountCheckStatus = 'success' | 'failed' | 'check_failed';
+	type AccountCheckResult = {
+		account_id: number;
+		status: AccountCheckStatus;
+		state: string;
+		subscription_id: string;
+		display_name: string;
+		error: string;
+		checked_at: string;
+	};
 	type AccountNormalNotifyResult = {
 		total_count: number;
 		normal_count: number;
@@ -71,6 +81,7 @@
 		sent: number;
 		notify_failed: number;
 		notify_error: string;
+		accounts: AccountCheckResult[];
 	};
 
 	let accounts = $state<Account[]>([]);
@@ -88,9 +99,11 @@
 	let quickParsed = $state<QuickAzureCredential | null>(null);
 	let toast = $state('');
 	let accountProxyDrafts = $state<Record<number, { proxy_mode: ProxyMode; proxy_profile_id: string }>>({});
+	let accountCheckResults = $state<Record<number, AccountCheckResult>>({});
 	let proxySavingAccountId = $state<number | null>(null);
 	let checkingPoolCount = $state(false);
 	let checkingNormalSubscriptions = $state(false);
+	let normalCheckProgress = $state({ checked: 0, total: 0 });
 	let fixedProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
 
 	function resetForm() {
@@ -239,6 +252,29 @@
 		return {
 			proxy_mode: accountProxyMode(account),
 			proxy_profile_id: account.proxy_profile_id ? String(account.proxy_profile_id) : ''
+		};
+	}
+
+	function accountCheckBadge(result: AccountCheckResult | undefined) {
+		if (!result) return null;
+		if (result.status === 'success') {
+			return {
+				label: '成功',
+				className: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+				detail: `订阅状态正常${result.state ? `：${result.state}` : ''}`
+			};
+		}
+		if (result.status === 'failed') {
+			return {
+				label: '失败',
+				className: 'border-red-500/40 bg-red-500/10 text-red-300',
+				detail: `订阅状态异常${result.state ? `：${result.state}` : ''}`
+			};
+		}
+		return {
+			label: '检测失败',
+			className: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+			detail: result.error || '账号检测请求失败'
 		};
 	}
 
@@ -416,24 +452,68 @@
 	}
 
 	async function checkNormalSubscriptionsAndNotify() {
+		if (accounts.length === 0) {
+			toast = '号池里还没有账号';
+			return;
+		}
 		checkingNormalSubscriptions = true;
-		try {
-			const result = await api<AccountNormalNotifyResult>('/api/user/azure/account/pool/normal-notify', {
-				method: 'POST'
-			});
-			if (result.notified) {
-				toast = `已检测 ${result.total_count} 个账号，正常 ${result.normal_count} 个，异常 ${result.abnormal_count} 个，检测失败 ${result.check_failed} 个；已通知 ${result.sent} 个 Telegram 目标${
-					result.notify_failed ? `，通知失败 ${result.notify_failed} 个` : ''
-				}`;
-			} else {
-				toast = `已检测 ${result.total_count} 个账号，正常 ${result.normal_count} 个，异常 ${result.abnormal_count} 个，检测失败 ${result.check_failed} 个；未通知：${
-					result.notify_error || '没有可通知的正常账号'
-				}`;
+		accountCheckResults = {};
+		normalCheckProgress = { checked: 0, total: accounts.length };
+		let normalCount = 0;
+		let abnormalCount = 0;
+		let checkFailedCount = 0;
+		let sent = 0;
+		let notifyFailed = 0;
+		let notifyError = '';
+		for (const account of accounts) {
+			try {
+				const result = await api<AccountNormalNotifyResult>('/api/user/azure/account/pool/normal-notify', {
+					method: 'POST',
+					body: JSON.stringify({ account_id: account.id })
+				});
+				const item = result.accounts?.[0];
+				if (item) {
+					accountCheckResults = {
+						...accountCheckResults,
+						[item.account_id]: item
+					};
+				}
+				normalCount += result.normal_count;
+				abnormalCount += result.abnormal_count;
+				checkFailedCount += result.check_failed;
+				sent += result.sent;
+				notifyFailed += result.notify_failed;
+				if (result.notify_error) notifyError = result.notify_error;
+				normalCheckProgress = { checked: normalCheckProgress.checked + 1, total: accounts.length };
+				toast = `正在顺序检测账号 ${normalCheckProgress.checked}/${accounts.length}；正常 ${normalCount} 个，异常 ${abnormalCount} 个，检测失败 ${checkFailedCount} 个`;
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				checkFailedCount += 1;
+				accountCheckResults = {
+					...accountCheckResults,
+					[account.id]: {
+						account_id: account.id,
+						status: 'check_failed',
+						state: '',
+						subscription_id: '',
+						display_name: '',
+						error: message,
+						checked_at: new Date().toISOString()
+					}
+				};
+				normalCheckProgress = { checked: normalCheckProgress.checked + 1, total: accounts.length };
+				toast = `正在顺序检测账号 ${normalCheckProgress.checked}/${accounts.length}；正常 ${normalCount} 个，异常 ${abnormalCount} 个，检测失败 ${checkFailedCount} 个`;
 			}
-		} catch (err) {
-			toast = err instanceof Error ? err.message : '检测正常订阅并通知失败';
+		}
+		try {
+			const notifyStatus =
+				sent > 0
+					? `已通知 ${sent} 个 Telegram 目标${notifyFailed ? `，通知失败 ${notifyFailed} 个` : ''}`
+					: `未通知：${notifyError || '没有可通知的正常账号'}`;
+			toast = `已按顺序检测 ${accounts.length} 个账号，正常 ${normalCount} 个，异常 ${abnormalCount} 个，检测失败 ${checkFailedCount} 个；${notifyStatus}`;
 		} finally {
 			checkingNormalSubscriptions = false;
+			normalCheckProgress = { checked: 0, total: 0 };
 		}
 	}
 
@@ -590,9 +670,14 @@
 		</div>
 		{#if checkingNormalSubscriptions}
 			<div class="progress-track running">
-				<div class="progress-fill bg-primary" style="width: 70%"></div>
+				<div
+					class="progress-fill bg-primary"
+					style={`width: ${normalCheckProgress.total ? Math.max(8, Math.round((normalCheckProgress.checked / normalCheckProgress.total) * 100)) : 8}%`}
+				></div>
 			</div>
-			<p class="text-xs text-muted">正在检测账号订阅是否正常，正常账号将通知 Telegram 个人和群组...</p>
+			<p class="text-xs text-muted">
+				正在按顺序检测账号订阅状态，已完成 {normalCheckProgress.checked}/{normalCheckProgress.total}，正常账号会立即通知 Telegram 个人和群组...
+			</p>
 		{/if}
 		{#if checkingPoolCount}
 			<div class="progress-track running">
@@ -604,9 +689,29 @@
 			<p class="text-sm text-muted">号池里还没有账号</p>
 		{:else}
 			{#each accounts as account}
+				{@const checkBadge = accountCheckBadge(accountCheckResults[account.id])}
 				<div class="grid gap-3 rounded-lg border border-border p-3 md:grid-cols-[1fr_auto]">
 					<div class="min-w-0">
-						<div class="font-medium">{account.name}</div>
+						<div class="flex flex-wrap items-center gap-2">
+							<div class="font-medium">{account.name}</div>
+							{#if checkBadge}
+								<span
+									class={`rounded-full border px-2 py-0.5 text-xs font-medium ${checkBadge.className}`}
+									title={checkBadge.detail}
+								>
+									{checkBadge.label}
+								</span>
+							{:else if checkingNormalSubscriptions}
+								<span class="rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+									检测中
+								</span>
+							{/if}
+						</div>
+						{#if accountCheckResults[account.id]}
+							<div class="mt-1 text-xs text-muted">
+								{accountCheckBadge(accountCheckResults[account.id])?.detail}
+							</div>
+						{/if}
 						<div class="mt-1 text-xs text-muted">租户: {account.tenant_id}</div>
 						<div class="text-xs text-muted">Client ID: {account.client_id}</div>
 						<div class="text-xs text-muted">
