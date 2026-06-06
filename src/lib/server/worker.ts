@@ -9,6 +9,7 @@ import {
 	listAccountsByUser,
 	listEnabledWorkflows,
 	listEnabledWorkflowsByUser,
+	listProxyProfilesByUser,
 	updateDnsBindingSyncState,
 	updateWorkflowLastRun,
 	updateWorkflowStatusCheck
@@ -26,7 +27,7 @@ import {
 	type CreateVmProgressEvent,
 	type CreateVmResult
 } from './azure';
-import type { AzureAccount, WorkflowPolicy } from './db/schema';
+import type { AzureAccount, ProxyProfile, WorkflowPolicy } from './db/schema';
 import { createRainbowDnsClient, syncDnsBindingToIp } from './dns';
 import { proxyProfileToRuntimeReady, proxySource, type ProxyRuntimeConfig } from './proxy';
 
@@ -37,6 +38,11 @@ type WorkerAccountRuntime = {
 	account: AzureAccount;
 	proxy: ProxyRuntimeConfig | null;
 	clients: ReturnType<typeof createAzureClients>;
+};
+
+type WorkerBootProxyRuntime = {
+	name: string;
+	proxy: ProxyRuntimeConfig;
 };
 
 type TrackedVm = {
@@ -144,6 +150,56 @@ function selectVmSizeForReplenishment(runningVms: TrackedVm[], fallbackVmSize: s
 	}
 	const selected = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
 	return selected || fallbackVmSize;
+}
+
+function isBootProxyProfile(profile: ProxyProfile) {
+	if (proxySource(profile) === 'client_ip') return false;
+	return ['http', 'https', 'socks4', 'socks4a', 'socks5'].includes(String(profile.type).toLowerCase());
+}
+
+async function collectBootProxyPool(policy: WorkflowPolicy): Promise<WorkerBootProxyRuntime[]> {
+	const profiles = await listProxyProfilesByUser(policy.userId);
+	const bootProfiles = shuffle(profiles.filter(isBootProxyProfile));
+	const pool: WorkerBootProxyRuntime[] = [];
+
+	for (const profile of bootProfiles) {
+		try {
+			pool.push({
+				name: profile.name,
+				proxy: await proxyProfileToRuntimeReady(profile)
+			});
+		} catch (err) {
+			await insertWorkflowLog(
+				policy.id,
+				'proxy_pool',
+				'failed',
+				`补机代理 ${profile.name} 初始化失败: ${errorMessage(err)}`
+			);
+		}
+	}
+
+	if (pool.length > 0) {
+		await insertWorkflowLog(
+			policy.id,
+			'proxy_pool',
+			'success',
+			`已加载 ${pool.length} 个 HTTP/SOCKS 补机开机代理，将随机使用`
+		);
+	} else {
+		await insertWorkflowLog(
+			policy.id,
+			'proxy_pool',
+			'skipped',
+			'未找到可用的 HTTP/SOCKS 补机开机代理，将回退使用账号绑定代理或直连'
+		);
+	}
+
+	return pool;
+}
+
+function pickBootProxy(pool: WorkerBootProxyRuntime[]) {
+	if (pool.length === 0) return null;
+	return pool[Math.floor(Math.random() * pool.length)] ?? null;
 }
 
 async function createRuntimeForAccount(
@@ -329,6 +385,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 
 			const targetCount = safeReplenishTargetCount(policy);
 			const accountPoolRuntimes = await collectAccountPoolRuntimes(policy, account);
+			const bootProxyPool = await collectBootProxyPool(policy);
 			const tracked = await collectTrackedVms(policy, accountPoolRuntimes);
 			let running = 0;
 			const runningVms: TrackedVm[] = [];
@@ -400,8 +457,12 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 						const prefix = policyResourcePrefix(policy);
 						const resourceGroup = randomAzureResourceName(`${prefix}-rg`, 64);
 						const vmName = randomAzureResourceName(prefix, 48);
+						const bootProxy = pickBootProxy(bootProxyPool);
+						const createClients = bootProxy
+							? createAzureClients(replenishRuntime.account, bootProxy.proxy)
+							: replenishRuntime.clients;
 						try {
-							const result = await createVmSimple(replenishRuntime.clients, {
+							const result = await createVmSimple(createClients, {
 								resourceGroup,
 								location: policy.location,
 								vmName,
@@ -419,7 +480,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 								policy.id,
 								'auto_create',
 								'success',
-								`已使用账号 ${replenishRuntime.account.name} 创建 VM: ${vmName} 规格 ${replenishmentVmSize} 资源组=${resourceGroup} IPv4=${result.publicIPv4 || '-'} IPv6=${
+								`已使用账号 ${replenishRuntime.account.name} 创建 VM: ${vmName} 规格 ${replenishmentVmSize} 代理=${bootProxy?.name || '账号默认/直连'} 资源组=${resourceGroup} IPv4=${result.publicIPv4 || '-'} IPv6=${
 									result.publicIPv6 || '-'
 								} 刷 IP 次数=${result.ipBrushAttempts}`
 							);
