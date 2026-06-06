@@ -56,6 +56,16 @@
 		failed: number;
 		notify_error: string;
 	};
+	type AccountNormalNotifyResult = {
+		total_count: number;
+		normal_count: number;
+		abnormal_count: number;
+		check_failed: number;
+		notified: boolean;
+		sent: number;
+		notify_failed: number;
+		notify_error: string;
+	};
 
 	let accounts = $state<Account[]>([]);
 	let proxies = $state<ProxyProfile[]>([]);
@@ -74,6 +84,7 @@
 	let accountProxyDrafts = $state<Record<number, { proxy_mode: ProxyMode; proxy_profile_id: string }>>({});
 	let proxySavingAccountId = $state<number | null>(null);
 	let checkingPoolCount = $state(false);
+	let checkingNormalSubscriptions = $state(false);
 	let fixedProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
 
 	function resetForm() {
@@ -339,6 +350,28 @@
 		}
 	}
 
+	async function checkNormalSubscriptionsAndNotify() {
+		checkingNormalSubscriptions = true;
+		try {
+			const result = await api<AccountNormalNotifyResult>('/api/user/azure/account/pool/normal-notify', {
+				method: 'POST'
+			});
+			if (result.notified) {
+				toast = `已检测 ${result.total_count} 个账号，正常 ${result.normal_count} 个，异常 ${result.abnormal_count} 个，检测失败 ${result.check_failed} 个；已通知 ${result.sent} 个 Telegram 目标${
+					result.notify_failed ? `，通知失败 ${result.notify_failed} 个` : ''
+				}`;
+			} else {
+				toast = `已检测 ${result.total_count} 个账号，正常 ${result.normal_count} 个，异常 ${result.abnormal_count} 个，检测失败 ${result.check_failed} 个；未通知：${
+					result.notify_error || '没有可通知的正常账号'
+				}`;
+			}
+		} catch (err) {
+			toast = err instanceof Error ? err.message : '检测正常订阅并通知失败';
+		} finally {
+			checkingNormalSubscriptions = false;
+		}
+	}
+
 	onMount(() => {
 		void load();
 		void loadClientIpProxy();
@@ -479,8 +512,22 @@
 				>
 					{checkingPoolCount ? '检测通知中...' : '检测剩余并通知'}
 				</button>
+				<button
+					class="btn-primary text-xs"
+					type="button"
+					onclick={() => void checkNormalSubscriptionsAndNotify()}
+					disabled={checkingNormalSubscriptions}
+				>
+					{checkingNormalSubscriptions ? '检测通知中...' : '检测正常并通知'}
+				</button>
 			</div>
 		</div>
+		{#if checkingNormalSubscriptions}
+			<div class="progress-track running">
+				<div class="progress-fill bg-primary" style="width: 70%"></div>
+			</div>
+			<p class="text-xs text-muted">正在检测账号订阅是否正常，正常账号将通知 Telegram 个人和群组...</p>
+		{/if}
 		{#if checkingPoolCount}
 			<div class="progress-track running">
 				<div class="progress-fill bg-primary" style="width: 65%"></div>
