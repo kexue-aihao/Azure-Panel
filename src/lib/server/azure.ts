@@ -2578,7 +2578,14 @@ async function createMatchingIPv4PublicIp(
 				'public-ipv4',
 				'success',
 				targetPrefix ? `IPv4 ${address} 命中目标前缀` : `IPv4 ${address || '-'} 已创建`,
-				{ attempt, maxAttempts, ip: address, matched: Boolean(targetPrefix) }
+				{
+					attempt,
+					maxAttempts,
+					ip: address,
+					targetPrefix: targetPrefix || null,
+					publicIpName: name,
+					matched: Boolean(targetPrefix)
+				}
 			);
 			return { pip, attempts: attempt, matched: Boolean(targetPrefix) };
 		}
@@ -2588,7 +2595,7 @@ async function createMatchingIPv4PublicIp(
 			'public-ipv4',
 			'info',
 			`IPv4 ${address || '-'} 未命中 ${targetPrefix}，删除后继续`,
-			{ attempt, maxAttempts, ip: address, targetPrefix }
+			{ attempt, maxAttempts, ip: address, targetPrefix, publicIpName: name, matched: false }
 		);
 		await deletePublicIpById(clients, pip.id);
 	}

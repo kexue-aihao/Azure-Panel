@@ -97,6 +97,16 @@
 		detail?: Record<string, string | number | boolean | null>;
 		timestamp: string;
 	};
+	type BrushedIpRecord = {
+		key: string;
+		attempt: number;
+		maxAttempts: number;
+		ip: string;
+		targetPrefix: string;
+		publicIpName: string;
+		matched: boolean;
+		timestamp: string;
+	};
 	type OperationStreamMessage<T> =
 		| { type: 'progress'; event: CreateProgressEvent }
 		| { type: 'result'; result: T }
@@ -143,10 +153,12 @@
 	let sizeError = $state('');
 	let imageError = $state('');
 	let createProgress = $state<CreateProgressEvent[]>([]);
+	let createBrushedIps = $state<BrushedIpRecord[]>([]);
 	let createProgressDialogOpen = $state(false);
 	let deleteProgress = $state<CreateProgressEvent[]>([]);
 	let deletingVmName = $state('');
 	let operationProgress = $state<CreateProgressEvent[]>([]);
+	let operationBrushedIps = $state<BrushedIpRecord[]>([]);
 	let operationTitle = $state('');
 	let operationTarget = $state('');
 	let firewallVm = $state<Vm | null>(null);
@@ -289,9 +301,11 @@
 		sizeError = '';
 		imageError = '';
 		createProgress = [];
+		createBrushedIps = [];
 		createProgressDialogOpen = false;
 		deleteProgress = [];
 		operationProgress = [];
+		operationBrushedIps = [];
 		operationTitle = '';
 		operationTarget = '';
 		firewallVm = null;
@@ -305,7 +319,62 @@
 		imageLoading = false;
 	}
 
+	function progressDetailString(detail: CreateProgressEvent['detail'], key: string) {
+		const value = detail?.[key];
+		if (value === undefined || value === null || value === '') return '';
+		return String(value);
+	}
+
+	function progressDetailNumber(detail: CreateProgressEvent['detail'], key: string) {
+		const value = Number(detail?.[key] ?? 0);
+		return Number.isFinite(value) ? value : 0;
+	}
+
+	function brushedIpFromEvent(event: CreateProgressEvent): BrushedIpRecord | null {
+		if (event.step !== 'public-ipv4') return null;
+		const ip = progressDetailString(event.detail, 'ip');
+		const targetPrefix = progressDetailString(event.detail, 'targetPrefix');
+		if (!ip || !targetPrefix) return null;
+
+		const attempt = progressDetailNumber(event.detail, 'attempt');
+		const maxAttempts = progressDetailNumber(event.detail, 'maxAttempts') || attempt || 1;
+		const publicIpName =
+			progressDetailString(event.detail, 'publicIpName') ||
+			progressDetailString(event.detail, 'name');
+		const matched =
+			event.detail?.matched === true || (event.status === 'success' && ip.startsWith(targetPrefix));
+		return {
+			key: `${targetPrefix}:${attempt}:${ip}:${publicIpName || '-'}`,
+			attempt,
+			maxAttempts,
+			ip,
+			targetPrefix,
+			publicIpName,
+			matched,
+			timestamp: event.timestamp
+		};
+	}
+
+	function upsertBrushedIp(records: BrushedIpRecord[], record: BrushedIpRecord) {
+		const index = records.findIndex((item) => item.key === record.key);
+		if (index === -1) return [...records, record];
+		return records.map((item, itemIndex) => (itemIndex === index ? { ...item, ...record } : item));
+	}
+
+	function rememberCreateBrushedIp(event: CreateProgressEvent) {
+		const record = brushedIpFromEvent(event);
+		if (!record) return;
+		createBrushedIps = upsertBrushedIp(createBrushedIps, record);
+	}
+
+	function rememberOperationBrushedIp(event: CreateProgressEvent) {
+		const record = brushedIpFromEvent(event);
+		if (!record) return;
+		operationBrushedIps = upsertBrushedIp(operationBrushedIps, record);
+	}
+
 	function mergeCreateProgress(event: CreateProgressEvent) {
+		rememberCreateBrushedIp(event);
 		const index = createProgress.findIndex((item) => item.step === event.step);
 		if (index === -1) {
 			createProgress = [...createProgress, event];
@@ -317,6 +386,7 @@
 	}
 
 	function beginCreateProgressDialog() {
+		createBrushedIps = [];
 		createProgress = [
 			{
 				step: 'prepare',
@@ -361,6 +431,7 @@
 	}
 
 	function mergeOperationProgress(event: CreateProgressEvent) {
+		rememberOperationBrushedIp(event);
 		const index = operationProgress.findIndex((item) => item.step === event.step);
 		if (index === -1) {
 			operationProgress = [...operationProgress, event];
@@ -403,6 +474,7 @@
 	function beginOperationProgress(title: string, target: string) {
 		operationTitle = title;
 		operationTarget = target;
+		operationBrushedIps = [];
 		operationProgress = [
 			{
 				step: 'request',
@@ -1575,6 +1647,37 @@
 					</div>
 				</div>
 
+				{#if createBrushedIps.length}
+					<div class="rounded-xl border border-blue-500/30 bg-blue-950/20 p-4">
+						<div class="flex flex-wrap items-center justify-between gap-2">
+							<div>
+								<div class="text-sm font-medium text-blue-100">已刷到 IPv4</div>
+								<div class="mt-1 text-xs text-muted">
+									目标前缀 {createBrushedIps[0]?.targetPrefix}，已记录 {createBrushedIps.length} 个公网 IP
+								</div>
+							</div>
+							<div class="badge bg-blue-900/50 text-blue-200">
+								{createBrushedIps.some((item) => item.matched) ? '已命中' : '刷段中'}
+							</div>
+						</div>
+						<div class="mt-3 max-h-36 space-y-2 overflow-y-auto pr-1">
+							{#each createBrushedIps as item}
+								<div class="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-background/70 px-3 py-2 text-xs">
+									<span class={`badge ${item.matched ? 'bg-green-900/50 text-green-300' : 'bg-slate-800 text-slate-300'}`}>
+										{item.matched ? '命中' : '未命中'}
+									</span>
+									<span class="font-mono text-muted">#{item.attempt}/{item.maxAttempts}</span>
+									<span class="font-mono text-blue-100">{item.ip}</span>
+									{#if item.publicIpName}
+										<span class="break-all text-muted">{item.publicIpName}</span>
+									{/if}
+									<span class="ml-auto text-[11px] text-muted">{new Date(item.timestamp).toLocaleTimeString()}</span>
+								</div>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
 				<div class="max-h-80 space-y-2 overflow-y-auto pr-1">
 					{#each createProgress as item}
 						<div class="rounded-xl border border-border/70 bg-background/70 p-3">
@@ -1674,6 +1777,36 @@
 				style={`width: ${progressPercent(operationProgress)}%`}
 			></div>
 		</div>
+		{#if operationBrushedIps.length}
+			<div class="rounded-xl border border-blue-500/30 bg-blue-950/20 p-4">
+				<div class="flex flex-wrap items-center justify-between gap-2">
+					<div>
+						<div class="text-sm font-medium text-blue-100">已刷到 IPv4</div>
+						<div class="mt-1 text-xs text-muted">
+							目标前缀 {operationBrushedIps[0]?.targetPrefix}，已记录 {operationBrushedIps.length} 个公网 IP
+						</div>
+					</div>
+					<div class="badge bg-blue-900/50 text-blue-200">
+						{operationBrushedIps.some((item) => item.matched) ? '已命中' : '刷段中'}
+					</div>
+				</div>
+				<div class="mt-3 max-h-36 space-y-2 overflow-y-auto pr-1">
+					{#each operationBrushedIps as item}
+						<div class="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-background/70 px-3 py-2 text-xs">
+							<span class={`badge ${item.matched ? 'bg-green-900/50 text-green-300' : 'bg-slate-800 text-slate-300'}`}>
+								{item.matched ? '命中' : '未命中'}
+							</span>
+							<span class="font-mono text-muted">#{item.attempt}/{item.maxAttempts}</span>
+							<span class="font-mono text-blue-100">{item.ip}</span>
+							{#if item.publicIpName}
+								<span class="break-all text-muted">{item.publicIpName}</span>
+							{/if}
+							<span class="ml-auto text-[11px] text-muted">{new Date(item.timestamp).toLocaleTimeString()}</span>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/if}
 		<div class="space-y-2">
 			{#each operationProgress as item}
 				<div class="rounded-lg border border-border/70 p-3">
