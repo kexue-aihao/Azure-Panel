@@ -151,6 +151,8 @@ export type CreateVmProgressReporter = (
 	event: CreateVmProgressEvent
 ) => void | Promise<void>;
 
+export type DeleteResourceGroupProgressReporter = CreateVmProgressReporter;
+
 export type ReplaceIpResult = {
 	vmName: string;
 	resourceGroup: string;
@@ -2132,6 +2134,44 @@ export async function restartVm(clients: AzureClients, resourceGroup: string, vm
 
 export async function deleteResourceGroup(clients: AzureClients, resourceGroup: string) {
 	await clients.resources.resourceGroups.beginDeleteAndWait(resourceGroup);
+}
+
+export async function deleteResourceGroupWithProgress(
+	clients: AzureClients,
+	resourceGroup: string,
+	progress?: DeleteResourceGroupProgressReporter
+) {
+	await reportCreateVmProgress(progress, 'delete-resource-group', 'running', '正在向 Azure 提交资源组删除请求', {
+		resourceGroup
+	});
+
+	const poller = await clients.resources.resourceGroups.beginDelete(resourceGroup, {
+		updateIntervalInMs: 3000
+	});
+	await reportCreateVmProgress(progress, 'delete-submitted', 'success', 'Azure 已接受资源组删除请求', {
+		resourceGroup,
+		status: poller.getOperationState().status
+	});
+
+	let polls = 0;
+	while (!poller.isDone()) {
+		polls += 1;
+		await reportCreateVmProgress(progress, 'delete-polling', 'running', `正在删除资源组，轮询第 ${polls} 次`, {
+			resourceGroup,
+			status: poller.getOperationState().status,
+			polls
+		});
+		await poller.poll();
+		if (!poller.isDone()) await sleep(3000);
+	}
+
+	const state = poller.getOperationState();
+	if (state.error) throw state.error;
+	await reportCreateVmProgress(progress, 'delete-resource-group', 'success', 'Azure 资源组删除已完成', {
+		resourceGroup,
+		status: state.status,
+		polls
+	});
 }
 
 function parseImageReference(imageReference: string) {

@@ -1,5 +1,5 @@
 import { getUserAccountWithSelectedProxy } from '$lib/server/accounts';
-import { createAzureClients, deleteResourceGroup } from '$lib/server/azure';
+import { createAzureClients, deleteResourceGroupWithProgress } from '$lib/server/azure';
 import { insertExecutionLog } from '$lib/server/db/repo';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
@@ -76,17 +76,10 @@ export const POST: RequestHandler = async (event) => {
 			proxyProfileId: Number(body.proxy_profile_id ?? 0) || null
 		});
 		await progress?.(progressEvent('delete-auth', 'success', 'Azure 账号已连接'));
-		await progress?.(
-			progressEvent('delete-resource-group', 'running', '正在删除资源组及其中全部资源', {
-				resourceGroup,
-				vmName
-			})
-		);
-		await deleteResourceGroup(createAzureClients(account, proxy), resourceGroup);
-		await progress?.(
-			progressEvent('delete-resource-group', 'success', 'Azure 资源组删除已完成', {
-				resourceGroup
-			})
+		await deleteResourceGroupWithProgress(
+			createAzureClients(account, proxy),
+			resourceGroup,
+			progress
 		);
 		await progress?.(
 			progressEvent('delete-complete', 'success', `已删除资源组 ${resourceGroup} 及其中全部资源`, {
@@ -101,14 +94,14 @@ export const POST: RequestHandler = async (event) => {
 		const stream = new ReadableStream<Uint8Array>({
 			async start(controller) {
 				const progress = async (item: DeleteProgressEvent) => {
-					await writeDeleteLog({
+					streamMessage(controller, { type: 'progress', event: item });
+					void writeDeleteLog({
 						userId: user.id,
 						accountId,
 						resourceGroup,
 						vmName,
 						event: item
 					});
-					streamMessage(controller, { type: 'progress', event: item });
 				};
 
 				try {
@@ -131,7 +124,8 @@ export const POST: RequestHandler = async (event) => {
 		return new Response(stream, {
 			headers: {
 				'content-type': 'application/x-ndjson; charset=utf-8',
-				'cache-control': 'no-store'
+				'cache-control': 'no-store',
+				'x-accel-buffering': 'no'
 			}
 		});
 	}

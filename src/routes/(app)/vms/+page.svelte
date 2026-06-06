@@ -690,14 +690,20 @@
 			`危险操作：将完整删除资源组 ${vm.resource_group}，包括 VM ${vm.name} 以及该资源组内全部资源。确认继续吗？`
 		);
 		if (!confirmed) return;
-		const typed = prompt(`请输入资源组名称确认删除：${vm.resource_group}`);
-		if (typed !== vm.resource_group) {
-			toast = '资源组名称不匹配，已取消删除';
-			return;
-		}
 		ipActionLoading = `${vm.name}:delete`;
 		deletingVmName = vm.name;
-		deleteProgress = [];
+		deleteProgress = [
+			{
+				step: 'delete-request',
+				status: 'running',
+				message: '已确认删除，正在提交资源组删除请求',
+				detail: {
+					resourceGroup: vm.resource_group,
+					vmName: vm.name
+				},
+				timestamp: new Date().toISOString()
+			}
+		];
 		try {
 			const result = await deleteResourceGroupWithProgress({
 				account_id: accountId,
@@ -1275,6 +1281,37 @@
 	</p>
 </div>
 
+{#if deleteProgress.length}
+	<div class="card mb-4 space-y-3 p-5">
+		<div class="flex items-center justify-between gap-3">
+			<div>
+				<h2 class="text-lg font-medium">删除流程{deletingVmName ? `：${deletingVmName}` : ''}</h2>
+				<p class="mt-1 text-xs text-muted">
+					删除 VM 会通过 Azure 官方 API 删除完整资源组，耗时取决于资源组内资源数量。
+				</p>
+			</div>
+			<div class="text-xs text-muted">{deleteProgress.length} 个步骤</div>
+		</div>
+		<div class="space-y-2">
+			{#each deleteProgress as item}
+				<div class="rounded-lg border border-border/70 p-3">
+					<div class="flex flex-wrap items-center gap-2">
+						<span class={`badge ${progressBadge(item.status)}`}>{progressText(item.status)}</span>
+						<span class="font-mono text-xs text-muted">{item.step}</span>
+						<span class="text-sm">{item.message}</span>
+					</div>
+					{#if progressDetail(item.detail)}
+						<div class="mt-1 break-all text-xs text-muted">{progressDetail(item.detail)}</div>
+					{/if}
+					<div class="mt-1 text-[11px] text-muted">
+						{new Date(item.timestamp).toLocaleString()}
+					</div>
+				</div>
+			{/each}
+		</div>
+	</div>
+{/if}
+
 <div class="card overflow-x-auto">
 	<table class="w-full text-sm">
 		<thead class="text-muted">
@@ -1346,37 +1383,6 @@
 		</tbody>
 	</table>
 </div>
-
-{#if deleteProgress.length}
-	<div class="card mt-4 space-y-3 p-5">
-		<div class="flex items-center justify-between gap-3">
-			<div>
-				<h2 class="text-lg font-medium">删除流程{deletingVmName ? `：${deletingVmName}` : ''}</h2>
-				<p class="mt-1 text-xs text-muted">
-					删除 VM 会通过 Azure 官方 API 删除完整资源组，耗时取决于资源组内资源数量。
-				</p>
-			</div>
-			<div class="text-xs text-muted">{deleteProgress.length} 个步骤</div>
-		</div>
-		<div class="space-y-2">
-			{#each deleteProgress as item}
-				<div class="rounded-lg border border-border/70 p-3">
-					<div class="flex flex-wrap items-center gap-2">
-						<span class={`badge ${progressBadge(item.status)}`}>{progressText(item.status)}</span>
-						<span class="font-mono text-xs text-muted">{item.step}</span>
-						<span class="text-sm">{item.message}</span>
-					</div>
-					{#if progressDetail(item.detail)}
-						<div class="mt-1 break-all text-xs text-muted">{progressDetail(item.detail)}</div>
-					{/if}
-					<div class="mt-1 text-[11px] text-muted">
-						{new Date(item.timestamp).toLocaleString()}
-					</div>
-				</div>
-			{/each}
-		</div>
-	</div>
-{/if}
 
 {#if firewallVm}
 	<div class="card mt-4 space-y-4 p-5">
