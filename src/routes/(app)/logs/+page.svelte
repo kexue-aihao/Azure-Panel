@@ -16,6 +16,16 @@
 	};
 
 	let logs = $state<Log[]>([]);
+	const beijingTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+		timeZone: 'Asia/Shanghai',
+		year: 'numeric',
+		month: '2-digit',
+		day: '2-digit',
+		hour: '2-digit',
+		minute: '2-digit',
+		second: '2-digit',
+		hour12: false
+	});
 
 	async function load() {
 		logs = await api<Log[]>('/api/user/workflow/logs');
@@ -42,6 +52,15 @@
 		if (status === 'info') return 'bg-blue-900/50 text-blue-300';
 		return 'bg-red-900/50 text-red-300';
 	}
+
+	function formatBeijingTime(value: string) {
+		const date = new Date(value);
+		if (Number.isNaN(date.getTime())) return value || '-';
+		const parts = Object.fromEntries(
+			beijingTimeFormatter.formatToParts(date).map((part) => [part.type, part.value])
+		);
+		return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+	}
 </script>
 
 <h1 class="mb-4 text-2xl font-semibold">执行日志</h1>
@@ -50,7 +69,7 @@
 	<table class="w-full text-sm">
 		<thead class="text-muted">
 			<tr class="border-b border-border">
-				<th class="p-3 text-left">时间</th>
+				<th class="p-3 text-left">时间 (UTC+8)</th>
 				<th class="p-3 text-left">来源</th>
 				<th class="p-3 text-left">策略/账号</th>
 				<th class="p-3 text-left">资源</th>
@@ -67,7 +86,7 @@
 			{:else}
 				{#each logs as log}
 					<tr class="border-b border-border/60">
-						<td class="p-3">{new Date(log.created_at).toLocaleString()}</td>
+						<td class="p-3">{formatBeijingTime(log.created_at)}</td>
 						<td class="p-3">{sourceText(log.source)}</td>
 						<td class="p-3">
 							{#if log.policy_id}
