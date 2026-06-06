@@ -31,6 +31,18 @@ function streamMessage(controller: ReadableStreamDefaultController<Uint8Array>, 
 	controller.enqueue(new TextEncoder().encode(`${JSON.stringify(payload)}\n`));
 }
 
+function safeStreamMessage(
+	controller: ReadableStreamDefaultController<Uint8Array>,
+	payload: unknown
+) {
+	try {
+		streamMessage(controller, payload);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 async function writeDeleteLog(options: {
 	userId: number;
 	accountId: number;
@@ -93,8 +105,15 @@ export const POST: RequestHandler = async (event) => {
 	if (wantsProgressStream) {
 		const stream = new ReadableStream<Uint8Array>({
 			async start(controller) {
+				let closed = false;
+				const send = (payload: unknown) => {
+					if (closed) return false;
+					const ok = safeStreamMessage(controller, payload);
+					if (!ok) closed = true;
+					return ok;
+				};
 				const progress = async (item: DeleteProgressEvent) => {
-					streamMessage(controller, { type: 'progress', event: item });
+					send({ type: 'progress', event: item });
 					void writeDeleteLog({
 						userId: user.id,
 						accountId,
@@ -106,7 +125,7 @@ export const POST: RequestHandler = async (event) => {
 
 				try {
 					const result = await runDelete(progress);
-					streamMessage(controller, { type: 'result', result });
+					send({ type: 'result', result });
 				} catch (err) {
 					const item = progressEvent(
 						'delete-failed',
@@ -114,9 +133,14 @@ export const POST: RequestHandler = async (event) => {
 						err instanceof Error ? err.message : String(err)
 					);
 					await progress(item);
-					streamMessage(controller, { type: 'error', message: item.message });
+					send({ type: 'error', message: item.message });
 				} finally {
-					controller.close();
+					closed = true;
+					try {
+						controller.close();
+					} catch {
+						// The client may have disconnected while Azure was still deleting resources.
+					}
 				}
 			}
 		});

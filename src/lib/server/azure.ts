@@ -690,6 +690,72 @@ function parseArmJson(bodyAsText?: string | null): unknown {
 	}
 }
 
+function collectAzureErrorParts(
+	value: unknown,
+	parts: string[],
+	seen: WeakSet<object>,
+	depth = 0
+) {
+	if (value === null || value === undefined || depth > 5) return;
+	if (typeof value === 'string') {
+		const text = value.trim();
+		if (!text) return;
+		if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
+			try {
+				collectAzureErrorParts(JSON.parse(text), parts, seen, depth + 1);
+				return;
+			} catch {
+				// Fall through and keep the original text when it is not valid JSON.
+			}
+		}
+		parts.push(text);
+		return;
+	}
+	if (typeof value === 'number' || typeof value === 'boolean') {
+		parts.push(String(value));
+		return;
+	}
+	if (typeof value !== 'object') return;
+	if (seen.has(value)) return;
+	seen.add(value);
+
+	if (value instanceof Error) {
+		collectAzureErrorParts(value.message, parts, seen, depth + 1);
+	}
+
+	const record = value as Record<string, unknown>;
+	const status = record.statusCode ?? record.status;
+	if (typeof status === 'number' || typeof status === 'string') {
+		parts.push(`HTTP ${status}`);
+	}
+	for (const key of [
+		'code',
+		'message',
+		'error',
+		'details',
+		'body',
+		'bodyAsText',
+		'parsedBody',
+		'response'
+	]) {
+		collectAzureErrorParts(record[key], parts, seen, depth + 1);
+	}
+}
+
+export function formatAzureError(err: unknown): string {
+	const parts: string[] = [];
+	collectAzureErrorParts(err, parts, new WeakSet<object>());
+	const unique = Array.from(
+		new Set(
+			parts
+				.map((part) => part.trim())
+				.filter((part) => part && part !== '[object Object]')
+				.map((part) => (part.length > 800 ? `${part.slice(0, 800)}...` : part))
+		)
+	);
+	return unique.join(' | ') || (err instanceof Error ? err.message : String(err));
+}
+
 async function sendArmRequest(
 	credential: TokenCredential,
 	clientOptions: AzureClientOptions,
@@ -2672,13 +2738,18 @@ async function createDdosProtectionPlanForVm(
 	await reportCreateVmProgress(options.progress, 'ddos-plan', 'running', '创建 Azure DDoS 防护计划', {
 		planName
 	});
-	const plan = await clients.network.ddosProtectionPlans.beginCreateOrUpdateAndWait(
-		options.resourceGroup,
-		planName,
-		{
-			location: options.location
-		}
-	);
+	let plan;
+	try {
+		plan = await clients.network.ddosProtectionPlans.beginCreateOrUpdateAndWait(
+			options.resourceGroup,
+			planName,
+			{
+				location: options.location
+			}
+		);
+	} catch (err) {
+		throw new Error(`Azure DDoS 防护计划创建失败: ${formatAzureError(err)}`);
+	}
 	if (!plan.id) throw new Error('DDoS 防护计划创建失败');
 	await reportCreateVmProgress(options.progress, 'ddos-plan', 'success', 'Azure DDoS 防护计划已创建', {
 		planName,

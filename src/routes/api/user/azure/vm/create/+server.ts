@@ -2,7 +2,10 @@ import { getUserAccountWithSelectedProxy } from '$lib/server/accounts';
 import {
 	createAzureClients,
 	createVmAdvanced,
+	deleteResourceGroupWithProgress,
+	formatAzureError,
 	randomAzureResourceName,
+	type AzureClients,
 	type CreateVmOptions,
 	type CreateVmProgressEvent,
 	type CreateVmResult
@@ -50,6 +53,18 @@ function streamMessage(controller: ReadableStreamDefaultController<Uint8Array>, 
 	controller.enqueue(new TextEncoder().encode(`${JSON.stringify(payload)}\n`));
 }
 
+function safeStreamMessage(
+	controller: ReadableStreamDefaultController<Uint8Array>,
+	payload: unknown
+) {
+	try {
+		streamMessage(controller, payload);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function createProgressEvent(
 	step: string,
 	status: CreateVmProgressEvent['status'],
@@ -78,6 +93,46 @@ async function logVmCreateEvent(options: StreamContext & { event: CreateVmProgre
 	}).catch((err) => {
 		console.warn('[execution-log] failed to write VM create event:', err);
 	});
+}
+
+async function cleanupGeneratedResourceGroupOnFailure(options: {
+	clients: AzureClients | null;
+	context: StreamContext;
+	enabled: boolean;
+	reason: string;
+	progress: (event: CreateVmProgressEvent) => void | Promise<void>;
+}) {
+	if (!options.enabled || !options.clients) return null;
+	try {
+		await options.progress(
+			createProgressEvent('cleanup-resource-group', 'running', '创建失败，正在自动清理本次自动生成的资源组', {
+				resourceGroup: options.context.resourceGroup,
+				vmName: options.context.vmName,
+				reason: options.reason
+			})
+		);
+		await deleteResourceGroupWithProgress(
+			options.clients,
+			options.context.resourceGroup,
+			options.progress
+		);
+		await options.progress(
+			createProgressEvent('cleanup-resource-group', 'success', '本次自动生成的资源组已清理完成', {
+				resourceGroup: options.context.resourceGroup,
+				vmName: options.context.vmName
+			})
+		);
+		return null;
+	} catch (cleanupErr) {
+		const cleanupMessage = formatAzureError(cleanupErr);
+		await options.progress(
+			createProgressEvent('cleanup-resource-group', 'error', `自动清理资源组失败: ${cleanupMessage}`, {
+				resourceGroup: options.context.resourceGroup,
+				vmName: options.context.vmName
+			})
+		);
+		return cleanupMessage;
+	}
 }
 
 async function syncDnsAfterVmCreate(options: {
@@ -158,6 +213,7 @@ function createVmProgressStream(options: {
 	dnsBindingId: number;
 	location: string;
 	vmOptions: CreateVmOptions;
+	cleanupResourceGroupOnFailure: boolean;
 }) {
 	let heartbeat: ReturnType<typeof setInterval> | null = null;
 	let closed = false;
@@ -170,7 +226,13 @@ function createVmProgressStream(options: {
 	const stream = new ReadableStream<Uint8Array>({
 		start(controller) {
 			const send = (payload: unknown) => {
-				if (!closed) streamMessage(controller, payload);
+				if (closed) return false;
+				const ok = safeStreamMessage(controller, payload);
+				if (!ok) {
+					closed = true;
+					closeHeartbeat();
+				}
+				return ok;
 			};
 			const progress = async (event: CreateVmProgressEvent) => {
 				send({ type: 'progress', event });
@@ -187,6 +249,7 @@ function createVmProgressStream(options: {
 			}, 15000);
 
 			void (async () => {
+				let clients: AzureClients | null = null;
 				try {
 					await progress(
 						createProgressEvent('request-received', 'running', '创建请求已收到，正在连接账号和代理', {
@@ -214,7 +277,8 @@ function createVmProgressStream(options: {
 						})
 					);
 
-					const result = await createVmAdvanced(createAzureClients(account, proxy), {
+					clients = createAzureClients(account, proxy);
+					const result = await createVmAdvanced(clients, {
 						...options.vmOptions,
 						progress
 					});
@@ -228,11 +292,23 @@ function createVmProgressStream(options: {
 
 					send({ type: 'result', result: publicResult(result) });
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
+					const message = formatAzureError(err);
 					const failed = createProgressEvent('failed', 'error', message);
 					await logVmCreateEvent({ ...options.context, event: failed });
 					send({ type: 'progress', event: failed });
-					send({ type: 'error', message });
+					const cleanupMessage = await cleanupGeneratedResourceGroupOnFailure({
+						clients,
+						context: options.context,
+						enabled: options.cleanupResourceGroupOnFailure,
+						reason: message,
+						progress
+					});
+					send({
+						type: 'error',
+						message: cleanupMessage
+							? `${message}；自动清理资源组失败: ${cleanupMessage}`
+							: message
+					});
 				} finally {
 					closed = true;
 					closeHeartbeat();
@@ -269,6 +345,7 @@ export const POST: RequestHandler = async (event) => {
 	const requestedVmName = String(body.vm_name ?? '').trim();
 	const resourceGroup = requestedResourceGroup || randomAzureResourceName('rg-azp', 64);
 	const vmName = requestedVmName || randomAzureResourceName('vm-azp', 48);
+	const cleanupResourceGroupOnFailure = !requestedResourceGroup;
 	const adminPassword = String(body.admin_password ?? '');
 	const dnsBindingId = Number(body.dns_binding_id ?? 0);
 	const proxyMode = String(body.proxy_mode ?? 'account');
@@ -310,39 +387,55 @@ export const POST: RequestHandler = async (event) => {
 			proxyProfileId,
 			dnsBindingId,
 			location,
-			vmOptions
+			vmOptions,
+			cleanupResourceGroupOnFailure
 		});
 	}
 
+	let clients: AzureClients | null = null;
+	const logProgress = (progressEvent: CreateVmProgressEvent) =>
+		logVmCreateEvent({ ...context, event: progressEvent });
 	try {
 		const { account, proxy } = await getUserAccountWithSelectedProxy(user.id, accountId, {
 			clientIp,
 			proxyMode,
 			proxyProfileId
 		});
-		const result = await createVmAdvanced(createAzureClients(account, proxy), {
+		clients = createAzureClients(account, proxy);
+		const result = await createVmAdvanced(clients, {
 			...vmOptions,
-			progress: (progressEvent) => logVmCreateEvent({ ...context, event: progressEvent })
+			progress: logProgress
 		});
 		await syncDnsAfterVmCreate({
 			userId: user.id,
 			accountId,
 			bindingId: dnsBindingId,
 			result,
-			progress: (progressEvent) => logVmCreateEvent({ ...context, event: progressEvent })
+			progress: logProgress
 		});
 		return ok(publicResult(result));
 	} catch (err) {
+		const message = formatAzureError(err);
 		await insertExecutionLog({
 			userId: user.id,
 			accountId,
 			source: 'vm_create',
 			action: 'failed',
 			status: 'error',
-			message: err instanceof Error ? err.message : String(err),
+			message,
 			resourceGroup,
 			vmName
 		}).catch((logErr) => console.warn('[execution-log] failed to write VM create error:', logErr));
-		return fail(err instanceof Error ? err.message : String(err), 500);
+		const cleanupMessage = await cleanupGeneratedResourceGroupOnFailure({
+			clients,
+			context,
+			enabled: cleanupResourceGroupOnFailure,
+			reason: message,
+			progress: logProgress
+		});
+		return fail(
+			cleanupMessage ? `${message}；自动清理资源组失败: ${cleanupMessage}` : message,
+			500
+		);
 	}
 };
