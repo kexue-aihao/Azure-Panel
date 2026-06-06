@@ -25,6 +25,7 @@ export const GET: RequestHandler = async (event) => {
 				proxy_enabled: Boolean(proxy || legacyProxyLabel),
 				proxy_name: proxy?.name ?? (legacyProxyLabel ? '兼容代理' : ''),
 				proxy_label: proxy?.label ?? legacyProxyLabel,
+				proxy_source: proxy?.source ?? '',
 				remark: a.remark,
 				created_at: a.createdAt
 			};

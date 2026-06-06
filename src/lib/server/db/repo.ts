@@ -214,6 +214,39 @@ export async function insertAccount(
 	return getSqliteDb().insert(sqliteAzureAccounts).values(values as never).returning().get()!;
 }
 
+export async function updateAccountProxy(
+	userId: number,
+	accountId: number,
+	values: { proxyProfileId: number | null; proxyUrlEncrypted?: string }
+): Promise<AzureAccount | null> {
+	const updateValues = {
+		proxyProfileId: values.proxyProfileId,
+		proxyUrlEncrypted: values.proxyUrlEncrypted ?? ''
+	};
+
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.update(mysqlAzureAccounts)
+			.set(updateValues)
+			.where(and(eq(mysqlAzureAccounts.id, accountId), eq(mysqlAzureAccounts.userId, userId)));
+		const rows = await db
+			.select()
+			.from(mysqlAzureAccounts)
+			.where(and(eq(mysqlAzureAccounts.id, accountId), eq(mysqlAzureAccounts.userId, userId)));
+		return (rows[0] as AzureAccount) ?? null;
+	}
+
+	return (
+		getSqliteDb()
+			.update(sqliteAzureAccounts)
+			.set(updateValues)
+			.where(and(eq(sqliteAzureAccounts.id, accountId), eq(sqliteAzureAccounts.userId, userId)))
+			.returning()
+			.get() ?? null
+	);
+}
+
 export async function deleteAccount(accountId: number): Promise<void> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();
