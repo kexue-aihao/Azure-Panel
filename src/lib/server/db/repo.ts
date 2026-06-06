@@ -141,6 +141,27 @@ export async function updateProxyProfilePort(proxyProfileId: number, port: numbe
 		.run();
 }
 
+export async function updateProxyProfileType(
+	userId: number,
+	proxyProfileId: number,
+	type: string
+): Promise<void> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.update(mysqlProxyProfiles)
+			.set({ type })
+			.where(and(eq(mysqlProxyProfiles.id, proxyProfileId), eq(mysqlProxyProfiles.userId, userId)));
+		return;
+	}
+
+	getSqliteDb()
+		.update(sqliteProxyProfiles)
+		.set({ type })
+		.where(and(eq(sqliteProxyProfiles.id, proxyProfileId), eq(sqliteProxyProfiles.userId, userId)))
+		.run();
+}
+
 export async function deleteProxyProfile(userId: number, proxyProfileId: number): Promise<void> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();

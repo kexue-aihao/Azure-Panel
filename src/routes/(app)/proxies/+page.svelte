@@ -61,7 +61,7 @@
 	let proxies = $state<ProxyProfile[]>([]);
 	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
 	let shareLink = $state('');
-	let rawProxyType = $state<'socks5' | 'http'>('socks5');
+	let rawProxyType = $state<'auto' | 'socks5' | 'http'>('auto');
 	let managedCore = $state<'sing-box' | 'xray'>('sing-box');
 	let parsedShareLink = $state<ParsedShareLink | null>(null);
 	let saving = $state(false);
@@ -122,7 +122,7 @@
 			});
 			toast = '代理配置已添加';
 			shareLink = '';
-			rawProxyType = 'socks5';
+			rawProxyType = 'auto';
 			managedCore = 'sing-box';
 			parsedShareLink = null;
 			form = {
@@ -268,6 +268,7 @@
 			></textarea>
 			<div class="grid gap-2 sm:grid-cols-[160px_1fr]">
 				<select class="input" bind:value={rawProxyType} onchange={clearParsedShareLink}>
+					<option value="auto">自动识别 http/socks5</option>
 					<option value="socks5">裸格式按 socks5</option>
 					<option value="http">裸格式按 http</option>
 				</select>

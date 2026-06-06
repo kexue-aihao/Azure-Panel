@@ -1,8 +1,20 @@
 import net from 'node:net';
 import tls from 'node:tls';
+import {
+	createDefaultHttpClient,
+	createHttpHeaders,
+	createPipelineFromOptions,
+	createPipelineRequest,
+	type Agent,
+	type HttpClient,
+	type PipelineOptions,
+	type ProxySettings
+} from '@azure/core-rest-pipeline';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 import { decryptSecret } from './crypto';
 import type { ProxyProfile } from './db/schema';
 import { ensureManagedProxyForProfile } from './managed-proxy-core';
+import { ShadowsocksProxyAgent } from './shadowsocks-agent';
 
 export const CLIENT_IP_PROXY_HOST = '__client_ip__';
 export const PROXY_TYPES = ['http', 'https', 'socks4', 'socks4a', 'socks5', 'shadowsocks'] as const;
@@ -48,6 +60,10 @@ export type ProxyRuntimeConfig = {
 	username?: string;
 	password?: string;
 	method?: string;
+};
+
+export type ProxyClientOptions = PipelineOptions & {
+	httpClient?: HttpClient;
 };
 
 export type PublicProxyProfile = {
@@ -191,8 +207,10 @@ function safeDecode(value: string) {
 	}
 }
 
-function normalizeBareProxyType(type?: string): Extract<ProxyType, 'http' | 'socks5'> {
-	const normalized = normalizeProxyType(type || 'socks5');
+function normalizeBareProxyType(type?: string): Extract<ProxyType, 'http' | 'socks5'> | 'auto' {
+	const rawType = type?.trim().toLowerCase() || 'auto';
+	if (rawType === 'auto') return 'auto';
+	const normalized = normalizeProxyType(rawType);
 	if (normalized !== 'http' && normalized !== 'socks5') {
 		throw new Error('host:port:user:pass 格式仅支持选择 http 或 socks5');
 	}
@@ -211,7 +229,7 @@ function parseBareHostPortAuthProxy(
 	const [, host, port, username, password] = match;
 	const type = normalizeBareProxyType(rawType);
 	const proxy = normalizeProxyRuntime({
-		type,
+		type: type === 'auto' ? 'socks5' : type,
 		host,
 		port,
 		username: safeDecode(username),
@@ -370,6 +388,47 @@ export function maskProxy(proxy: ProxyRuntimeConfig): string {
 	return `${proxy.type}://${auth}${host}:${proxy.port}`;
 }
 
+function proxySettings(proxy: ProxyRuntimeConfig): ProxySettings {
+	return {
+		host: `${proxy.type}://${proxy.host}`,
+		port: proxy.port,
+		username: proxy.username,
+		password: proxy.password
+	};
+}
+
+function socksProxyAgentUrl(proxy: ProxyRuntimeConfig): string {
+	const proxyUrl = buildProxyUrl(proxy);
+	if (proxy.type === 'socks5') return proxyUrl.replace(/^socks5:\/\//i, 'socks5h://');
+	return proxyUrl;
+}
+
+function agentHttpClient(agent: Agent): HttpClient {
+	const inner = createDefaultHttpClient();
+	return {
+		async sendRequest(request) {
+			if (!request.agent) request.agent = agent;
+			return inner.sendRequest(request);
+		}
+	};
+}
+
+export function proxyClientOptions(proxy?: ProxyRuntimeConfig | null): ProxyClientOptions {
+	if (!proxy) return {};
+	if (proxy.type === 'http' || proxy.type === 'https') {
+		return { proxyOptions: proxySettings(proxy) };
+	}
+
+	const agent =
+		proxy.type === 'shadowsocks'
+			? (new ShadowsocksProxyAgent(proxy) as Agent)
+			: (new SocksProxyAgent(socksProxyAgentUrl(proxy), { timeout: 30_000 }) as Agent);
+	return {
+		agent,
+		httpClient: agentHttpClient(agent)
+	};
+}
+
 export function proxySource(profile: Pick<ProxyProfile, 'host'>): ProxySource {
 	return profile.host === CLIENT_IP_PROXY_HOST ? 'client_ip' : 'fixed';
 }
@@ -443,20 +502,86 @@ function connectWithTimeout(options: { host: string; port: number; tls: boolean;
 	});
 }
 
+const PROXY_VALIDATION_URL =
+	'https://management.azure.com/metadata/endpoints?api-version=2020-01-01';
+
+function proxyErrorMessage(proxy: ProxyRuntimeConfig, err: unknown) {
+	const message = err instanceof Error ? err.message : String(err);
+	if (/SocksClient internal error/i.test(message)) {
+		return `${proxy.type.toUpperCase()} proxy handshake failed: the port is reachable, but it did not behave like a SOCKS proxy. Please re-save it with automatic detection or HTTP type. Raw error: ${message}`;
+	}
+	if (/Socks5|SOCKS|socks/i.test(message)) {
+		return `${proxy.type.toUpperCase()} proxy handshake failed: ${message}`;
+	}
+	return `Proxy outbound validation failed: ${message}`;
+}
+
+async function requestThroughProxy(proxy: ProxyRuntimeConfig, timeoutMs: number) {
+	const options = proxyClientOptions(proxy);
+	const pipeline = createPipelineFromOptions(options);
+	const httpClient = options.httpClient ?? createDefaultHttpClient();
+	const response = await pipeline.sendRequest(
+		httpClient,
+		createPipelineRequest({
+			url: PROXY_VALIDATION_URL,
+			method: 'GET',
+			timeout: timeoutMs,
+			headers: createHttpHeaders({
+				accept: 'application/json',
+				'user-agent': 'Azure-Panel proxy validation'
+			})
+		})
+	);
+	if (response.status >= 200 && response.status < 400) return;
+	throw new Error(`Azure API connectivity check returned HTTP ${response.status}`);
+}
+
 export async function validateProxyConnection(
 	proxy: ProxyRuntimeConfig,
 	options: { clientIp?: string; timeoutMs?: number } = {}
-) {
+): Promise<ProxyRuntimeConfig> {
 	const resolved: ProxyRuntimeConfig = {
 		...proxy,
 		host: resolveClientIpProxyHost(proxy.host, options.clientIp)
 	};
-	await connectWithTimeout({
-		host: resolved.host,
-		port: resolved.port,
-		tls: resolved.type === 'https',
-		timeoutMs: options.timeoutMs ?? 5000
-	});
+	const timeoutMs = options.timeoutMs ?? 8000;
+	try {
+		await requestThroughProxy(resolved, timeoutMs);
+		return resolved;
+	} catch (err) {
+		try {
+			await connectWithTimeout({
+				host: resolved.host,
+				port: resolved.port,
+				tls: resolved.type === 'https',
+				timeoutMs: Math.min(timeoutMs, 3000)
+			});
+		} catch {
+			// Prefer the full outbound request error; the TCP check is only a fallback hint.
+		}
+		throw new Error(proxyErrorMessage(resolved, err));
+	}
+}
+
+export async function detectWorkingBareProxyProtocol(
+	proxy: ProxyRuntimeConfig,
+	options: { clientIp?: string; timeoutMs?: number } = {}
+): Promise<ProxyRuntimeConfig> {
+	const candidates: ProxyRuntimeConfig[] = [
+		{ ...proxy, type: 'socks5' },
+		{ ...proxy, type: 'http' }
+	];
+	const errors: string[] = [];
+	for (const candidate of candidates) {
+		try {
+			return await validateProxyConnection(candidate, options);
+		} catch (err) {
+			errors.push(`${candidate.type}: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+	throw new Error(
+		`Bare proxy auto-detection failed: neither SOCKS5 nor HTTP can reach Azure API. ${errors.join(' ; ')}`
+	);
 }
 
 export function publicProxyProfile(profile: ProxyProfile): PublicProxyProfile {

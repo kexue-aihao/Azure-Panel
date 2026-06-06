@@ -8,6 +8,7 @@ import {
 } from '$lib/server/managed-proxy-core';
 import {
 	CLIENT_IP_PROXY_HOST,
+	detectWorkingBareProxyProtocol,
 	normalizeProxyRuntime,
 	parseProxyShareLink,
 	publicProxyProfile,
@@ -53,7 +54,10 @@ export const POST: RequestHandler = async (event) => {
 				method: String(body.method ?? '')
 			});
 		}
-		await validateProxyConnection(proxy, { clientIp: getRequestClientIp(event) });
+		proxy =
+			parsedShareLink?.protocol === 'auto'
+				? await detectWorkingBareProxyProtocol(proxy, { clientIp: getRequestClientIp(event) })
+				: await validateProxyConnection(proxy, { clientIp: getRequestClientIp(event) });
 	} catch (err) {
 		return fail(err instanceof Error ? err.message : '代理配置无效');
 	}

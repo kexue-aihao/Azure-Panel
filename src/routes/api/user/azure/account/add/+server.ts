@@ -1,10 +1,39 @@
 import { maskProxyUrl, validateAzureCredentials, validateProxyUrl } from '$lib/server/azure';
 import { ensureClientIpProxyProfile } from '$lib/server/auto-client-ip-proxy';
 import { encryptSecret } from '$lib/server/crypto';
-import { findProxyProfileByUser, insertAccount } from '$lib/server/db/repo';
+import { findProxyProfileByUser, insertAccount, updateProxyProfileType } from '$lib/server/db/repo';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
-import { publicProxyProfile, proxyProfileToRuntimeReady } from '$lib/server/proxy';
+import {
+	parseProxyUrl,
+	publicProxyProfile,
+	proxyProfileToRuntimeReady,
+	type ProxyRuntimeConfig,
+	validateProxyConnection
+} from '$lib/server/proxy';
 import type { RequestHandler } from './$types';
+
+async function validateSavedProxyWithFallback(
+	userId: number,
+	proxyProfileId: number | null,
+	proxy: ProxyRuntimeConfig,
+	clientIp: string
+) {
+	try {
+		return await validateProxyConnection(proxy, { clientIp, timeoutMs: 10_000 });
+	} catch (err) {
+		if (proxyProfileId && proxy.type === 'socks5') {
+			const httpCandidate: ProxyRuntimeConfig = { ...proxy, type: 'http' };
+			try {
+				const validated = await validateProxyConnection(httpCandidate, { clientIp, timeoutMs: 10_000 });
+				await updateProxyProfileType(userId, proxyProfileId, 'http');
+				return validated;
+			} catch {
+				// Preserve the original SOCKS error because it best explains the selected profile.
+			}
+		}
+		throw err;
+	}
+}
 
 export const POST: RequestHandler = async (event) => {
 	const user = await requireUser(event);
@@ -44,12 +73,23 @@ export const POST: RequestHandler = async (event) => {
 		return fail(err instanceof Error ? err.message : '当前访问 IP 代理自动识别失败');
 	}
 	if (proxyProfileId && !proxyProfile) return fail('代理配置不存在');
-	const runtimeProxy = proxyProfile
+	let runtimeProxy = proxyProfile
 		? await proxyProfileToRuntimeReady(proxyProfile, { clientIp })
 		: proxyUrl;
 
 	let subscriptionId = '';
 	try {
+		if (runtimeProxy && typeof runtimeProxy !== 'string') {
+			runtimeProxy = await validateSavedProxyWithFallback(
+				user.id,
+				proxyProfile?.id ?? null,
+				runtimeProxy,
+				clientIp
+			);
+		} else if (runtimeProxy) {
+			const parsedProxy = parseProxyUrl(runtimeProxy);
+			if (parsedProxy) runtimeProxy = await validateProxyConnection(parsedProxy, { clientIp, timeoutMs: 10_000 });
+		}
 		const validation = await validateAzureCredentials(tenantId, clientId, clientSecret, runtimeProxy);
 		subscriptionId = validation.subscriptionId;
 	} catch (err) {

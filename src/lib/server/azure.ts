@@ -15,8 +15,7 @@ import {
 	createHttpHeaders,
 	createPipelineFromOptions,
 	createPipelineRequest,
-	type PipelineOptions,
-	type ProxySettings
+	type PipelineOptions
 } from '@azure/core-rest-pipeline';
 import type {
 	AccessToken,
@@ -24,14 +23,12 @@ import type {
 	TokenCredential,
 	TokenCredentialOptions
 } from '@azure/identity';
-import { SocksProxyAgent } from 'socks-proxy-agent';
 import type { AzureAccount } from './db/schema';
 import { decryptSecret } from './crypto';
-import { ShadowsocksProxyAgent } from './shadowsocks-agent';
 import {
-	buildProxyUrl,
 	maskProxy,
 	parseProxyUrl,
+	proxyClientOptions,
 	type ProxyRuntimeConfig
 } from './proxy';
 import { readEnv } from './runtime-env';
@@ -507,30 +504,8 @@ export function maskProxyUrl(proxyUrl: string): string {
 	}
 }
 
-function proxySettings(proxy: ProxyRuntimeConfig): ProxySettings {
-	return {
-		host: `${proxy.type}://${proxy.host}`,
-		port: proxy.port,
-		username: proxy.username,
-		password: proxy.password
-	};
-}
-
-function socksProxyAgentUrl(proxy: ProxyRuntimeConfig): string {
-	const proxyUrl = buildProxyUrl(proxy);
-	if (proxy.type === 'socks5') return proxyUrl.replace(/^socks5:\/\//i, 'socks5h://');
-	return proxyUrl;
-}
-
 function azureClientOptions(proxy?: ProxyRuntimeConfig | null): AzureClientOptions {
-	if (!proxy) return {};
-	if (proxy.type === 'http' || proxy.type === 'https') {
-		return { proxyOptions: proxySettings(proxy) };
-	}
-	if (proxy.type === 'shadowsocks') {
-		return { agent: new ShadowsocksProxyAgent(proxy) as TokenCredentialOptions['agent'] };
-	}
-	return { agent: new SocksProxyAgent(socksProxyAgentUrl(proxy)) as TokenCredentialOptions['agent'] };
+	return proxyClientOptions(proxy);
 }
 
 function parseTokenJson(bodyAsText?: string | null): Record<string, unknown> {
@@ -585,7 +560,7 @@ class ProxyAwareClientSecretCredential implements TokenCredential {
 		}).toString();
 
 		const pipeline = createPipelineFromOptions(this.clientOptions);
-		const httpClient = createDefaultHttpClient();
+		const httpClient = this.clientOptions.httpClient ?? createDefaultHttpClient();
 		let response;
 		try {
 			response = await pipeline.sendRequest(
@@ -728,7 +703,7 @@ async function sendArmRequest(
 	if (!token?.token) throw new Error('无法获取 Azure 访问令牌，请检查 Tenant ID、Client ID 和 Client Secret');
 
 	const pipeline = createPipelineFromOptions(clientOptions);
-	const httpClient = createDefaultHttpClient();
+	const httpClient = clientOptions.httpClient ?? createDefaultHttpClient();
 	const response = await pipeline.sendRequest(
 		httpClient,
 		createPipelineRequest({
@@ -777,7 +752,7 @@ async function discoverSubscriptionId(
 	if (!token?.token) throw new Error('无法获取 Azure 访问令牌，请检查 Tenant ID、Client ID 和 Client Secret');
 
 	const pipeline = createPipelineFromOptions(clientOptions);
-	const httpClient = createDefaultHttpClient();
+	const httpClient = clientOptions.httpClient ?? createDefaultHttpClient();
 	const subscriptions: AzureSubscription[] = [];
 	let nextLink = `${ARM_ENDPOINT}/subscriptions?api-version=${SUBSCRIPTIONS_API_VERSION}`;
 
