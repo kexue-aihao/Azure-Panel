@@ -107,15 +107,9 @@
 		const accountFields = credentialPartRaw
 			? accountPart.split('|').map((item) => item.trim())
 			: [];
-		const credentialFields = credentialPart.split(':').map((item) => item.trim());
-		if (credentialFields.length < 4) {
-			throw new Error('格式识别失败：需要包含 clientId:name:clientSecret:tenantId');
-		}
-
-		const tenantId = credentialFields.at(-1) ?? '';
-		const clientSecret = credentialFields.at(-2) ?? '';
-		const clientId = credentialFields[0] ?? '';
-		const clientName = credentialFields.slice(1, -2).join(':');
+		const keyedCredential = parseKeyedAzureCredential(credentialPart) ?? parseKeyedAzureCredential(raw);
+		const fallbackCredential = keyedCredential ?? parseColonAzureCredential(credentialPart);
+		const { tenantId, clientId, clientSecret, clientName } = fallbackCredential;
 		if (!tenantId || !clientId || !clientSecret) {
 			throw new Error('识别失败：Tenant ID、Client ID 或 Client Secret 为空');
 		}
@@ -131,6 +125,64 @@
 			clientName,
 			clientSecret,
 			tenantId
+		};
+	}
+
+	function normalizeQuickCredentialValue(value: string) {
+		return value
+			.trim()
+			.replace(/^[\s,|，]+/, '')
+			.replace(/[\s,|，]+$/, '')
+			.trim();
+	}
+
+	function parseKeyedAzureCredential(credentialPart: string) {
+		const entries = new Map<string, string>();
+		const markerPattern =
+			/\b(appId|clientId|clientSecret|password|tenantId|tenant|displayName)\s*[:：]/gi;
+		const markers = [...credentialPart.matchAll(markerPattern)];
+		if (markers.length === 0) return null;
+
+		for (let index = 0; index < markers.length; index += 1) {
+			const marker = markers[index];
+			const key = (marker[1] ?? '').trim().toLowerCase();
+			const valueStart = (marker.index ?? 0) + marker[0].length;
+			const valueEnd = markers[index + 1]?.index ?? credentialPart.length;
+			const value = normalizeQuickCredentialValue(credentialPart.slice(valueStart, valueEnd));
+			if (key) entries.set(key, value);
+		}
+
+		const clientId = entries.get('appid') ?? entries.get('clientid') ?? '';
+		const clientSecret = entries.get('password') ?? entries.get('clientsecret') ?? '';
+		const tenantId = entries.get('tenant') ?? entries.get('tenantid') ?? '';
+		if (!clientId && !clientSecret && !tenantId) return null;
+		return {
+			clientId,
+			clientName: entries.get('displayname') ?? '',
+			clientSecret,
+			tenantId
+		};
+	}
+
+	function parseColonAzureCredential(credentialPart: string) {
+		const credentialFields = credentialPart.split(':').map((item) => item.trim());
+		const firstField = credentialFields[0]?.toLowerCase() ?? '';
+		if (['appid', 'clientid', 'password', 'clientsecret', 'tenant', 'tenantid'].includes(firstField)) {
+			throw new Error(
+				'已检测到 appId/password/tenant 键值格式，但字段不完整。请确认包含 appId、password、tenant 三项'
+			);
+		}
+		if (credentialFields.length < 4) {
+			throw new Error(
+				'格式识别失败：需要包含 clientId:name:clientSecret:tenantId，或 appId/password/tenant 键值格式'
+			);
+		}
+
+		return {
+			tenantId: credentialFields.at(-1) ?? '',
+			clientSecret: credentialFields.at(-2) ?? '',
+			clientId: credentialFields[0] ?? '',
+			clientName: credentialFields.slice(1, -2).join(':')
 		};
 	}
 
@@ -461,7 +513,7 @@
 		<textarea
 			class="input min-h-36 font-mono text-xs"
 			bind:value={quickInput}
-			placeholder="邮箱|密码|区域-----clientId:azure-cli-name:clientSecret:tenantId"
+			placeholder="邮箱|密码|区域-----clientId:azure-cli-name:clientSecret:tenantId&#10;或：邮箱|密码|区域-----appId:Client ID,|displayName:名称,|password:Client Secret,|tenant:Tenant ID"
 		></textarea>
 		<div class="flex flex-wrap gap-2">
 			<button class="btn-secondary" type="button" onclick={identifyQuickInput}>
@@ -494,7 +546,8 @@
 			</div>
 		{/if}
 		<p class="text-xs text-muted">
-			示例中 `8efbc043...` 会填入 Tenant ID，`5b4d0957...` 会填入 Client ID，`SrW8Q~...` 会填入 Client Secret。
+			支持旧格式 `Client ID:名称:Client Secret:Tenant ID`，也支持 `appId:...|password:...|tenant:...`
+			格式；其中 appId 填入 Client ID，password 填入 Client Secret，tenant 填入 Tenant ID。
 		</p>
 	</section>
 	</div>
