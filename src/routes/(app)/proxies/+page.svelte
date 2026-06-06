@@ -18,45 +18,6 @@
 		managed_core: string;
 	};
 
-	type ClientIpProxyStatus = {
-		client_ip: string;
-		available: boolean;
-		message: string;
-		profile: ProxyProfile | null;
-		candidates: {
-			type: string;
-			port: number;
-			label: string;
-			available: boolean;
-			error: string;
-		}[];
-	};
-
-	type ParsedShareLink = {
-		supported: boolean;
-		managed_supported: boolean;
-		managed_core: 'sing-box' | 'xray' | '';
-		protocol: string;
-		name: string;
-		message: string;
-		proxy: {
-			type: ProxyType;
-			host: string;
-			port: number;
-			username: string;
-			password: string;
-			method: string;
-		} | null;
-		details: {
-			host?: string;
-			port?: number;
-			security?: string;
-			transport?: string;
-			sni?: string;
-			flow?: string;
-			remark?: string;
-		};
-	};
 	type ProxyAddResult =
 		| ProxyProfile
 		| {
@@ -105,13 +66,9 @@
 	};
 
 	let proxies = $state<ProxyProfile[]>([]);
-	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
-	let shareLink = $state('');
 	let proxyApiUrl = $state('');
 	let proxyApiLimit = $state(10);
 	let rawProxyType = $state<'auto' | 'socks5' | 'http'>('auto');
-	let managedCore = $state<'sing-box' | 'xray'>('sing-box');
-	let parsedShareLink = $state<ParsedShareLink | null>(null);
 	let saving = $state(false);
 	let apiImportProgress = $state({ done: 0, total: 0, imported: 0, failed: 0 });
 	let proxyChecking = $state(false);
@@ -147,26 +104,17 @@
 
 	let requiresUsername = $derived(form.type === 'http' || form.type === 'https' || form.type === 'socks5');
 	let isShadowsocks = $derived(form.type === 'shadowsocks');
-	let isManagedShareLink = $derived(Boolean(parsedShareLink?.managed_supported && shareLink.trim()));
 	let isProxyApiMode = $derived(Boolean(proxyApiUrl.trim()));
 	let customProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
 
 	async function load() {
-		const [proxyList, detected] = await Promise.all([
-			api<ProxyProfile[]>('/api/user/proxy/list'),
-			api<ClientIpProxyStatus>('/api/user/proxy/client-ip')
-		]);
-		proxies = proxyList;
-		clientIpProxy = detected;
+		proxies = await api<ProxyProfile[]>('/api/user/proxy/list');
 	}
 
 	function resetFormAfterSave() {
-		shareLink = '';
 		proxyApiUrl = '';
 		proxyApiLimit = 10;
 		rawProxyType = 'auto';
-		managedCore = 'sing-box';
-		parsedShareLink = null;
 		apiImportProgress = { done: 0, total: 0, imported: 0, failed: 0 };
 		form = {
 			name: '',
@@ -269,11 +217,9 @@
 				method: 'POST',
 				body: JSON.stringify({
 					...form,
-					share_link: shareLink,
 					proxy_api_url: proxyApiUrl,
 					proxy_api_limit: proxyApiLimit,
-					raw_type: rawProxyType,
-					managed_core: managedCore
+					raw_type: rawProxyType
 				})
 			});
 			if ('mode' in result && result.mode === 'api') {
@@ -291,52 +237,6 @@
 			saving = false;
 			if (!proxyApiUrl.trim()) apiImportProgress = { done: 0, total: 0, imported: 0, failed: 0 };
 		}
-	}
-
-	async function parseShareLink() {
-		if (!shareLink.trim()) {
-			parsedShareLink = null;
-			toast = '请先粘贴代理分享链接';
-			return;
-		}
-
-		try {
-			parsedShareLink = await api<ParsedShareLink>('/api/user/proxy/parse', {
-				method: 'POST',
-				body: JSON.stringify({ share_link: shareLink, raw_type: rawProxyType })
-			});
-			toast = parsedShareLink.message;
-			if (parsedShareLink.managed_core === 'sing-box' || parsedShareLink.managed_core === 'xray') {
-				managedCore = parsedShareLink.managed_core;
-			}
-			if (parsedShareLink.supported && parsedShareLink.managed_supported) {
-				form.name = form.name || parsedShareLink.name;
-				form.type = 'http';
-				form.source = 'fixed';
-				form.host = '';
-				form.port = 0;
-				form.method = '';
-				form.username = '';
-				form.password = '';
-			}
-			if (parsedShareLink.supported && parsedShareLink.proxy) {
-				form.name = parsedShareLink.name || form.name;
-				form.type = parsedShareLink.proxy.type;
-				form.source = 'fixed';
-				form.host = parsedShareLink.proxy.host;
-				form.port = parsedShareLink.proxy.port;
-				form.method = parsedShareLink.proxy.method;
-				form.username = parsedShareLink.proxy.username;
-				form.password = parsedShareLink.proxy.password;
-			}
-		} catch (err) {
-			parsedShareLink = null;
-			toast = err instanceof Error ? err.message : '分享链接识别失败';
-		}
-	}
-
-	function clearParsedShareLink() {
-		parsedShareLink = null;
 	}
 
 	async function remove(id: number) {
@@ -486,17 +386,6 @@
 		}
 	}
 
-	function usePreset(name: string, type: ProxyType, port: number) {
-		form.name = name;
-		form.type = type;
-		form.source = 'fixed';
-		form.host = '127.0.0.1';
-		form.port = port;
-		form.method = '';
-		form.username = '';
-		form.password = '';
-	}
-
 	function changeType() {
 		if (isShadowsocks) {
 			form.method ||= shadowMethods[0];
@@ -525,84 +414,8 @@
 		<div>
 			<h2 class="text-lg font-medium">添加自托管代理</h2>
 			<p class="mt-1 text-sm text-muted">
-				这里配置的是固定自托管代理，例如本机 Clash/V2rayN 或远程 HTTP/SOCKS 代理。
-				当前访问网站 IP 会由系统自动识别，不需要在这里额外添加。
-				VLESS/Reality 分享链接可由内置 sing-box/Xray 核心托管并转换为本机 HTTP 代理端口。
+				这里配置固定自托管代理，支持手动添加 HTTP/SOCKS 代理，或通过代理 API 批量导入。
 			</p>
-		</div>
-
-		<div class="grid gap-2 sm:grid-cols-3">
-			<button class="btn-secondary" type="button" onclick={() => usePreset('Clash Verge', 'http', 7890)}>
-				Clash Verge
-			</button>
-			<button class="btn-secondary" type="button" onclick={() => usePreset('Clash mi', 'http', 7890)}>
-				Clash mi
-			</button>
-			<button class="btn-secondary" type="button" onclick={() => usePreset('V2rayN', 'socks5', 10808)}>
-				V2rayN
-			</button>
-		</div>
-
-		<div class="space-y-2 rounded-lg border border-border bg-background p-3">
-			<label class="text-sm text-muted" for="share-link">代理分享链接（可选）</label>
-			<textarea
-				id="share-link"
-				class="input min-h-24 font-mono text-xs"
-				bind:value={shareLink}
-				oninput={clearParsedShareLink}
-				placeholder="支持 http://、socks5://、ss://。VLESS/Reality 可由内置 sing-box/Xray 转换为本地 HTTP 代理端口。"
-			></textarea>
-			<div class="grid gap-2 sm:grid-cols-[160px_1fr]">
-				<select class="input" bind:value={rawProxyType} onchange={clearParsedShareLink}>
-					<option value="auto">自动识别 http/socks5</option>
-					<option value="socks5">裸格式按 socks5</option>
-					<option value="http">裸格式按 http</option>
-				</select>
-				<div class="text-xs text-muted">
-					支持 us.miyaip.online:1111:用户名:密码 这种 host:port:user:pass 格式；字符串本身不带协议时用左侧选择决定。
-				</div>
-			</div>
-			<div class="flex flex-wrap items-center gap-2">
-				<button class="btn-secondary" type="button" onclick={() => void parseShareLink()}>
-					识别并填入
-				</button>
-				{#if parsedShareLink}
-					<span class={parsedShareLink.supported ? 'text-sm text-emerald-300' : 'text-sm text-yellow-300'}>
-						{parsedShareLink.protocol.toUpperCase()} / {parsedShareLink.managed_supported
-							? '内置核心托管'
-							: parsedShareLink.supported
-								? '可直接保存'
-								: '暂不支持'}
-					</span>
-				{/if}
-			</div>
-			{#if parsedShareLink?.managed_supported}
-				<div class="grid gap-2 sm:grid-cols-[150px_1fr]">
-					<select class="input" bind:value={managedCore}>
-						<option value="sing-box">sing-box</option>
-						<option value="xray">Xray</option>
-					</select>
-					<div class="text-xs text-muted">
-						保存时面板会自动准备并启动所选核心，只监听 127.0.0.1，并把该节点转换成本机 HTTP 代理。
-					</div>
-				</div>
-			{/if}
-			{#if parsedShareLink}
-				<div class="rounded-lg border border-border px-3 py-2 text-xs text-muted">
-					<div>{parsedShareLink.message}</div>
-					{#if parsedShareLink.details.host}
-						<div class="mt-1 break-all">
-							节点: {parsedShareLink.details.host}{parsedShareLink.details.port
-								? `:${parsedShareLink.details.port}`
-								: ''}
-							{parsedShareLink.details.security ? ` / ${parsedShareLink.details.security}` : ''}
-							{parsedShareLink.details.transport ? ` / ${parsedShareLink.details.transport}` : ''}
-							{parsedShareLink.details.flow ? ` / ${parsedShareLink.details.flow}` : ''}
-							{parsedShareLink.details.sni ? ` / SNI ${parsedShareLink.details.sni}` : ''}
-						</div>
-					{/if}
-				</div>
-			{/if}
 		</div>
 
 		<div class="space-y-2 rounded-lg border border-border bg-background p-3">
@@ -614,7 +427,7 @@
 				placeholder="例如 https://www.miyaip.com/api/ProxyLogic/Generate?Num=10&SessionTime=30&Server=us&Format=0&Crc=...&GenType=socks5"
 			></textarea>
 			<div class="grid gap-2 sm:grid-cols-[160px_140px_1fr]">
-				<select class="input" bind:value={rawProxyType} onchange={clearParsedShareLink}>
+				<select class="input" bind:value={rawProxyType}>
 					<option value="auto">自动识别 http/socks5</option>
 					<option value="socks5">API 返回按 socks5</option>
 					<option value="http">API 返回按 http</option>
@@ -638,16 +451,7 @@
 
 		<input class="input" bind:value={form.name} placeholder="标注或批量导入前缀" required={!isProxyApiMode} />
 
-		{#if isManagedShareLink}
-			<div class="flex flex-wrap items-center gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
-				<button class="btn-primary" type="submit" disabled={saving}>
-					{saving ? '保存中...' : '保存托管代理'}
-				</button>
-				<span class="text-xs text-emerald-200">
-					无需填写主机和端口，保存后会出现在右侧代理档案中。
-				</span>
-			</div>
-		{:else if isProxyApiMode}
+		{#if isProxyApiMode}
 			<div class="flex flex-wrap items-center gap-3 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2">
 				<button class="btn-primary" type="submit" disabled={saving}>
 					{saving ? '单线程导入中...' : '拉取 API 并单线程导入'}
@@ -721,7 +525,7 @@
 			/>
 
 			<p class="text-xs text-muted">
-				保存前会验证代理端口可连接。账号添加页可直接选择“当前访问网站 IP（自动识别）”。
+				保存前会验证代理端口可连接，验证通过后可在账号、开机和补机流程中选择使用。
 			</p>
 			<button class="btn-primary" type="submit" disabled={saving}>
 				{saving ? '提交中...' : proxyApiUrl.trim() ? '拉取 API 并批量导入' : '验证并提交'}
@@ -792,23 +596,6 @@
 					<td class="p-3 text-muted">-</td>
 					<td class="p-3 text-muted">-</td>
 					<td class="p-3 text-muted">默认可选</td>
-				</tr>
-				<tr class="border-b border-border/60">
-					<td class="p-3 font-medium">当前访问网站 IP</td>
-					<td class="p-3 text-muted">AUTO</td>
-					<td class="p-3 text-muted">{clientIpProxy?.client_ip || '识别中'}</td>
-					<td class="p-3 text-muted">
-						{clientIpProxy?.profile ? clientIpProxy.profile.port : '自动探测'}
-					</td>
-					<td class="p-3 text-muted">无</td>
-					<td class="p-3 {clientIpProxy?.available ? 'text-emerald-300' : 'text-muted'}">
-						<div>{clientIpProxy?.message ?? '正在识别'}</div>
-						{#if clientIpProxy?.candidates?.length}
-							<div class="mt-1 max-w-[360px] text-xs text-muted">
-								已尝试：{clientIpProxy.candidates.map((candidate) => candidate.label).join('、')}
-							</div>
-						{/if}
-					</td>
 				</tr>
 				{#if customProxies.length === 0}
 					<tr>
