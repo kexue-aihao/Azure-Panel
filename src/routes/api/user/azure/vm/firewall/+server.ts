@@ -6,6 +6,12 @@ import {
 	upsertVmFirewallRule
 } from '$lib/server/azure';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
+import {
+	operationProgressEvent,
+	vmOperationStream,
+	wantsProgressStream,
+	writeVmOperationLog
+} from '$lib/server/vm-operation-progress';
 import type { RequestHandler } from './$types';
 
 function proxyProfileId(value: unknown) {
@@ -25,6 +31,31 @@ export const GET: RequestHandler = async (event) => {
 			proxyMode: event.url.searchParams.get('proxy_mode'),
 			proxyProfileId: proxyProfileId(event.url.searchParams.get('proxy_profile_id'))
 		});
+
+		if (wantsProgressStream(event.request)) {
+			return vmOperationStream({
+				errorStep: 'firewall-list-failed',
+				onProgress: (progressEvent) =>
+					writeVmOperationLog({
+						userId: user.id,
+						accountId,
+						source: 'vm_firewall',
+						resourceGroup,
+						vmName,
+						event: progressEvent
+					}),
+				run: async (progress) => {
+					await progress(
+						operationProgressEvent('firewall-auth', 'success', 'Azure 账号已连接，准备读取防火墙策略', {
+							resourceGroup,
+							vmName
+						})
+					);
+					return listVmFirewallRules(createAzureClients(account, proxy), resourceGroup, vmName, progress);
+				}
+			});
+		}
+
 		return ok(await listVmFirewallRules(createAzureClients(account, proxy), resourceGroup, vmName));
 	} catch (err) {
 		return fail(err instanceof Error ? err.message : String(err), 500);
@@ -47,7 +78,7 @@ export const POST: RequestHandler = async (event) => {
 			proxyMode: String(body.proxy_mode ?? 'account'),
 			proxyProfileId: proxyProfileId(body.proxy_profile_id)
 		});
-		const rule = await upsertVmFirewallRule(createAzureClients(account, proxy), resourceGroup, vmName, {
+		const input = {
 			name: String(body.name ?? ''),
 			description: String(body.description ?? ''),
 			protocol: String(body.protocol ?? '*'),
@@ -58,7 +89,39 @@ export const POST: RequestHandler = async (event) => {
 			access: String(body.access ?? 'Allow'),
 			priority: Number(body.priority ?? 1000),
 			direction: String(body.direction ?? 'Inbound')
-		});
+		};
+
+		if (wantsProgressStream(event.request)) {
+			return vmOperationStream({
+				errorStep: 'firewall-save-failed',
+				onProgress: (progressEvent) =>
+					writeVmOperationLog({
+						userId: user.id,
+						accountId,
+						source: 'vm_firewall',
+						resourceGroup,
+						vmName,
+						event: progressEvent
+					}),
+				run: async (progress) => {
+					await progress(
+						operationProgressEvent('firewall-auth', 'success', 'Azure 账号已连接，准备保存防火墙规则', {
+							resourceGroup,
+							vmName
+						})
+					);
+					return upsertVmFirewallRule(
+						createAzureClients(account, proxy),
+						resourceGroup,
+						vmName,
+						input,
+						progress
+					);
+				}
+			});
+		}
+
+		const rule = await upsertVmFirewallRule(createAzureClients(account, proxy), resourceGroup, vmName, input);
 		return ok(rule);
 	} catch (err) {
 		return fail(err instanceof Error ? err.message : String(err), 500);
@@ -82,6 +145,38 @@ export const DELETE: RequestHandler = async (event) => {
 				body.proxy_profile_id ?? event.url.searchParams.get('proxy_profile_id')
 			)
 		});
+
+		if (wantsProgressStream(event.request)) {
+			return vmOperationStream({
+				errorStep: 'firewall-delete-failed',
+				onProgress: (progressEvent) =>
+					writeVmOperationLog({
+						userId: user.id,
+						accountId,
+						source: 'vm_firewall',
+						resourceGroup,
+						vmName,
+						event: progressEvent
+					}),
+				run: async (progress) => {
+					await progress(
+						operationProgressEvent('firewall-auth', 'success', 'Azure 账号已连接，准备删除防火墙规则', {
+							resourceGroup,
+							vmName,
+							ruleName
+						})
+					);
+					return deleteVmFirewallRule(
+						createAzureClients(account, proxy),
+						resourceGroup,
+						vmName,
+						ruleName,
+						progress
+					);
+				}
+			});
+		}
+
 		return ok(
 			await deleteVmFirewallRule(createAzureClients(account, proxy), resourceGroup, vmName, ruleName)
 		);

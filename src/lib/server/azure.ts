@@ -153,6 +153,8 @@ export type CreateVmProgressReporter = (
 
 export type DeleteResourceGroupProgressReporter = CreateVmProgressReporter;
 
+export type VmPowerAction = 'start' | 'deallocate' | 'restart';
+
 export type ReplaceIpResult = {
 	vmName: string;
 	resourceGroup: string;
@@ -2132,6 +2134,70 @@ export async function restartVm(clients: AzureClients, resourceGroup: string, vm
 	await clients.compute.virtualMachines.beginRestartAndWait(resourceGroup, vmName);
 }
 
+export async function powerVmWithProgress(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		vmName: string;
+		action: VmPowerAction;
+		progress?: CreateVmProgressReporter;
+	}
+) {
+	const labels: Record<VmPowerAction, string> = {
+		start: '开机',
+		deallocate: '关机并释放',
+		restart: '重启'
+	};
+	const step = `power-${options.action}`;
+	const label = labels[options.action];
+	await reportCreateVmProgress(options.progress, step, 'running', `正在向 Azure 提交 ${label} 请求`, {
+		resourceGroup: options.resourceGroup,
+		vmName: options.vmName
+	});
+
+	const poller =
+		options.action === 'start'
+			? await clients.compute.virtualMachines.beginStart(options.resourceGroup, options.vmName, {
+					updateIntervalInMs: 3000
+				})
+			: options.action === 'deallocate'
+				? await clients.compute.virtualMachines.beginDeallocate(options.resourceGroup, options.vmName, {
+						updateIntervalInMs: 3000
+					})
+				: await clients.compute.virtualMachines.beginRestart(options.resourceGroup, options.vmName, {
+						updateIntervalInMs: 3000
+					});
+
+	await reportCreateVmProgress(options.progress, `${step}-submitted`, 'success', `Azure 已接受 ${label} 请求`, {
+		resourceGroup: options.resourceGroup,
+		vmName: options.vmName,
+		status: poller.getOperationState().status
+	});
+
+	let polls = 0;
+	while (!poller.isDone()) {
+		polls += 1;
+		await reportCreateVmProgress(options.progress, `${step}-polling`, 'running', `${label}执行中，轮询第 ${polls} 次`, {
+			resourceGroup: options.resourceGroup,
+			vmName: options.vmName,
+			status: poller.getOperationState().status,
+			polls
+		});
+		await poller.poll();
+		if (!poller.isDone()) await sleep(3000);
+	}
+
+	const state = poller.getOperationState();
+	if (state.error) throw state.error;
+	await reportCreateVmProgress(options.progress, step, 'success', `${label}操作已完成`, {
+		resourceGroup: options.resourceGroup,
+		vmName: options.vmName,
+		status: state.status,
+		polls
+	});
+	return { message: `${label}操作已完成: ${options.vmName}` };
+}
+
 export async function deleteResourceGroup(clients: AzureClients, resourceGroup: string) {
 	await clients.resources.resourceGroups.beginDeleteAndWait(resourceGroup);
 }
@@ -2632,7 +2698,7 @@ async function ensureVmNetworkSecurityGroup(
 	clients: AzureClients,
 	resourceGroup: string,
 	vmName: string,
-	options: { createIfMissing?: boolean } = {}
+	options: { createIfMissing?: boolean; progress?: CreateVmProgressReporter } = {}
 ): Promise<{ resourceGroup: string; name: string; id: string } | null> {
 	const { vmLocation, nicResourceGroup, nicName, nic } = await getPrimaryNicAndIPv4Config(
 		clients,
@@ -2643,6 +2709,11 @@ async function ensureVmNetworkSecurityGroup(
 	const existingNsgName = parseResourceName(existingNsgId);
 	const existingNsgResourceGroup = parseResourceGroup(existingNsgId);
 	if (existingNsgName && existingNsgResourceGroup) {
+		await reportCreateVmProgress(options.progress, 'firewall-nsg', 'success', 'VM 已绑定网络安全组', {
+			networkSecurityGroup: existingNsgName,
+			networkSecurityGroupResourceGroup: existingNsgResourceGroup,
+			vmName
+		});
 		return {
 			resourceGroup: existingNsgResourceGroup,
 			name: existingNsgName,
@@ -2652,6 +2723,11 @@ async function ensureVmNetworkSecurityGroup(
 	if (!options.createIfMissing) return null;
 
 	const nsgName = resourceName(vmName, 'nsg', 80);
+	await reportCreateVmProgress(options.progress, 'firewall-nsg-create', 'running', 'VM 尚未绑定 NSG，正在创建网络安全组', {
+		networkSecurityGroup: nsgName,
+		resourceGroup: nicResourceGroup,
+		vmName
+	});
 	const nsg = await clients.network.networkSecurityGroups.beginCreateOrUpdateAndWait(
 		nicResourceGroup,
 		nsgName,
@@ -2660,12 +2736,24 @@ async function ensureVmNetworkSecurityGroup(
 		}
 	);
 	if (!nsg.id) throw new Error('网络安全组创建失败');
+	await reportCreateVmProgress(options.progress, 'firewall-nsg-create', 'success', '网络安全组已创建', {
+		networkSecurityGroup: nsgName,
+		resourceGroup: nicResourceGroup
+	});
 	nic.networkSecurityGroup = { id: nsg.id };
+	await reportCreateVmProgress(options.progress, 'firewall-nsg-attach', 'running', '正在把网络安全组绑定到 VM 网卡', {
+		networkSecurityGroup: nsgName,
+		nicName
+	});
 	await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
 		nicResourceGroup,
 		nicName,
 		nic
 	);
+	await reportCreateVmProgress(options.progress, 'firewall-nsg-attach', 'success', '网络安全组已绑定到 VM 网卡', {
+		networkSecurityGroup: nsgName,
+		nicName
+	});
 	return {
 		resourceGroup: nicResourceGroup,
 		name: nsgName,
@@ -2676,21 +2764,38 @@ async function ensureVmNetworkSecurityGroup(
 export async function listVmFirewallRules(
 	clients: AzureClients,
 	resourceGroup: string,
-	vmName: string
+	vmName: string,
+	progress?: CreateVmProgressReporter
 ): Promise<{ networkSecurityGroup: string; networkSecurityGroupResourceGroup: string; rules: VmFirewallRuleInfo[] }> {
-	const nsg = await ensureVmNetworkSecurityGroup(clients, resourceGroup, vmName);
+	await reportCreateVmProgress(progress, 'firewall-nsg', 'running', '读取 VM 网卡和网络安全组绑定', {
+		resourceGroup,
+		vmName
+	});
+	const nsg = await ensureVmNetworkSecurityGroup(clients, resourceGroup, vmName, { progress });
 	if (!nsg) {
+		await reportCreateVmProgress(progress, 'firewall-list', 'info', 'VM 尚未绑定网络安全组，暂无自定义防火墙规则', {
+			resourceGroup,
+			vmName
+		});
 		return {
 			networkSecurityGroup: '',
 			networkSecurityGroupResourceGroup: '',
 			rules: []
 		};
 	}
+	await reportCreateVmProgress(progress, 'firewall-list', 'running', '正在从 Azure 查询 NSG 安全规则', {
+		networkSecurityGroup: nsg.name,
+		networkSecurityGroupResourceGroup: nsg.resourceGroup
+	});
 	const rules: VmFirewallRuleInfo[] = [];
 	for await (const rule of clients.network.securityRules.list(nsg.resourceGroup, nsg.name)) {
 		rules.push(toVmFirewallRuleInfo(rule));
 	}
 	rules.sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
+	await reportCreateVmProgress(progress, 'firewall-list', 'success', '防火墙规则已加载', {
+		networkSecurityGroup: nsg.name,
+		ruleCount: rules.length
+	});
 	return {
 		networkSecurityGroup: nsg.name,
 		networkSecurityGroupResourceGroup: nsg.resourceGroup,
@@ -2702,16 +2807,28 @@ export async function upsertVmFirewallRule(
 	clients: AzureClients,
 	resourceGroup: string,
 	vmName: string,
-	input: VmFirewallRuleInput
+	input: VmFirewallRuleInput,
+	progress?: CreateVmProgressReporter
 ): Promise<VmFirewallRuleInfo> {
 	const destinationPortRange = normalizeSecurityPortRange(input.destinationPortRange);
 	const sourcePortRange = normalizeSecurityPortRange(input.sourcePortRange, '*');
 	const name = normalizeSecurityRuleName(input.name, destinationPortRange);
+	await reportCreateVmProgress(progress, 'firewall-rule-prepare', 'running', '校验并整理防火墙规则参数', {
+		ruleName: name,
+		destinationPortRange,
+		vmName
+	});
 	const nsg = await ensureVmNetworkSecurityGroup(clients, resourceGroup, vmName, {
-		createIfMissing: true
+		createIfMissing: true,
+		progress
 	});
 	if (!nsg) throw new Error('网络安全组创建失败');
-	const rule = await clients.network.securityRules.beginCreateOrUpdateAndWait(
+	await reportCreateVmProgress(progress, 'firewall-rule-upsert', 'running', '正在向 Azure 提交防火墙规则', {
+		networkSecurityGroup: nsg.name,
+		ruleName: name,
+		destinationPortRange
+	});
+	const poller = await clients.network.securityRules.beginCreateOrUpdate(
 		nsg.resourceGroup,
 		nsg.name,
 		name,
@@ -2726,8 +2843,30 @@ export async function upsertVmFirewallRule(
 			access: normalizeSecurityAccess(input.access),
 			priority: normalizeSecurityPriority(input.priority),
 			direction: normalizeSecurityDirection(input.direction)
-		}
+		},
+		{ updateIntervalInMs: 2000 }
 	);
+	let polls = 0;
+	while (!poller.isDone()) {
+		polls += 1;
+		await reportCreateVmProgress(progress, 'firewall-rule-polling', 'running', `防火墙规则下发中，轮询第 ${polls} 次`, {
+			networkSecurityGroup: nsg.name,
+			ruleName: name,
+			status: poller.getOperationState().status,
+			polls
+		});
+		await poller.poll();
+		if (!poller.isDone()) await sleep(2000);
+	}
+	const state = poller.getOperationState();
+	if (state.error) throw state.error;
+	const rule = await clients.network.securityRules.get(nsg.resourceGroup, nsg.name, name);
+	await reportCreateVmProgress(progress, 'firewall-rule-upsert', 'success', '防火墙规则已保存并生效', {
+		networkSecurityGroup: nsg.name,
+		ruleName: name,
+		status: state.status,
+		polls
+	});
 	return toVmFirewallRuleInfo(rule);
 }
 
@@ -2735,13 +2874,44 @@ export async function deleteVmFirewallRule(
 	clients: AzureClients,
 	resourceGroup: string,
 	vmName: string,
-	ruleName: string
+	ruleName: string,
+	progress?: CreateVmProgressReporter
 ) {
 	const cleanName = sanitizeResourceName(ruleName.trim());
 	if (!cleanName) throw new Error('缺少规则名称');
-	const nsg = await ensureVmNetworkSecurityGroup(clients, resourceGroup, vmName);
+	await reportCreateVmProgress(progress, 'firewall-rule-delete-prepare', 'running', '校验防火墙规则并读取 NSG', {
+		ruleName: cleanName,
+		vmName
+	});
+	const nsg = await ensureVmNetworkSecurityGroup(clients, resourceGroup, vmName, { progress });
 	if (!nsg) throw new Error('VM 尚未绑定网络安全组');
-	await clients.network.securityRules.beginDeleteAndWait(nsg.resourceGroup, nsg.name, cleanName);
+	await reportCreateVmProgress(progress, 'firewall-rule-delete', 'running', '正在向 Azure 提交删除防火墙规则请求', {
+		networkSecurityGroup: nsg.name,
+		ruleName: cleanName
+	});
+	const poller = await clients.network.securityRules.beginDelete(nsg.resourceGroup, nsg.name, cleanName, {
+		updateIntervalInMs: 2000
+	});
+	let polls = 0;
+	while (!poller.isDone()) {
+		polls += 1;
+		await reportCreateVmProgress(progress, 'firewall-rule-delete-polling', 'running', `防火墙规则删除中，轮询第 ${polls} 次`, {
+			networkSecurityGroup: nsg.name,
+			ruleName: cleanName,
+			status: poller.getOperationState().status,
+			polls
+		});
+		await poller.poll();
+		if (!poller.isDone()) await sleep(2000);
+	}
+	const state = poller.getOperationState();
+	if (state.error) throw state.error;
+	await reportCreateVmProgress(progress, 'firewall-rule-delete', 'success', '防火墙规则已删除', {
+		networkSecurityGroup: nsg.name,
+		ruleName: cleanName,
+		status: state.status,
+		polls
+	});
 	return { networkSecurityGroup: nsg.name, ruleName: cleanName };
 }
 
@@ -3021,8 +3191,13 @@ export async function createVmSimple(
 export async function replaceVmPublicIPv4(
 	clients: AzureClients,
 	resourceGroup: string,
-	vmName: string
+	vmName: string,
+	progress?: CreateVmProgressReporter
 ): Promise<ReplaceIpResult> {
+	await reportCreateVmProgress(progress, 'replace-ip-prepare', 'running', '读取 VM 网卡和当前 IPv4 配置', {
+		resourceGroup,
+		vmName
+	});
 	const { vmLocation, nicResourceGroup, nicName, nic, ipConfig } = await getPrimaryNicAndIPv4Config(
 		clients,
 		resourceGroup,
@@ -3036,15 +3211,25 @@ export async function replaceVmPublicIPv4(
 				.get(oldPublicIpResourceGroup, oldPublicIpName)
 				.catch(() => null)
 		: null;
+	await reportCreateVmProgress(progress, 'replace-ip-create', 'running', '创建新的 IPv4 公网 IP', {
+		resourceGroup: nicResourceGroup,
+		vmName,
+		oldPublicIPv4: oldPublicIp?.ipAddress ?? ''
+	});
 	const created = await createMatchingIPv4PublicIp(clients, {
 		resourceGroup: nicResourceGroup,
 		location: vmLocation,
 		vmName,
-		nameSalt: String(Date.now())
+		nameSalt: String(Date.now()),
+		progress
 	});
 	if (!created.pip.id) throw new Error('新公网 IPv4 创建失败');
 
 	try {
+		await reportCreateVmProgress(progress, 'replace-ip-attach', 'running', '绑定新的 IPv4 到网卡', {
+			nicName,
+			publicIpName: parseResourceName(created.pip.id)
+		});
 		await attachPublicIpToNic(clients, {
 			nicResourceGroup,
 			nicName,
@@ -3056,6 +3241,9 @@ export async function replaceVmPublicIPv4(
 		await deletePublicIpById(clients, created.pip.id);
 		throw err;
 	}
+	await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
+		oldPublicIpName
+	});
 	await deletePublicIpById(clients, oldPublicIpId);
 
 	const fresh = await waitForPublicIpAddress(
@@ -3063,6 +3251,10 @@ export async function replaceVmPublicIPv4(
 		nicResourceGroup,
 		parseResourceName(created.pip.id)
 	);
+	await reportCreateVmProgress(progress, 'replace-ip-complete', 'success', 'IPv4 更换完成', {
+		oldPublicIPv4: oldPublicIp?.ipAddress ?? '',
+		publicIPv4: fresh.ipAddress ?? created.pip.ipAddress ?? ''
+	});
 	return {
 		vmName,
 		resourceGroup,
@@ -3079,11 +3271,17 @@ export async function brushVmPublicIPv4Prefix(
 		vmName: string;
 		ipPrefix: string;
 		maxAttempts?: number;
+		progress?: CreateVmProgressReporter;
 	}
 ): Promise<BrushIpResult> {
 	const targetPrefix = normalizeIpPrefix(options.ipPrefix);
 	if (!targetPrefix) throw new Error('缺少 IPv4 前缀');
 
+	await reportCreateVmProgress(options.progress, 'brush-ip-prepare', 'running', '读取 VM 网卡和当前 IPv4 配置', {
+		resourceGroup: options.resourceGroup,
+		vmName: options.vmName,
+		targetPrefix
+	});
 	const { vmLocation, nicResourceGroup, nicName, nic, ipConfig } = await getPrimaryNicAndIPv4Config(
 		clients,
 		options.resourceGroup,
@@ -3103,11 +3301,17 @@ export async function brushVmPublicIPv4Prefix(
 		vmName: options.vmName,
 		targetPrefix,
 		maxAttempts: options.maxAttempts,
-		nameSalt: String(Date.now())
+		nameSalt: String(Date.now()),
+		progress: options.progress
 	});
 	if (!created.pip.id) throw new Error('匹配公网 IPv4 创建失败');
 
 	try {
+		await reportCreateVmProgress(options.progress, 'brush-ip-attach', 'running', '绑定命中的 IPv4 到网卡', {
+			nicName,
+			publicIpName: parseResourceName(created.pip.id),
+			attempts: created.attempts
+		});
 		await attachPublicIpToNic(clients, {
 			nicResourceGroup,
 			nicName,
@@ -3119,6 +3323,9 @@ export async function brushVmPublicIPv4Prefix(
 		await deletePublicIpById(clients, created.pip.id);
 		throw err;
 	}
+	await reportCreateVmProgress(options.progress, 'brush-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
+		oldPublicIpName
+	});
 	await deletePublicIpById(clients, oldPublicIpId);
 
 	const fresh = await waitForPublicIpAddress(
@@ -3126,6 +3333,11 @@ export async function brushVmPublicIPv4Prefix(
 		nicResourceGroup,
 		parseResourceName(created.pip.id)
 	);
+	await reportCreateVmProgress(options.progress, 'brush-ip-complete', 'success', '刷 IPv4 段完成', {
+		publicIPv4: fresh.ipAddress ?? created.pip.ipAddress ?? '',
+		targetPrefix,
+		attempts: created.attempts
+	});
 	return {
 		vmName: options.vmName,
 		resourceGroup: options.resourceGroup,

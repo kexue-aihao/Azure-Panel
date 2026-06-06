@@ -97,6 +97,10 @@
 		detail?: Record<string, string | number | boolean | null>;
 		timestamp: string;
 	};
+	type OperationStreamMessage<T> =
+		| { type: 'progress'; event: CreateProgressEvent }
+		| { type: 'result'; result: T }
+		| { type: 'error'; message: string };
 	type CreateStreamMessage =
 		| { type: 'progress'; event: CreateProgressEvent }
 		| {
@@ -140,6 +144,9 @@
 	let createProgress = $state<CreateProgressEvent[]>([]);
 	let deleteProgress = $state<CreateProgressEvent[]>([]);
 	let deletingVmName = $state('');
+	let operationProgress = $state<CreateProgressEvent[]>([]);
+	let operationTitle = $state('');
+	let operationTarget = $state('');
 	let firewallVm = $state<Vm | null>(null);
 	let firewallRules = $state<FirewallRule[]>([]);
 	let firewallNsg = $state('');
@@ -281,6 +288,9 @@
 		imageError = '';
 		createProgress = [];
 		deleteProgress = [];
+		operationProgress = [];
+		operationTitle = '';
+		operationTarget = '';
 		firewallVm = null;
 		firewallRules = [];
 		firewallNsg = '';
@@ -312,6 +322,118 @@
 		deleteProgress = deleteProgress.map((item, itemIndex) =>
 			itemIndex === index ? { ...item, ...event } : item
 		);
+	}
+
+	function mergeOperationProgress(event: CreateProgressEvent) {
+		const index = operationProgress.findIndex((item) => item.step === event.step);
+		if (index === -1) {
+			operationProgress = [...operationProgress, event];
+			return;
+		}
+		operationProgress = operationProgress.map((item, itemIndex) =>
+			itemIndex === index ? { ...item, ...event } : item
+		);
+	}
+
+	function progressPercent(progress: CreateProgressEvent[]) {
+		if (progress.length === 0) return 0;
+		if (progress.some((item) => item.status === 'error')) return 100;
+		if (progress.some((item) => item.step.endsWith('complete') && item.status === 'success')) return 100;
+		if (progress.some((item) => item.step === 'operation-complete' && item.status === 'success')) return 100;
+		if (progress.length > 0 && progress.every((item) => item.status !== 'running')) return 100;
+		const complete = progress.filter((item) => item.status === 'success' || item.status === 'info').length;
+		return Math.min(95, Math.max(8, Math.round((complete / Math.max(progress.length, 1)) * 100)));
+	}
+
+	function progressTone(progress: CreateProgressEvent[]) {
+		if (progress.some((item) => item.status === 'error')) return 'bg-red-500';
+		if (progress.length > 0 && progress.every((item) => item.status !== 'running')) return 'bg-green-500';
+		return 'bg-primary';
+	}
+
+	function beginOperationProgress(title: string, target: string) {
+		operationTitle = title;
+		operationTarget = target;
+		operationProgress = [
+			{
+				step: 'request',
+				status: 'running',
+				message: '正在提交操作请求',
+				timestamp: new Date().toISOString()
+			}
+		];
+	}
+
+	function failOperationProgress(message: string) {
+		mergeOperationProgress({
+			step: 'operation-failed',
+			status: 'error',
+			message,
+			timestamp: new Date().toISOString()
+		});
+	}
+
+	function vmActionBusy(vmName: string) {
+		return ipActionLoading.startsWith(`${vmName}:`);
+	}
+
+	async function requestOperationWithProgress<T>(
+		path: string,
+		options: { method?: string; body?: Record<string, unknown> } = {}
+	) {
+		const token = localStorage.getItem('token');
+		const response = await fetch(path, {
+			method: options.method ?? 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'application/x-ndjson',
+				...(token ? { Authorization: `Bearer ${token}` } : {})
+			},
+			...(options.body ? { body: JSON.stringify(options.body) } : {})
+		});
+		if (!response.ok) {
+			const body = await response.json().catch(() => null);
+			throw new Error(body?.message ?? `操作请求失败 (${response.status})`);
+		}
+		if (!response.body) throw new Error('浏览器不支持读取操作进度流');
+		mergeOperationProgress({
+			step: 'request',
+			status: 'success',
+			message: '操作请求已提交，正在等待 Azure 返回进度',
+			timestamp: new Date().toISOString()
+		});
+
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = '';
+		let result: T | null = null;
+
+		while (true) {
+			const { value, done } = await reader.read();
+			buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+			const lines = buffer.split('\n');
+			buffer = lines.pop() ?? '';
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				const message = JSON.parse(line) as OperationStreamMessage<T>;
+				if (message.type === 'progress') {
+					mergeOperationProgress(message.event);
+				} else if (message.type === 'result') {
+					result = message.result;
+				} else if (message.type === 'error') {
+					throw new Error(message.message);
+				}
+			}
+			if (done) break;
+		}
+		if (!result) throw new Error('操作流程结束但未返回结果');
+		mergeOperationProgress({
+			step: 'operation-complete',
+			status: 'success',
+			message: '操作流程已完成',
+			timestamp: new Date().toISOString()
+		});
+		return result;
 	}
 
 	function progressBadge(status: CreateProgressStatus) {
@@ -690,22 +812,34 @@
 
 	async function power(action: 'on' | 'off' | 'restart', vm: Vm) {
 		if (!accountId) return;
+		const actionLabels = {
+			on: '开机',
+			off: '关机',
+			restart: '重启'
+		};
+		ipActionLoading = `${vm.name}:power:${action}`;
+		beginOperationProgress(`VM ${actionLabels[action]}`, vm.name);
 		try {
-			await api(`/api/user/azure/vm/power/${action}`, {
-				method: 'POST',
-				body: JSON.stringify({
-					account_id: accountId,
-					...proxyPayload(),
-					resource_group: vm.resource_group,
-					vm_name: vm.name
-				})
-			});
-			toast = `已触发 ${vm.name} 操作`;
-			setTimeout(() => {
-				void loadVms();
-			}, 1500);
+			const result = await requestOperationWithProgress<{ message: string }>(
+				`/api/user/azure/vm/power/${action}`,
+				{
+					method: 'POST',
+					body: {
+						account_id: accountId,
+						...proxyPayload(),
+						resource_group: vm.resource_group,
+						vm_name: vm.name
+					}
+				}
+			);
+			toast = result.message || `${vm.name} ${actionLabels[action]}完成`;
+			await loadVms();
 		} catch (err) {
-			toast = err instanceof Error ? err.message : '操作失败';
+			const message = err instanceof Error ? err.message : '操作失败';
+			failOperationProgress(message);
+			toast = message;
+		} finally {
+			ipActionLoading = '';
 		}
 	}
 
@@ -757,23 +891,26 @@
 		if (!accountId) return;
 		if (!confirm(`确认给 ${vm.name} 更换公网 IPv4 吗？此操作可能造成短暂网络中断。`)) return;
 		ipActionLoading = `${vm.name}:replace`;
+		beginOperationProgress('更换公网 IPv4', vm.name);
 		try {
-			const result = await api<{ public_ipv4: string; old_public_ipv4: string }>(
+			const result = await requestOperationWithProgress<{ public_ipv4: string; old_public_ipv4: string }>(
 				'/api/user/azure/vm/ip/replace',
 				{
 					method: 'POST',
-					body: JSON.stringify({
+					body: {
 						account_id: accountId,
 						...proxyPayload(),
 						resource_group: vm.resource_group,
 						vm_name: vm.name
-					})
+					}
 				}
 			);
 			toast = `${vm.name} 已更换 IPv4：${result.old_public_ipv4 || '-'} -> ${result.public_ipv4 || '-'}`;
 			await loadVms();
 		} catch (err) {
-			toast = err instanceof Error ? err.message : '换 IP 失败';
+			const message = err instanceof Error ? err.message : '换 IP 失败';
+			failOperationProgress(message);
+			toast = message;
 		} finally {
 			ipActionLoading = '';
 		}
@@ -790,25 +927,28 @@
 		);
 		if (!ok) return;
 		ipActionLoading = `${vm.name}:brush`;
+		beginOperationProgress(`刷 IPv4 段 ${brushIpPrefix}`, vm.name);
 		try {
-			const result = await api<{ public_ipv4: string; attempts: number }>(
+			const result = await requestOperationWithProgress<{ public_ipv4: string; attempts: number }>(
 				'/api/user/azure/vm/ip/brush',
 				{
 					method: 'POST',
-					body: JSON.stringify({
+					body: {
 						account_id: accountId,
 						...proxyPayload(),
 						resource_group: vm.resource_group,
 						vm_name: vm.name,
 						ip_prefix: brushIpPrefix,
 						max_attempts: Number(brushMaxAttempts)
-					})
+					}
 				}
 			);
 			toast = `${vm.name} 已匹配 IPv4 ${result.public_ipv4}，尝试 ${result.attempts} 次`;
 			await loadVms();
 		} catch (err) {
-			toast = err instanceof Error ? err.message : '刷 IP 失败';
+			const message = err instanceof Error ? err.message : '刷 IP 失败';
+			failOperationProgress(message);
+			toast = message;
 		} finally {
 			ipActionLoading = '';
 		}
@@ -844,9 +984,11 @@
 		};
 	}
 
-	async function loadFirewallRules(vm = firewallVm) {
+	async function loadFirewallRules(vm = firewallVm, options: { showProgress?: boolean } = {}) {
 		if (!accountId || !vm) return;
 		firewallLoading = true;
+		const showProgress = options.showProgress ?? true;
+		if (showProgress) beginOperationProgress('加载防火墙策略', vm.name);
 		try {
 			const params = new URLSearchParams({
 				account_id: String(accountId),
@@ -854,14 +996,23 @@
 				vm_name: vm.name
 			});
 			appendProxyParams(params);
-			const result = await api<FirewallRuleResponse>(`/api/user/azure/vm/firewall?${params}`);
+			const result = showProgress
+				? await requestOperationWithProgress<FirewallRuleResponse>(
+						`/api/user/azure/vm/firewall?${params}`,
+						{
+							method: 'GET'
+						}
+					)
+				: await api<FirewallRuleResponse>(`/api/user/azure/vm/firewall?${params}`);
 			firewallVm = vm;
 			firewallRules = result.rules ?? [];
 			firewallNsg = result.networkSecurityGroup;
 			firewallNsgResourceGroup = result.networkSecurityGroupResourceGroup;
 			toast = `已加载 ${vm.name} 防火墙策略`;
 		} catch (err) {
-			toast = err instanceof Error ? err.message : '防火墙策略加载失败';
+			const message = err instanceof Error ? err.message : '防火墙策略加载失败';
+			if (showProgress) failOperationProgress(message);
+			toast = message;
 		} finally {
 			firewallLoading = false;
 		}
@@ -880,23 +1031,26 @@
 		e.preventDefault();
 		if (!accountId || !firewallVm) return;
 		firewallActionLoading = 'save';
+		beginOperationProgress('保存防火墙规则', firewallVm.name);
 		try {
-			await api<FirewallRule>('/api/user/azure/vm/firewall', {
+			await requestOperationWithProgress<FirewallRule>('/api/user/azure/vm/firewall', {
 				method: 'POST',
-				body: JSON.stringify({
+				body: {
 					account_id: accountId,
 					...proxyPayload(),
 					resource_group: firewallVm.resource_group,
 					vm_name: firewallVm.name,
 					...firewallForm,
 					priority: Number(firewallForm.priority)
-				})
+				}
 			});
 			toast = '防火墙规则已保存';
 			resetFirewallForm();
-			await loadFirewallRules(firewallVm);
+			await loadFirewallRules(firewallVm, { showProgress: false });
 		} catch (err) {
-			toast = err instanceof Error ? err.message : '防火墙规则保存失败';
+			const message = err instanceof Error ? err.message : '防火墙规则保存失败';
+			failOperationProgress(message);
+			toast = message;
 		} finally {
 			firewallActionLoading = '';
 		}
@@ -906,21 +1060,27 @@
 		if (!accountId || !firewallVm) return;
 		if (!confirm(`确认删除防火墙规则 ${rule.name} 吗？`)) return;
 		firewallActionLoading = `delete:${rule.name}`;
+		beginOperationProgress(`删除防火墙规则 ${rule.name}`, firewallVm.name);
 		try {
-			await api('/api/user/azure/vm/firewall', {
+			await requestOperationWithProgress<{ networkSecurityGroup: string; ruleName: string }>(
+				'/api/user/azure/vm/firewall',
+				{
 				method: 'DELETE',
-				body: JSON.stringify({
+					body: {
 					account_id: accountId,
 					...proxyPayload(),
 					resource_group: firewallVm.resource_group,
 					vm_name: firewallVm.name,
 					rule_name: rule.name
-				})
-			});
+					}
+				}
+			);
 			toast = '防火墙规则已删除';
-			await loadFirewallRules(firewallVm);
+			await loadFirewallRules(firewallVm, { showProgress: false });
 		} catch (err) {
-			toast = err instanceof Error ? err.message : '防火墙规则删除失败';
+			const message = err instanceof Error ? err.message : '防火墙规则删除失败';
+			failOperationProgress(message);
+			toast = message;
 		} finally {
 			firewallActionLoading = '';
 		}
@@ -1264,6 +1424,12 @@
 					<div class="text-sm font-medium">创建流程</div>
 					<div class="text-xs text-muted">{createProgress.length} 个步骤</div>
 				</div>
+				<div class="mb-3 h-2 overflow-hidden rounded-full bg-border">
+					<div
+						class={`h-full rounded-full transition-all duration-300 ${progressTone(createProgress)}`}
+						style={`width: ${progressPercent(createProgress)}%`}
+					></div>
+				</div>
 				<div class="space-y-2">
 					{#each createProgress as item}
 						<div class="rounded-lg border border-border/70 p-3">
@@ -1318,8 +1484,53 @@
 			</div>
 			<div class="text-xs text-muted">{deleteProgress.length} 个步骤</div>
 		</div>
+		<div class="h-2 overflow-hidden rounded-full bg-border">
+			<div
+				class={`h-full rounded-full transition-all duration-300 ${progressTone(deleteProgress)}`}
+				style={`width: ${progressPercent(deleteProgress)}%`}
+			></div>
+		</div>
 		<div class="space-y-2">
 			{#each deleteProgress as item}
+				<div class="rounded-lg border border-border/70 p-3">
+					<div class="flex flex-wrap items-center gap-2">
+						<span class={`badge ${progressBadge(item.status)}`}>{progressText(item.status)}</span>
+						<span class="font-mono text-xs text-muted">{item.step}</span>
+						<span class="text-sm">{item.message}</span>
+					</div>
+					{#if progressDetail(item.detail)}
+						<div class="mt-1 break-all text-xs text-muted">{progressDetail(item.detail)}</div>
+					{/if}
+					<div class="mt-1 text-[11px] text-muted">
+						{new Date(item.timestamp).toLocaleString()}
+					</div>
+				</div>
+			{/each}
+		</div>
+	</div>
+{/if}
+
+{#if operationProgress.length}
+	<div class="card mb-4 space-y-3 p-5">
+		<div class="flex items-center justify-between gap-3">
+			<div>
+				<h2 class="text-lg font-medium">
+					{operationTitle || 'VM 操作进度'}{operationTarget ? `：${operationTarget}` : ''}
+				</h2>
+				<p class="mt-1 text-xs text-muted">
+					这些操作通过 Azure 官方 API 实时轮询，页面会持续显示提交、执行、轮询和完成状态。
+				</p>
+			</div>
+			<div class="text-xs text-muted">{operationProgress.length} 个步骤</div>
+		</div>
+		<div class="h-2 overflow-hidden rounded-full bg-border">
+			<div
+				class={`h-full rounded-full transition-all duration-300 ${progressTone(operationProgress)}`}
+				style={`width: ${progressPercent(operationProgress)}%`}
+			></div>
+		</div>
+		<div class="space-y-2">
+			{#each operationProgress as item}
 				<div class="rounded-lg border border-border/70 p-3">
 					<div class="flex flex-wrap items-center gap-2">
 						<span class={`badge ${progressBadge(item.status)}`}>{progressText(item.status)}</span>
@@ -1371,36 +1582,54 @@
 							<span class={`badge ${badge(vm.power_state)}`}>{vm.power_state}</span>
 						</td>
 						<td class="space-x-2 whitespace-nowrap p-3">
-							<button class="btn-primary" onclick={() => void power('on', vm)}>开机</button>
-							<button class="btn-secondary" onclick={() => void power('off', vm)}>关机</button>
-							<button class="btn-secondary" onclick={() => void power('restart', vm)}>重启</button>
+							<button
+								class="btn-primary"
+								onclick={() => void power('on', vm)}
+								disabled={vmActionBusy(vm.name)}
+							>
+								{ipActionLoading === `${vm.name}:power:on` ? '开机中...' : '开机'}
+							</button>
+							<button
+								class="btn-secondary"
+								onclick={() => void power('off', vm)}
+								disabled={vmActionBusy(vm.name)}
+							>
+								{ipActionLoading === `${vm.name}:power:off` ? '关机中...' : '关机'}
+							</button>
+							<button
+								class="btn-secondary"
+								onclick={() => void power('restart', vm)}
+								disabled={vmActionBusy(vm.name)}
+							>
+								{ipActionLoading === `${vm.name}:power:restart` ? '重启中...' : '重启'}
+							</button>
 							<button
 								class="btn-secondary"
 								onclick={() => void replaceIp(vm)}
-								disabled={ipActionLoading === `${vm.name}:replace`}
+								disabled={vmActionBusy(vm.name)}
 							>
-								换 IPv4
+								{ipActionLoading === `${vm.name}:replace` ? '更换中...' : '换 IPv4'}
 							</button>
 							<button
 								class="btn-secondary"
 								onclick={() => void brushIp(vm)}
-								disabled={ipActionLoading === `${vm.name}:brush`}
+								disabled={vmActionBusy(vm.name)}
 							>
-								刷 IPv4 段
+								{ipActionLoading === `${vm.name}:brush` ? '刷 IP 中...' : '刷 IPv4 段'}
 							</button>
 							<button
 								class="btn-secondary"
 								onclick={() => void openFirewall(vm)}
 								disabled={firewallLoading && firewallVm?.name === vm.name}
 							>
-								防火墙
+								{firewallLoading && firewallVm?.name === vm.name ? '加载中...' : '防火墙'}
 							</button>
 							<button
 								class="btn-danger"
 								onclick={() => void deleteVmResourceGroup(vm)}
-								disabled={ipActionLoading === `${vm.name}:delete`}
+								disabled={vmActionBusy(vm.name)}
 							>
-								删除资源组
+								{ipActionLoading === `${vm.name}:delete` ? '删除中...' : '删除资源组'}
 							</button>
 						</td>
 					</tr>
