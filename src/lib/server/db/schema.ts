@@ -47,6 +47,50 @@ export const azureAccounts = sqliteTable('azure_accounts', {
 		.$defaultFn(() => new Date())
 });
 
+export const dnsConfigs = sqliteTable('dns_configs', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	userId: integer('user_id')
+		.notNull()
+		.references(() => users.id, { onDelete: 'cascade' }),
+	name: text('name').notNull(),
+	baseUrl: text('base_url').notNull(),
+	uid: integer('uid').notNull(),
+	apiKeyEncrypted: text('api_key_encrypted').notNull(),
+	enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+	createdAt: integer('created_at', { mode: 'timestamp' })
+		.notNull()
+		.$defaultFn(() => new Date())
+});
+
+export const dnsRecordBindings = sqliteTable('dns_record_bindings', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	userId: integer('user_id')
+		.notNull()
+		.references(() => users.id, { onDelete: 'cascade' }),
+	configId: integer('config_id')
+		.notNull()
+		.references(() => dnsConfigs.id, { onDelete: 'cascade' }),
+	name: text('name').notNull(),
+	domainId: integer('domain_id').notNull(),
+	domainName: text('domain_name').notNull(),
+	subdomain: text('subdomain').notNull().default('@'),
+	recordType: text('record_type').notNull().default('A'),
+	line: text('line').notNull().default('default'),
+	ttl: integer('ttl').notNull().default(60),
+	weight: integer('weight'),
+	mx: integer('mx'),
+	remark: text('remark').default(''),
+	enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+	lastARecordId: text('last_a_record_id').default(''),
+	lastAAAARecordId: text('last_aaaa_record_id').default(''),
+	lastIpv4: text('last_ipv4').default(''),
+	lastIpv6: text('last_ipv6').default(''),
+	lastSyncedAt: integer('last_synced_at', { mode: 'timestamp' }),
+	createdAt: integer('created_at', { mode: 'timestamp' })
+		.notNull()
+		.$defaultFn(() => new Date())
+});
+
 export const workflowPolicies = sqliteTable('workflow_policies', {
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	userId: integer('user_id')
@@ -114,6 +158,8 @@ export const executionLogs = sqliteTable('execution_logs', {
 export type User = typeof users.$inferSelect;
 export type ProxyProfile = typeof proxyProfiles.$inferSelect;
 export type AzureAccount = typeof azureAccounts.$inferSelect;
+export type DnsConfig = typeof dnsConfigs.$inferSelect;
+export type DnsRecordBinding = typeof dnsRecordBindings.$inferSelect;
 export type WorkflowPolicy = typeof workflowPolicies.$inferSelect;
 export type WorkflowLog = typeof workflowLogs.$inferSelect;
 export type ExecutionLog = typeof executionLogs.$inferSelect;

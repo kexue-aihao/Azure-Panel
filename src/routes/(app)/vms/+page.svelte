@@ -17,6 +17,15 @@
 		source: 'fixed' | 'client_ip';
 		label: string;
 	};
+	type DnsBinding = {
+		id: number;
+		name: string;
+		fqdn: string;
+		record_type: string;
+		enabled: boolean;
+		last_ipv4: string;
+		last_ipv6: string;
+	};
 	type Vm = {
 		name: string;
 		resource_group: string;
@@ -99,6 +108,7 @@
 
 	let accounts = $state<Account[]>([]);
 	let proxies = $state<ProxyProfile[]>([]);
+	let dnsBindings = $state<DnsBinding[]>([]);
 	let vms = $state<Vm[]>([]);
 	let quotas = $state<Quota[]>([]);
 	let vmSizes = $state<VmSizeOption[]>([]);
@@ -149,6 +159,7 @@
 		enable_ipv6: true,
 		open_ports: '*',
 		enable_ddos_protection: false,
+		dns_binding_id: '',
 		userdata: '',
 		ip_prefix: '',
 		ip_brush_max_attempts: 30
@@ -162,6 +173,7 @@
 	const createLocationSelectId = 'create-location-select';
 	const createSizeSelectId = 'create-size-select';
 	const imageSelectId = 'image-select';
+	const dnsBindingSelectId = 'dns-binding-select';
 	const RANDOM_PASSWORD_LENGTH = 12;
 	const PASSWORD_LOWER = 'abcdefghijklmnopqrstuvwxyz';
 	const PASSWORD_UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -331,12 +343,14 @@
 	}
 
 	async function loadAccounts() {
-		const [accountList, proxyList] = await Promise.all([
+		const [accountList, proxyList, bindingList] = await Promise.all([
 			api<Account[]>('/api/user/azure/account/list'),
-			api<ProxyProfile[]>('/api/user/proxy/list')
+			api<ProxyProfile[]>('/api/user/proxy/list'),
+			api<DnsBinding[]>('/api/user/dns/binding/list')
 		]);
 		accounts = accountList;
 		proxies = proxyList;
+		dnsBindings = bindingList.filter((binding) => binding.enabled);
 		syncProxySelection();
 		if (!accountId && accounts.length) accountId = accounts[0].id;
 	}
@@ -510,6 +524,7 @@
 				...createForm,
 				account_id: accountId,
 				...proxyPayload(),
+				dns_binding_id: createForm.dns_binding_id ? Number(createForm.dns_binding_id) : 0,
 				ip_brush_max_attempts: Number(createForm.ip_brush_max_attempts)
 			});
 			toast = `VM ${result.name} 创建完成，IPv4=${result.public_ipv4 || '-'} IPv6=${result.public_ipv6 || '-'}，刷IP次数=${result.ip_brush_attempts}`;
@@ -973,6 +988,20 @@
 			/>
 			<p class="mt-1 text-xs text-muted">
 				创建时会同步创建 Azure 网络安全组（NSG）并绑定到网卡；默认使用 * 放行全部入站端口。
+			</p>
+		</div>
+		<div>
+			<label class="mb-1 block text-xs text-muted" for={dnsBindingSelectId}>开机后自动 DNS 解析</label>
+			<select id={dnsBindingSelectId} class="input" bind:value={createForm.dns_binding_id}>
+				<option value="">不自动解析</option>
+				{#each dnsBindings as binding}
+					<option value={String(binding.id)}>
+						{binding.name} - {binding.fqdn} ({binding.record_type})
+					</option>
+				{/each}
+			</select>
+			<p class="mt-1 text-xs text-muted">
+				可在 DNS 管理页面连接彩虹 DNS 面板并创建绑定；选择后，VM 创建成功会把公网 IP 自动同步到对应 A / AAAA 记录。
 			</p>
 		</div>
 		<label class="flex items-center gap-2 text-sm">

@@ -57,6 +57,43 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		KEY azure_accounts_user_id_idx (user_id),
 		KEY azure_accounts_proxy_profile_id_idx (proxy_profile_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS dns_configs (
+		id int NOT NULL AUTO_INCREMENT,
+		user_id int NOT NULL,
+		name varchar(120) NOT NULL,
+		base_url varchar(255) NOT NULL,
+		uid int NOT NULL,
+		api_key_encrypted text NOT NULL,
+		enabled tinyint(1) NOT NULL DEFAULT 1,
+		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (id),
+		KEY dns_configs_user_id_idx (user_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS dns_record_bindings (
+		id int NOT NULL AUTO_INCREMENT,
+		user_id int NOT NULL,
+		config_id int NOT NULL,
+		name varchar(120) NOT NULL,
+		domain_id int NOT NULL,
+		domain_name varchar(255) NOT NULL,
+		subdomain varchar(255) NOT NULL DEFAULT '@',
+		record_type varchar(16) NOT NULL DEFAULT 'A',
+		line varchar(120) NOT NULL DEFAULT 'default',
+		ttl int NOT NULL DEFAULT 60,
+		weight int NULL,
+		mx int NULL,
+		remark varchar(255) DEFAULT '',
+		enabled tinyint(1) NOT NULL DEFAULT 1,
+		last_a_record_id varchar(128) DEFAULT '',
+		last_aaaa_record_id varchar(128) DEFAULT '',
+		last_ipv4 varchar(64) DEFAULT '',
+		last_ipv6 varchar(128) DEFAULT '',
+		last_synced_at timestamp NULL DEFAULT NULL,
+		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (id),
+		KEY dns_record_bindings_user_id_idx (user_id),
+		KEY dns_record_bindings_config_id_idx (config_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS workflow_policies (
 		id int NOT NULL AUTO_INCREMENT,
 		user_id int NOT NULL,
@@ -258,6 +295,38 @@ export async function initDatabase() {
 			remark TEXT DEFAULT '',
 			created_at INTEGER NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS dns_configs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			base_url TEXT NOT NULL,
+			uid INTEGER NOT NULL,
+			api_key_encrypted TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS dns_record_bindings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			config_id INTEGER NOT NULL REFERENCES dns_configs(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			domain_id INTEGER NOT NULL,
+			domain_name TEXT NOT NULL,
+			subdomain TEXT NOT NULL DEFAULT '@',
+			record_type TEXT NOT NULL DEFAULT 'A',
+			line TEXT NOT NULL DEFAULT 'default',
+			ttl INTEGER NOT NULL DEFAULT 60,
+			weight INTEGER,
+			mx INTEGER,
+			remark TEXT DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			last_a_record_id TEXT DEFAULT '',
+			last_aaaa_record_id TEXT DEFAULT '',
+			last_ipv4 TEXT DEFAULT '',
+			last_ipv6 TEXT DEFAULT '',
+			last_synced_at INTEGER,
+			created_at INTEGER NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS workflow_policies (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -340,6 +409,9 @@ export async function initDatabase() {
 	sqlite.exec(`
 		CREATE INDEX IF NOT EXISTS proxy_profiles_user_id_idx ON proxy_profiles(user_id);
 		CREATE INDEX IF NOT EXISTS azure_accounts_proxy_profile_id_idx ON azure_accounts(proxy_profile_id);
+		CREATE INDEX IF NOT EXISTS dns_configs_user_id_idx ON dns_configs(user_id);
+		CREATE INDEX IF NOT EXISTS dns_record_bindings_user_id_idx ON dns_record_bindings(user_id);
+		CREATE INDEX IF NOT EXISTS dns_record_bindings_config_id_idx ON dns_record_bindings(config_id);
 		CREATE INDEX IF NOT EXISTS execution_logs_user_id_idx ON execution_logs(user_id);
 		CREATE INDEX IF NOT EXISTS execution_logs_account_id_idx ON execution_logs(account_id);
 	`);

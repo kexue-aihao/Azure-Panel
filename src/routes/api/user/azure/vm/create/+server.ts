@@ -7,7 +7,13 @@ import {
 	type CreateVmOptions,
 	type CreateVmResult
 } from '$lib/server/azure';
-import { insertExecutionLog } from '$lib/server/db/repo';
+import {
+	findDnsBindingByUser,
+	findDnsConfigByUser,
+	insertExecutionLog,
+	updateDnsBindingSyncState
+} from '$lib/server/db/repo';
+import { createRainbowDnsClient, syncDnsBindingToIp } from '$lib/server/dns';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
@@ -37,6 +43,21 @@ function streamMessage(controller: ReadableStreamDefaultController<Uint8Array>, 
 	controller.enqueue(new TextEncoder().encode(`${JSON.stringify(payload)}\n`));
 }
 
+function createProgressEvent(
+	step: string,
+	status: CreateVmProgressEvent['status'],
+	message: string,
+	detail?: CreateVmProgressEvent['detail']
+): CreateVmProgressEvent {
+	return {
+		step,
+		status,
+		message,
+		detail,
+		timestamp: new Date().toISOString()
+	};
+}
+
 async function logVmCreateEvent(options: {
 	userId: number;
 	accountId: number;
@@ -58,6 +79,72 @@ async function logVmCreateEvent(options: {
 	});
 }
 
+async function syncDnsAfterVmCreate(options: {
+	userId: number;
+	accountId: number;
+	bindingId: number;
+	result: CreateVmResult;
+	progress?: (event: CreateVmProgressEvent) => void | Promise<void>;
+}) {
+	if (!options.bindingId) {
+		await options.progress?.(createProgressEvent('dns-sync', 'info', '未选择 DNS 自动解析，跳过同步'));
+		return;
+	}
+
+	const binding = await findDnsBindingByUser(options.userId, options.bindingId);
+	if (!binding || !binding.enabled) {
+		await options.progress?.(createProgressEvent('dns-sync', 'info', 'DNS 自动解析绑定不存在或已停用，跳过同步'));
+		return;
+	}
+	const config = await findDnsConfigByUser(options.userId, binding.configId);
+	if (!config || !config.enabled) {
+		await options.progress?.(createProgressEvent('dns-sync', 'info', 'DNS 配置不存在或已停用，跳过同步'));
+		return;
+	}
+
+	await options.progress?.(
+		createProgressEvent('dns-sync', 'running', '同步公网 IP 到彩虹 DNS 解析', {
+			binding: binding.name,
+			domain: binding.domainName,
+			subdomain: binding.subdomain,
+			ipv4: options.result.publicIPv4,
+			ipv6: options.result.publicIPv6
+		})
+	);
+
+	try {
+		const syncResult = await syncDnsBindingToIp(createRainbowDnsClient(config), binding, {
+			ipv4: options.result.publicIPv4,
+			ipv6: options.result.publicIPv6,
+			vmName: options.result.name,
+			resourceGroup: options.result.resourceGroup
+		});
+
+		await updateDnsBindingSyncState(options.userId, binding.id, {
+			lastARecordId: syncResult.lastARecordId,
+			lastAAAARecordId: syncResult.lastAAAARecordId,
+			lastIpv4: syncResult.lastIpv4,
+			lastIpv6: syncResult.lastIpv6,
+			lastSyncedAt: new Date()
+		});
+
+		await options.progress?.(
+			createProgressEvent('dns-sync', 'success', `DNS 解析已同步到 ${syncResult.fqdn}`, {
+				created: syncResult.created.join(',') || '-',
+				updated: syncResult.updated.join(',') || '-',
+				skipped: syncResult.skipped.join(',') || '-'
+			})
+		);
+	} catch (err) {
+		await options.progress?.(
+			createProgressEvent('dns-sync', 'error', err instanceof Error ? err.message : String(err), {
+				binding: binding.name,
+				domain: binding.domainName
+			})
+		);
+	}
+}
+
 export const POST: RequestHandler = async (event) => {
 	const user = await requireUser(event);
 	const body = await event.request.json();
@@ -68,6 +155,7 @@ export const POST: RequestHandler = async (event) => {
 	const resourceGroup = requestedResourceGroup || randomAzureResourceName('rg-azp', 64);
 	const vmName = requestedVmName || randomAzureResourceName('vm-azp', 48);
 	const adminPassword = String(body.admin_password ?? '');
+	const dnsBindingId = Number(body.dns_binding_id ?? 0);
 
 	if (!accountId || !location) return fail('参数不完整');
 	if (!adminPassword) return fail('缺少管理员密码');
@@ -116,6 +204,13 @@ export const POST: RequestHandler = async (event) => {
 							...vmOptions,
 							progress
 						});
+						await syncDnsAfterVmCreate({
+							userId: user.id,
+							accountId,
+							bindingId: dnsBindingId,
+							result,
+							progress
+						});
 						streamMessage(controller, { type: 'result', result: publicResult(result) });
 					} catch (err) {
 						await insertExecutionLog({
@@ -150,6 +245,20 @@ export const POST: RequestHandler = async (event) => {
 
 		const result = await createVmAdvanced(createAzureClients(account, proxy), {
 			...vmOptions,
+			progress: (progressEvent) =>
+				logVmCreateEvent({
+					userId: user.id,
+					accountId,
+					resourceGroup,
+					vmName,
+					event: progressEvent
+				})
+		});
+		await syncDnsAfterVmCreate({
+			userId: user.id,
+			accountId,
+			bindingId: dnsBindingId,
+			result,
 			progress: (progressEvent) =>
 				logVmCreateEvent({
 					userId: user.id,

@@ -2,6 +2,8 @@ import { and, desc, eq, inArray } from 'drizzle-orm';
 import { getDriver, getMysqlDb, getSqliteDb } from './index';
 import type {
 	AzureAccount,
+	DnsConfig,
+	DnsRecordBinding,
 	ExecutionLog,
 	ProxyProfile,
 	User,
@@ -10,6 +12,8 @@ import type {
 } from './schema';
 import {
 	azureAccounts as sqliteAzureAccounts,
+	dnsConfigs as sqliteDnsConfigs,
+	dnsRecordBindings as sqliteDnsRecordBindings,
 	executionLogs as sqliteExecutionLogs,
 	proxyProfiles as sqliteProxyProfiles,
 	users as sqliteUsers,
@@ -18,6 +22,8 @@ import {
 } from './schema';
 import {
 	azureAccounts as mysqlAzureAccounts,
+	dnsConfigs as mysqlDnsConfigs,
+	dnsRecordBindings as mysqlDnsRecordBindings,
 	executionLogs as mysqlExecutionLogs,
 	proxyProfiles as mysqlProxyProfiles,
 	users as mysqlUsers,
@@ -216,6 +222,231 @@ export async function deleteAccount(accountId: number): Promise<void> {
 	}
 
 	getSqliteDb().delete(sqliteAzureAccounts).where(eq(sqliteAzureAccounts.id, accountId)).run();
+}
+
+export async function listDnsConfigsByUser(userId: number): Promise<DnsConfig[]> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const rows = await db
+			.select()
+			.from(mysqlDnsConfigs)
+			.where(eq(mysqlDnsConfigs.userId, userId))
+			.orderBy(desc(mysqlDnsConfigs.id));
+		return rows as DnsConfig[];
+	}
+
+	return getSqliteDb()
+		.select()
+		.from(sqliteDnsConfigs)
+		.where(eq(sqliteDnsConfigs.userId, userId))
+		.orderBy(desc(sqliteDnsConfigs.id))
+		.all();
+}
+
+export async function findDnsConfigByUser(
+	userId: number,
+	configId: number
+): Promise<DnsConfig | null> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const rows = await db
+			.select()
+			.from(mysqlDnsConfigs)
+			.where(and(eq(mysqlDnsConfigs.id, configId), eq(mysqlDnsConfigs.userId, userId)));
+		return (rows[0] as DnsConfig) ?? null;
+	}
+
+	return (
+		getSqliteDb()
+			.select()
+			.from(sqliteDnsConfigs)
+			.where(and(eq(sqliteDnsConfigs.id, configId), eq(sqliteDnsConfigs.userId, userId)))
+			.get() ?? null
+	);
+}
+
+export async function insertDnsConfig(
+	values: Omit<DnsConfig, 'id' | 'createdAt'>
+): Promise<DnsConfig> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const result = await db.insert(mysqlDnsConfigs).values(values as never).$returningId();
+		const id = Number(result[0]?.id);
+		if (!id) throw new Error('Failed to create DNS config');
+		const rows = await db.select().from(mysqlDnsConfigs).where(eq(mysqlDnsConfigs.id, id));
+		return rows[0] as DnsConfig;
+	}
+
+	return getSqliteDb().insert(sqliteDnsConfigs).values(values as never).returning().get()!;
+}
+
+export async function updateDnsConfig(
+	userId: number,
+	configId: number,
+	values: Partial<Omit<DnsConfig, 'id' | 'userId' | 'createdAt'>>
+): Promise<DnsConfig | null> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.update(mysqlDnsConfigs)
+			.set(values as never)
+			.where(and(eq(mysqlDnsConfigs.id, configId), eq(mysqlDnsConfigs.userId, userId)));
+		const rows = await db.select().from(mysqlDnsConfigs).where(eq(mysqlDnsConfigs.id, configId));
+		return (rows[0] as DnsConfig) ?? null;
+	}
+
+	return (
+		getSqliteDb()
+			.update(sqliteDnsConfigs)
+			.set(values as never)
+			.where(and(eq(sqliteDnsConfigs.id, configId), eq(sqliteDnsConfigs.userId, userId)))
+			.returning()
+			.get() ?? null
+	);
+}
+
+export async function deleteDnsConfig(userId: number, configId: number): Promise<void> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.delete(mysqlDnsRecordBindings)
+			.where(
+				and(eq(mysqlDnsRecordBindings.configId, configId), eq(mysqlDnsRecordBindings.userId, userId))
+			);
+		await db
+			.delete(mysqlDnsConfigs)
+			.where(and(eq(mysqlDnsConfigs.id, configId), eq(mysqlDnsConfigs.userId, userId)));
+		return;
+	}
+
+	const sqlite = getSqliteDb();
+	sqlite
+		.delete(sqliteDnsRecordBindings)
+		.where(
+			and(eq(sqliteDnsRecordBindings.configId, configId), eq(sqliteDnsRecordBindings.userId, userId))
+		)
+		.run();
+	sqlite
+		.delete(sqliteDnsConfigs)
+		.where(and(eq(sqliteDnsConfigs.id, configId), eq(sqliteDnsConfigs.userId, userId)))
+		.run();
+}
+
+export async function listDnsBindingsByUser(userId: number): Promise<DnsRecordBinding[]> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const rows = await db
+			.select()
+			.from(mysqlDnsRecordBindings)
+			.where(eq(mysqlDnsRecordBindings.userId, userId))
+			.orderBy(desc(mysqlDnsRecordBindings.id));
+		return rows as DnsRecordBinding[];
+	}
+
+	return getSqliteDb()
+		.select()
+		.from(sqliteDnsRecordBindings)
+		.where(eq(sqliteDnsRecordBindings.userId, userId))
+		.orderBy(desc(sqliteDnsRecordBindings.id))
+		.all();
+}
+
+export async function findDnsBindingByUser(
+	userId: number,
+	bindingId: number
+): Promise<DnsRecordBinding | null> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const rows = await db
+			.select()
+			.from(mysqlDnsRecordBindings)
+			.where(and(eq(mysqlDnsRecordBindings.id, bindingId), eq(mysqlDnsRecordBindings.userId, userId)));
+		return (rows[0] as DnsRecordBinding) ?? null;
+	}
+
+	return (
+		getSqliteDb()
+			.select()
+			.from(sqliteDnsRecordBindings)
+			.where(and(eq(sqliteDnsRecordBindings.id, bindingId), eq(sqliteDnsRecordBindings.userId, userId)))
+			.get() ?? null
+	);
+}
+
+export async function insertDnsBinding(
+	values: Omit<DnsRecordBinding, 'id' | 'createdAt' | 'lastSyncedAt'>
+): Promise<DnsRecordBinding> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const result = await db.insert(mysqlDnsRecordBindings).values(values as never).$returningId();
+		const id = Number(result[0]?.id);
+		if (!id) throw new Error('Failed to create DNS binding');
+		const rows = await db.select().from(mysqlDnsRecordBindings).where(eq(mysqlDnsRecordBindings.id, id));
+		return rows[0] as DnsRecordBinding;
+	}
+
+	return getSqliteDb()
+		.insert(sqliteDnsRecordBindings)
+		.values(values as never)
+		.returning()
+		.get()!;
+}
+
+export async function updateDnsBinding(
+	userId: number,
+	bindingId: number,
+	values: Partial<Omit<DnsRecordBinding, 'id' | 'userId' | 'createdAt'>>
+): Promise<DnsRecordBinding | null> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.update(mysqlDnsRecordBindings)
+			.set(values as never)
+			.where(and(eq(mysqlDnsRecordBindings.id, bindingId), eq(mysqlDnsRecordBindings.userId, userId)));
+		const rows = await db
+			.select()
+			.from(mysqlDnsRecordBindings)
+			.where(eq(mysqlDnsRecordBindings.id, bindingId));
+		return (rows[0] as DnsRecordBinding) ?? null;
+	}
+
+	return (
+		getSqliteDb()
+			.update(sqliteDnsRecordBindings)
+			.set(values as never)
+			.where(and(eq(sqliteDnsRecordBindings.id, bindingId), eq(sqliteDnsRecordBindings.userId, userId)))
+			.returning()
+			.get() ?? null
+	);
+}
+
+export async function deleteDnsBinding(userId: number, bindingId: number): Promise<void> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.delete(mysqlDnsRecordBindings)
+			.where(and(eq(mysqlDnsRecordBindings.id, bindingId), eq(mysqlDnsRecordBindings.userId, userId)));
+		return;
+	}
+
+	getSqliteDb()
+		.delete(sqliteDnsRecordBindings)
+		.where(and(eq(sqliteDnsRecordBindings.id, bindingId), eq(sqliteDnsRecordBindings.userId, userId)))
+		.run();
+}
+
+export async function updateDnsBindingSyncState(
+	userId: number,
+	bindingId: number,
+	values: {
+		lastARecordId?: string;
+		lastAAAARecordId?: string;
+		lastIpv4?: string;
+		lastIpv6?: string;
+		lastSyncedAt?: Date | null;
+	}
+): Promise<void> {
+	await updateDnsBinding(userId, bindingId, values);
 }
 
 export async function listWorkflowsByUser(userId: number): Promise<WorkflowPolicy[]> {

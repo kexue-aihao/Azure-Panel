@@ -46,6 +46,45 @@ CREATE TABLE IF NOT EXISTS `azure_accounts` (
   KEY `azure_accounts_proxy_profile_id_idx` (`proxy_profile_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `dns_configs` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `name` varchar(120) NOT NULL,
+  `base_url` varchar(255) NOT NULL,
+  `uid` int NOT NULL,
+  `api_key_encrypted` text NOT NULL,
+  `enabled` tinyint(1) NOT NULL DEFAULT 1,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `dns_configs_user_id_idx` (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `dns_record_bindings` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `config_id` int NOT NULL,
+  `name` varchar(120) NOT NULL,
+  `domain_id` int NOT NULL,
+  `domain_name` varchar(255) NOT NULL,
+  `subdomain` varchar(255) NOT NULL DEFAULT '@',
+  `record_type` varchar(16) NOT NULL DEFAULT 'A',
+  `line` varchar(120) NOT NULL DEFAULT 'default',
+  `ttl` int NOT NULL DEFAULT 60,
+  `weight` int DEFAULT NULL,
+  `mx` int DEFAULT NULL,
+  `remark` varchar(255) DEFAULT '',
+  `enabled` tinyint(1) NOT NULL DEFAULT 1,
+  `last_a_record_id` varchar(128) DEFAULT '',
+  `last_aaaa_record_id` varchar(128) DEFAULT '',
+  `last_ipv4` varchar(64) DEFAULT '',
+  `last_ipv6` varchar(128) DEFAULT '',
+  `last_synced_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `dns_record_bindings_user_id_idx` (`user_id`),
+  KEY `dns_record_bindings_config_id_idx` (`config_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `workflow_policies` (
   `id` int NOT NULL AUTO_INCREMENT,
   `user_id` int NOT NULL,

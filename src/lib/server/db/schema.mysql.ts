@@ -42,6 +42,40 @@ export const azureAccounts = mysqlTable('azure_accounts', {
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });
 
+export const dnsConfigs = mysqlTable('dns_configs', {
+	id: int('id').primaryKey().autoincrement(),
+	userId: int('user_id').notNull(),
+	name: varchar('name', { length: 120 }).notNull(),
+	baseUrl: varchar('base_url', { length: 255 }).notNull(),
+	uid: int('uid').notNull(),
+	apiKeyEncrypted: text('api_key_encrypted').notNull(),
+	enabled: boolean('enabled').notNull().default(true),
+	createdAt: timestamp('created_at').notNull().defaultNow()
+});
+
+export const dnsRecordBindings = mysqlTable('dns_record_bindings', {
+	id: int('id').primaryKey().autoincrement(),
+	userId: int('user_id').notNull(),
+	configId: int('config_id').notNull(),
+	name: varchar('name', { length: 120 }).notNull(),
+	domainId: int('domain_id').notNull(),
+	domainName: varchar('domain_name', { length: 255 }).notNull(),
+	subdomain: varchar('subdomain', { length: 255 }).notNull().default('@'),
+	recordType: varchar('record_type', { length: 16 }).notNull().default('A'),
+	line: varchar('line', { length: 120 }).notNull().default('default'),
+	ttl: int('ttl').notNull().default(60),
+	weight: int('weight'),
+	mx: int('mx'),
+	remark: varchar('remark', { length: 255 }).default(''),
+	enabled: boolean('enabled').notNull().default(true),
+	lastARecordId: varchar('last_a_record_id', { length: 128 }).default(''),
+	lastAAAARecordId: varchar('last_aaaa_record_id', { length: 128 }).default(''),
+	lastIpv4: varchar('last_ipv4', { length: 64 }).default(''),
+	lastIpv6: varchar('last_ipv6', { length: 128 }).default(''),
+	lastSyncedAt: timestamp('last_synced_at'),
+	createdAt: timestamp('created_at').notNull().defaultNow()
+});
+
 export const workflowPolicies = mysqlTable('workflow_policies', {
 	id: int('id').primaryKey().autoincrement(),
 	userId: int('user_id').notNull(),
@@ -95,6 +129,8 @@ export const executionLogs = mysqlTable('execution_logs', {
 export type User = typeof users.$inferSelect;
 export type ProxyProfile = typeof proxyProfiles.$inferSelect;
 export type AzureAccount = typeof azureAccounts.$inferSelect;
+export type DnsConfig = typeof dnsConfigs.$inferSelect;
+export type DnsRecordBinding = typeof dnsRecordBindings.$inferSelect;
 export type WorkflowPolicy = typeof workflowPolicies.$inferSelect;
 export type WorkflowLog = typeof workflowLogs.$inferSelect;
 export type ExecutionLog = typeof executionLogs.$inferSelect;
