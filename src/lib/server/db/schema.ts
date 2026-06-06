@@ -56,6 +56,8 @@ export const dnsConfigs = sqliteTable('dns_configs', {
 	baseUrl: text('base_url').notNull(),
 	uid: integer('uid').notNull(),
 	apiKeyEncrypted: text('api_key_encrypted').notNull(),
+	usernameEncrypted: text('username_encrypted').default(''),
+	passwordEncrypted: text('password_encrypted').default(''),
 	enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()

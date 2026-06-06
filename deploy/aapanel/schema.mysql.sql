@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS `dns_configs` (
   `base_url` varchar(255) NOT NULL,
   `uid` int NOT NULL,
   `api_key_encrypted` text NOT NULL,
+  `username_encrypted` text,
+  `password_encrypted` text,
   `enabled` tinyint(1) NOT NULL DEFAULT 1,
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),

@@ -68,6 +68,10 @@ type RainbowDnsActionResponse<T = unknown> = {
 	data?: T;
 };
 
+type RainbowDnsAuthMode =
+	| { type: 'api'; uid: number; apiKey: string }
+	| { type: 'password'; username: string; password: string };
+
 type RainbowDnsRecordInput = {
 	name: string;
 	type: 'A' | 'AAAA' | string;
@@ -147,26 +151,97 @@ function actionOk(response: RainbowDnsActionResponse, fallback: string) {
 
 export class RainbowDnsClient {
 	private readonly baseUrl: string;
-	private readonly uid: number;
-	private readonly apiKey: string;
+	private readonly auth: RainbowDnsAuthMode;
+	private cookie = '';
+	private loginPromise: Promise<string> | null = null;
 
-	constructor(config: { baseUrl: string; uid: number; apiKey: string }) {
+	constructor(config: { baseUrl: string; uid?: number; apiKey?: string; username?: string; password?: string }) {
 		this.baseUrl = normalizeBaseUrl(config.baseUrl);
-		this.uid = config.uid;
-		this.apiKey = config.apiKey;
+		const username = config.username?.trim() ?? '';
+		const password = config.password ?? '';
+		if (username && password) {
+			this.auth = { type: 'password', username, password };
+			return;
+		}
+		const uid = Number(config.uid ?? 0);
+		const apiKey = config.apiKey ?? '';
+		if (!uid || !apiKey) {
+			throw new RainbowDnsError('请填写彩虹 DNS 面板用户名和密码');
+		}
+		this.auth = { type: 'api', uid, apiKey };
 	}
 
 	private signedParams(params: Record<string, unknown> = {}) {
 		const timestamp = Math.floor(Date.now() / 1000);
+		if (this.auth.type !== 'api') {
+			throw new RainbowDnsError('当前 DNS 配置使用账号密码登录，不支持 API 签名参数');
+		}
 		return compactParams({
-			uid: this.uid,
+			uid: this.auth.uid,
 			timestamp,
-			sign: md5(`${this.uid}${timestamp}${this.apiKey}`),
+			sign: md5(`${this.auth.uid}${timestamp}${this.auth.apiKey}`),
 			...params
 		});
 	}
 
+	private rememberCookies(response: Response) {
+		const setCookie = response.headers.get('set-cookie') ?? '';
+		if (!setCookie) return;
+		const cookies = setCookie
+			.split(/,(?=\s*[^;,=\s]+=[^;,]+)/)
+			.map((item) => item.split(';')[0]?.trim())
+			.filter(Boolean);
+		if (cookies.length) this.cookie = cookies.join('; ');
+	}
+
+	private async loginWithPassword() {
+		if (this.auth.type !== 'password') return '';
+		const auth = this.auth;
+		if (this.cookie) return this.cookie;
+		if (this.loginPromise) return this.loginPromise;
+
+		this.loginPromise = (async () => {
+			const response = await fetch(`${this.baseUrl}/login`, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/x-www-form-urlencoded; charset=utf-8',
+					'x-requested-with': 'XMLHttpRequest',
+					accept: 'application/json'
+				},
+				body: compactParams({
+					username: auth.username,
+					password: auth.password
+				})
+			});
+			this.rememberCookies(response);
+			const text = await response.text();
+			let json: RainbowDnsActionResponse | null = null;
+			try {
+				json = JSON.parse(text);
+			} catch {
+				json = null;
+			}
+			if (!response.ok) {
+				throw new RainbowDnsError(json?.msg || `彩虹 DNS 登录失败 (${response.status})`);
+			}
+			if (json && typeof json.code === 'number' && json.code !== 0) {
+				throw new RainbowDnsError(json.msg || '彩虹 DNS 用户名或密码登录失败', json.code);
+			}
+			if (!this.cookie) {
+				throw new RainbowDnsError('彩虹 DNS 登录成功但未返回 user_token Cookie');
+			}
+			return this.cookie;
+		})().finally(() => {
+			this.loginPromise = null;
+		});
+
+		return this.loginPromise;
+	}
+
 	private async post<T>(path: string, params: Record<string, unknown> = {}): Promise<T> {
+		if (this.auth.type === 'password') {
+			return this.postWithCookie<T>(path, params);
+		}
 		const response = await fetch(`${this.baseUrl}${path}`, {
 			method: 'POST',
 			headers: {
@@ -191,6 +266,47 @@ export class RainbowDnsClient {
 		return json;
 	}
 
+	private async postWithCookie<T>(path: string, params: Record<string, unknown> = {}): Promise<T> {
+		const cookie = await this.loginWithPassword();
+		const requestPath = this.cookieSessionPath(path);
+		const response = await fetch(`${this.baseUrl}${requestPath}`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/x-www-form-urlencoded; charset=utf-8',
+				'x-requested-with': 'XMLHttpRequest',
+				accept: 'application/json',
+				cookie
+			},
+			body: compactParams(params),
+			redirect: 'manual'
+		});
+		this.rememberCookies(response);
+		const text = await response.text();
+		let json: T & RainbowDnsActionResponse;
+		try {
+			json = JSON.parse(text);
+		} catch {
+			if (response.status >= 300 && response.status < 400) {
+				this.cookie = '';
+				throw new RainbowDnsError('彩虹 DNS 登录会话失效，请检查用户名密码');
+			}
+			throw new RainbowDnsError(`彩虹 DNS 返回非 JSON 响应 (${response.status})`);
+		}
+		if (!response.ok) {
+			throw new RainbowDnsError(json.msg || `彩虹 DNS 请求失败 (${response.status})`);
+		}
+		if (typeof json.code === 'number' && json.code !== 0) {
+			throw new RainbowDnsError(json.msg || '彩虹 DNS API 调用失败', json.code);
+		}
+		return json;
+	}
+
+	private cookieSessionPath(path: string) {
+		if (path === '/api/domain') return '/domain/data';
+		if (path.startsWith('/api/record/')) return path.replace(/^\/api\//, '/');
+		return path;
+	}
+
 	async listDomains(options: { offset?: number; limit?: number; kw?: string } = {}) {
 		const result = await this.post<RainbowDnsListResponse<RainbowDnsDomain>>('/api/domain', {
 			offset: options.offset ?? 0,
@@ -204,6 +320,30 @@ export class RainbowDnsClient {
 	}
 
 	async getDomain(domainId: number, options: { loginurl?: boolean } = {}) {
+		if (this.auth.type === 'password') {
+			const [domainList, quickInfo] = await Promise.all([
+				this.postWithCookie<RainbowDnsListResponse<RainbowDnsDomain>>('/domain/data', {
+					id: domainId,
+					offset: 0,
+					limit: 1
+				}),
+				this.postWithCookie<
+					RainbowDnsActionResponse<{
+						recordLine?: RainbowDnsRecordLine[];
+						minTTL?: string;
+					}>
+				>(`/record/quickinfo/${domainId}`)
+			]);
+			actionOk(quickInfo, '获取彩虹 DNS 域名线路失败');
+			const domain = domainList.rows?.[0] ?? ({ id: domainId } as RainbowDnsDomain);
+			return {
+				...domain,
+				recordLine: quickInfo.data?.recordLine ?? [],
+				minTTL: quickInfo.data?.minTTL ?? '1',
+				loginurl: options.loginurl ? `${this.baseUrl}/record/${domainId}` : undefined
+			};
+		}
+
 		const result = await this.post<RainbowDnsActionResponse<RainbowDnsDomainDetail>>(
 			`/api/domain/${domainId}`,
 			{
@@ -211,12 +351,13 @@ export class RainbowDnsClient {
 			}
 		);
 		actionOk(result, '获取彩虹 DNS 域名信息失败');
-		if (!result.data) throw new RainbowDnsError('彩虹 DNS 未返回域名信息');
-		return result.data;
+		const data = result.data ?? (result as unknown as RainbowDnsDomainDetail);
+		if (!data?.id && !data?.name) throw new RainbowDnsError('彩虹 DNS 未返回域名信息');
+		return data;
 	}
 
 	async listRecords(domainId: number, filters: RainbowDnsRecordFilters = {}) {
-		const result = await this.post<RainbowDnsListResponse<RainbowDnsRecord>>(
+		const result = await this.post<RainbowDnsListResponse<RainbowDnsRecord> | RainbowDnsRecord[]>(
 			`/api/record/data/${domainId}`,
 			{
 				offset: filters.offset ?? 0,
@@ -229,6 +370,12 @@ export class RainbowDnsClient {
 				status: filters.status
 			}
 		);
+		if (Array.isArray(result)) {
+			return {
+				total: result.length,
+				rows: result
+			};
+		}
 		return {
 			total: Number(result.total ?? result.rows?.length ?? 0),
 			rows: result.rows ?? []
@@ -281,7 +428,9 @@ export function createRainbowDnsClient(config: DnsConfig) {
 	return new RainbowDnsClient({
 		baseUrl: config.baseUrl,
 		uid: config.uid,
-		apiKey: decryptSecret(config.apiKeyEncrypted)
+		apiKey: decryptSecret(config.apiKeyEncrypted),
+		username: config.usernameEncrypted ? decryptSecret(config.usernameEncrypted) : '',
+		password: config.passwordEncrypted ? decryptSecret(config.passwordEncrypted) : ''
 	});
 }
 
@@ -290,7 +439,8 @@ export function publicDnsConfig(config: DnsConfig) {
 		id: config.id,
 		name: config.name,
 		base_url: config.baseUrl,
-		uid: config.uid,
+		username_set: Boolean(config.usernameEncrypted),
+		auth_mode: config.usernameEncrypted ? 'password' : 'api',
 		enabled: Boolean(config.enabled),
 		created_at: config.createdAt
 	};

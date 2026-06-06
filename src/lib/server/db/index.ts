@@ -64,6 +64,8 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		base_url varchar(255) NOT NULL,
 		uid int NOT NULL,
 		api_key_encrypted text NOT NULL,
+		username_encrypted text,
+		password_encrypted text,
 		enabled tinyint(1) NOT NULL DEFAULT 1,
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
@@ -205,6 +207,16 @@ async function ensureMysqlSchema(pool: Pool) {
 			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
 		});
 	await pool
+		.query('ALTER TABLE dns_configs ADD COLUMN username_encrypted text NULL')
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
+		.query('ALTER TABLE dns_configs ADD COLUMN password_encrypted text NULL')
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
 		.query('ALTER TABLE workflow_policies ADD COLUMN userdata_encrypted text NULL')
 		.catch((err) => {
 			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
@@ -302,6 +314,8 @@ export async function initDatabase() {
 			base_url TEXT NOT NULL,
 			uid INTEGER NOT NULL,
 			api_key_encrypted TEXT NOT NULL,
+			username_encrypted TEXT DEFAULT '',
+			password_encrypted TEXT DEFAULT '',
 			enabled INTEGER NOT NULL DEFAULT 1,
 			created_at INTEGER NOT NULL
 		);
@@ -388,6 +402,15 @@ export async function initDatabase() {
 	}
 	if (!proxyColumns.some((column) => column.name === 'share_link_encrypted')) {
 		sqlite.exec("ALTER TABLE proxy_profiles ADD COLUMN share_link_encrypted TEXT DEFAULT ''");
+	}
+	const dnsConfigColumns = sqlite.prepare('PRAGMA table_info(dns_configs)').all() as Array<{
+		name: string;
+	}>;
+	if (!dnsConfigColumns.some((column) => column.name === 'username_encrypted')) {
+		sqlite.exec("ALTER TABLE dns_configs ADD COLUMN username_encrypted TEXT DEFAULT ''");
+	}
+	if (!dnsConfigColumns.some((column) => column.name === 'password_encrypted')) {
+		sqlite.exec("ALTER TABLE dns_configs ADD COLUMN password_encrypted TEXT DEFAULT ''");
 	}
 	const workflowColumns = sqlite.prepare('PRAGMA table_info(workflow_policies)').all() as Array<{
 		name: string;

@@ -6,7 +6,8 @@
 		id: number;
 		name: string;
 		base_url: string;
-		uid: number;
+		username_set: boolean;
+		auth_mode: 'password' | 'api';
 		enabled: boolean;
 		created_at: string;
 	};
@@ -69,8 +70,8 @@
 		id: 0,
 		name: '',
 		base_url: '',
-		uid: '',
-		api_key: '',
+		username: '',
+		password: '',
 		enabled: true
 	});
 	let recordForm = $state({
@@ -115,14 +116,14 @@
 			id: config.id,
 			name: config.name,
 			base_url: config.base_url,
-			uid: String(config.uid),
-			api_key: '',
+			username: '',
+			password: '',
 			enabled: config.enabled
 		};
 	}
 
 	function resetConfigForm() {
-		configForm = { id: 0, name: '', base_url: '', uid: '', api_key: '', enabled: true };
+		configForm = { id: 0, name: '', base_url: '', username: '', password: '', enabled: true };
 	}
 
 	function resetRecordForm() {
@@ -211,10 +212,7 @@
 		try {
 			const saved = await api<DnsConfig>('/api/user/dns/config/save', {
 				method: 'POST',
-				body: JSON.stringify({
-					...configForm,
-					uid: Number(configForm.uid)
-				})
+				body: JSON.stringify(configForm)
 			});
 			toast = 'DNS 配置已保存';
 			selectedConfigId = saved.id;
@@ -238,8 +236,8 @@
 						? { config_id: config.id }
 						: {
 								base_url: configForm.base_url,
-								uid: Number(configForm.uid),
-								api_key: configForm.api_key
+								username: configForm.username,
+								password: configForm.password
 							}
 				)
 			});
@@ -492,18 +490,18 @@
 		<div>
 			<h2 class="text-lg font-medium">彩虹 DNS 面板连接</h2>
 			<p class="mt-1 text-sm text-muted">
-				按接口文档使用 UID、API Key 和 md5 签名连接已搭建好的聚合 DNS 管理系统；API Key 会加密保存。
+				使用彩虹 DNS 面板的登录账号和密码连接；密码会加密保存，后端会自动登录并调用后台接口管理域名和解析。
 			</p>
 		</div>
 		<form class="grid gap-3 md:grid-cols-2" onsubmit={saveConfig}>
 			<input class="input" bind:value={configForm.name} placeholder="配置名称，例如 主 DNS 面板" required />
 			<input class="input" bind:value={configForm.base_url} placeholder="https://dns.example.com" required />
-			<input class="input" bind:value={configForm.uid} placeholder="用户 UID" required />
+			<input class="input" bind:value={configForm.username} placeholder={configForm.id ? '用户名，重新输入后保存' : '用户名'} required />
 			<input
 				class="input"
 				type="password"
-				bind:value={configForm.api_key}
-				placeholder={configForm.id ? '留空表示不更换 API Key' : 'API Key'}
+				bind:value={configForm.password}
+				placeholder={configForm.id ? '留空表示不更换密码' : '密码'}
 				required={!configForm.id}
 			/>
 			<label class="flex items-center gap-2 text-sm">
@@ -527,7 +525,7 @@
 						<div>
 							<div class="font-medium">{config.name}</div>
 							<div class="mt-1 break-all text-xs text-muted">
-								{config.base_url} / UID {config.uid}
+								{config.base_url} / {config.auth_mode === 'password' ? '账号密码登录' : '旧 API 签名模式'}
 							</div>
 						</div>
 						<span class="badge {config.enabled ? 'bg-green-900/50 text-green-300' : 'bg-red-900/50 text-red-300'}">
@@ -542,7 +540,7 @@
 				</div>
 			{/each}
 			{#if configs.length === 0}
-				<p class="text-sm text-muted">还没有 DNS 配置，先填写面板地址、UID 和 API Key。</p>
+				<p class="text-sm text-muted">还没有 DNS 配置，先填写面板地址、用户名和密码。</p>
 			{/if}
 		</div>
 	</section>

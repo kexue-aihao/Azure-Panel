@@ -49,6 +49,8 @@ export const dnsConfigs = mysqlTable('dns_configs', {
 	baseUrl: varchar('base_url', { length: 255 }).notNull(),
 	uid: int('uid').notNull(),
 	apiKeyEncrypted: text('api_key_encrypted').notNull(),
+	usernameEncrypted: text('username_encrypted').default(''),
+	passwordEncrypted: text('password_encrypted').default(''),
 	enabled: boolean('enabled').notNull().default(true),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });
