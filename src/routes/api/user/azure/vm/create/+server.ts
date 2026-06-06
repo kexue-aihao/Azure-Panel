@@ -65,6 +65,8 @@ export const POST: RequestHandler = async (event) => {
 			adminUsername: String(body.admin_username ?? 'azureuser'),
 			adminPassword,
 			enableIpv6: Boolean(body.enable_ipv6),
+			openPorts: String(body.open_ports ?? ''),
+			enableDdosProtection: Boolean(body.enable_ddos_protection),
 			customData: String(body.userdata ?? ''),
 			ipPrefix: String(body.ip_prefix ?? ''),
 			ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 30)

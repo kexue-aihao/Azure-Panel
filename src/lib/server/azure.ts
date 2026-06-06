@@ -6,7 +6,9 @@ import type { GenericResourceExpanded, Provider, ResourceGroup } from '@azure/ar
 import type {
 	NetworkInterface,
 	NetworkInterfaceIPConfiguration,
-	PublicIPAddress
+	NetworkSecurityGroup,
+	PublicIPAddress,
+	SecurityRule
 } from '@azure/arm-network';
 import {
 	createDefaultHttpClient,
@@ -115,6 +117,8 @@ export type CreateVmOptions = {
 	adminUsername: string;
 	adminPassword: string;
 	enableIpv6?: boolean;
+	openPorts?: string | string[];
+	enableDdosProtection?: boolean;
 	customData?: string;
 	ipPrefix?: string;
 	ipBrushMaxAttempts?: number;
@@ -2088,6 +2092,44 @@ function normalizeAttempts(value?: number, fallback = 30) {
 	return Math.min(parsed, 500);
 }
 
+function normalizeOpenPorts(value?: string | string[]) {
+	const rawParts = Array.isArray(value)
+		? value
+		: String(value ?? '')
+				.split(/[\s,;，；]+/)
+				.filter(Boolean);
+	const ports = rawParts
+		.map((part) => String(part).trim())
+		.filter(Boolean);
+	const normalized = ports.length > 0 ? ports : ['22', '80', '443'];
+	const unique: string[] = [];
+
+	for (const port of normalized) {
+		if (port === '*') {
+			if (!unique.includes(port)) unique.push(port);
+			continue;
+		}
+
+		const range = port.match(/^(\d{1,5})(?:-(\d{1,5}))?$/);
+		if (!range) throw new Error(`端口格式不正确: ${port}`);
+		const start = Number(range[1]);
+		const end = Number(range[2] ?? range[1]);
+		if (start < 1 || start > 65535 || end < 1 || end > 65535 || start > end) {
+			throw new Error(`端口范围不正确: ${port}`);
+		}
+		const normalizedPort = start === end ? String(start) : `${start}-${end}`;
+		if (!unique.includes(normalizedPort)) unique.push(normalizedPort);
+	}
+
+	if (unique.includes('*')) return ['*'];
+	return unique.slice(0, 200);
+}
+
+function securityRuleName(port: string, index: number) {
+	const safePort = port === '*' ? 'all' : port.replace(/-/g, 'to');
+	return `allow-in-${safePort}-${index + 1}`;
+}
+
 async function reportCreateVmProgress(
 	reporter: CreateVmProgressReporter | undefined,
 	step: string,
@@ -2125,6 +2167,7 @@ async function createPublicIp(
 		location: string;
 		name: string;
 		version: 'IPv4' | 'IPv6';
+		ddosProtectionPlanId?: string;
 		progress?: CreateVmProgressReporter;
 		step?: string;
 	}
@@ -2132,7 +2175,8 @@ async function createPublicIp(
 	const step = options.step ?? `public-ip-${options.version.toLowerCase()}`;
 	await reportCreateVmProgress(options.progress, step, 'running', `创建 ${options.version} 公网 IP`, {
 		name: options.name,
-		version: options.version
+		version: options.version,
+		ddosProtection: Boolean(options.ddosProtectionPlanId)
 	});
 	const pip = await clients.network.publicIPAddresses.beginCreateOrUpdateAndWait(
 		options.resourceGroup,
@@ -2142,13 +2186,22 @@ async function createPublicIp(
 			publicIPAllocationMethod: 'Static',
 			publicIPAddressVersion: options.version,
 			sku: { name: 'Standard' },
+			...(options.ddosProtectionPlanId
+				? {
+						ddosSettings: {
+							protectionMode: 'Enabled',
+							ddosProtectionPlan: { id: options.ddosProtectionPlanId }
+						}
+					}
+				: {}),
 			deleteOption: 'Delete'
 		}
 	);
 	const ready = pip.ipAddress ? pip : await waitForPublicIpAddress(clients, options.resourceGroup, options.name);
 	await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, {
 		name: options.name,
-		ip: ready.ipAddress ?? ''
+		ip: ready.ipAddress ?? '',
+		ddosProtection: Boolean(options.ddosProtectionPlanId)
 	});
 	return ready;
 }
@@ -2175,6 +2228,7 @@ async function createMatchingIPv4PublicIp(
 		targetPrefix?: string;
 		maxAttempts?: number;
 		nameSalt?: string;
+		ddosProtectionPlanId?: string;
 		progress?: CreateVmProgressReporter;
 	}
 ): Promise<{ pip: PublicIPAddress; attempts: number; matched: boolean }> {
@@ -2202,7 +2256,8 @@ async function createMatchingIPv4PublicIp(
 			resourceGroup: options.resourceGroup,
 			location: options.location,
 			name,
-			version: 'IPv4'
+			version: 'IPv4',
+			ddosProtectionPlanId: options.ddosProtectionPlanId
 		});
 		const address = pip.ipAddress ?? '';
 		const matched = !targetPrefix || address.startsWith(targetPrefix);
@@ -2286,6 +2341,79 @@ async function attachPublicIpToNic(
 	);
 }
 
+async function createDdosProtectionPlanForVm(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		location: string;
+		vmName: string;
+		progress?: CreateVmProgressReporter;
+	}
+) {
+	const planName = resourceName(options.vmName, 'ddos', 80);
+	await reportCreateVmProgress(options.progress, 'ddos-plan', 'running', '创建 Azure DDoS 防护计划', {
+		planName
+	});
+	const plan = await clients.network.ddosProtectionPlans.beginCreateOrUpdateAndWait(
+		options.resourceGroup,
+		planName,
+		{
+			location: options.location
+		}
+	);
+	if (!plan.id) throw new Error('DDoS 防护计划创建失败');
+	await reportCreateVmProgress(options.progress, 'ddos-plan', 'success', 'Azure DDoS 防护计划已创建', {
+		planName,
+		planId: plan.id
+	});
+	return plan;
+}
+
+async function createNetworkSecurityGroupForVm(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		location: string;
+		vmName: string;
+		openPorts?: string | string[];
+		progress?: CreateVmProgressReporter;
+	}
+): Promise<NetworkSecurityGroup> {
+	const nsgName = resourceName(options.vmName, 'nsg', 80);
+	const openPorts = normalizeOpenPorts(options.openPorts);
+	const securityRules: SecurityRule[] = openPorts.map((port, index) => ({
+		name: securityRuleName(port, index),
+		description: port === '*' ? 'Allow inbound traffic to all ports' : `Allow inbound ${port}`,
+		protocol: '*',
+		sourcePortRange: '*',
+		destinationPortRange: port,
+		sourceAddressPrefix: '*',
+		destinationAddressPrefix: '*',
+		access: 'Allow',
+		priority: 100 + index,
+		direction: 'Inbound'
+	}));
+
+	await reportCreateVmProgress(options.progress, 'nsg', 'running', '创建网络安全组并放行入站端口', {
+		nsgName,
+		openPorts: openPorts.join(',')
+	});
+	const nsg = await clients.network.networkSecurityGroups.beginCreateOrUpdateAndWait(
+		options.resourceGroup,
+		nsgName,
+		{
+			location: options.location,
+			securityRules
+		}
+	);
+	if (!nsg.id) throw new Error('网络安全组创建失败');
+	await reportCreateVmProgress(options.progress, 'nsg', 'success', '网络安全组已创建并配置入站规则', {
+		nsgName,
+		openPorts: openPorts.join(',')
+	});
+	return nsg;
+}
+
 async function createNetworkForVm(
 	clients: AzureClients,
 	options: {
@@ -2293,6 +2421,8 @@ async function createNetworkForVm(
 		location: string;
 		vmName: string;
 		enableIpv6: boolean;
+		openPorts?: string | string[];
+		enableDdosProtection?: boolean;
 		ipPrefix?: string;
 		ipBrushMaxAttempts?: number;
 		progress?: CreateVmProgressReporter;
@@ -2318,19 +2448,55 @@ async function createNetworkForVm(
 	await reportCreateVmProgress(options.progress, 'resource-group', 'success', '资源组已就绪', {
 		resourceGroup: options.resourceGroup
 	});
+
+	const ddosPlan = options.enableDdosProtection
+		? await createDdosProtectionPlanForVm(clients, {
+				resourceGroup: options.resourceGroup,
+				location: options.location,
+				vmName: options.vmName,
+				progress: options.progress
+			})
+		: null;
+	if (!options.enableDdosProtection) {
+		await reportCreateVmProgress(options.progress, 'ddos-plan', 'info', '未启用 Azure DDoS 防护，跳过防护计划创建');
+	}
+
 	await reportCreateVmProgress(options.progress, 'vnet', 'running', '创建虚拟网络和子网', {
 		vnetName,
 		subnetName,
-		enableIpv6: options.enableIpv6
+		enableIpv6: options.enableIpv6,
+		enableDdosProtection: Boolean(ddosPlan)
 	});
+	if (ddosPlan) {
+		await reportCreateVmProgress(options.progress, 'ddos-vnet', 'running', '关联 DDoS 防护到虚拟网络', {
+			vnetName,
+			planId: ddosPlan.id ?? ''
+		});
+	}
 	await clients.network.virtualNetworks.beginCreateOrUpdateAndWait(options.resourceGroup, vnetName, {
 		location: options.location,
 		addressSpace: { addressPrefixes },
-		subnets: [{ name: subnetName, addressPrefixes: subnetAddressPrefixes }]
+		subnets: [{ name: subnetName, addressPrefixes: subnetAddressPrefixes }],
+		enableDdosProtection: Boolean(ddosPlan),
+		...(ddosPlan?.id ? { ddosProtectionPlan: { id: ddosPlan.id } } : {})
 	});
 	await reportCreateVmProgress(options.progress, 'vnet', 'success', '虚拟网络和子网已创建', {
 		vnetName,
-		subnetName
+		subnetName,
+		ddosProtection: Boolean(ddosPlan)
+	});
+	if (ddosPlan) {
+		await reportCreateVmProgress(options.progress, 'ddos-vnet', 'success', 'DDoS 防护已关联到虚拟网络', {
+			vnetName
+		});
+	}
+
+	const nsg = await createNetworkSecurityGroupForVm(clients, {
+		resourceGroup: options.resourceGroup,
+		location: options.location,
+		vmName: options.vmName,
+		openPorts: options.openPorts,
+		progress: options.progress
 	});
 
 	const ipv4 = await createMatchingIPv4PublicIp(clients, {
@@ -2339,6 +2505,7 @@ async function createNetworkForVm(
 		vmName: options.vmName,
 		targetPrefix: options.ipPrefix,
 		maxAttempts: options.ipBrushMaxAttempts,
+		ddosProtectionPlanId: ddosPlan?.id,
 		progress: options.progress
 	});
 	const ipv6 = options.enableIpv6
@@ -2347,6 +2514,7 @@ async function createNetworkForVm(
 				location: options.location,
 				name: resourceName(options.vmName, 'pip6'),
 				version: 'IPv6',
+				ddosProtectionPlanId: ddosPlan?.id,
 				progress: options.progress,
 				step: 'public-ipv6'
 			})
@@ -2394,6 +2562,7 @@ async function createNetworkForVm(
 		nicName,
 		{
 			location: options.location,
+			networkSecurityGroup: { id: nsg.id },
 			ipConfigurations
 		}
 	);
@@ -2459,6 +2628,8 @@ export async function createVmAdvanced(
 		location,
 		vmName,
 		enableIpv6: options.enableIpv6 === true,
+		openPorts: options.openPorts,
+		enableDdosProtection: options.enableDdosProtection === true,
 		ipPrefix: options.ipPrefix,
 		ipBrushMaxAttempts: options.ipBrushMaxAttempts,
 		progress: options.progress

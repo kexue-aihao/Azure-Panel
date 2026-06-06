@@ -111,6 +111,8 @@
 		admin_username: 'azureuser',
 		admin_password: '',
 		enable_ipv6: true,
+		open_ports: '22,80,443',
+		enable_ddos_protection: false,
 		userdata: '',
 		ip_prefix: '',
 		ip_brush_max_attempts: 30
@@ -813,6 +815,25 @@
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={createForm.enable_ipv6} /> 同时创建 IPv6 公网地址
 		</label>
+		<div>
+			<label class="mb-1 block text-xs text-muted" for="create-open-ports">入站放行端口</label>
+			<input
+				id="create-open-ports"
+				class="input"
+				bind:value={createForm.open_ports}
+				placeholder="22,80,443 或 1000-2000，* 表示全部端口"
+			/>
+			<p class="mt-1 text-xs text-muted">
+				创建时会同步创建 Azure 网络安全组（NSG）并绑定到网卡，只放行这里填写的入站端口。
+			</p>
+		</div>
+		<label class="flex items-center gap-2 text-sm">
+			<input type="checkbox" bind:checked={createForm.enable_ddos_protection} />
+			启用 Azure DDoS 防护计划并关联到虚拟网络
+		</label>
+		<p class="-mt-2 text-xs text-muted">
+			DDoS Protection Plan 可能产生 Azure 官方额外费用，只有勾选后才会创建并在流程里显示进度。
+		</p>
 		<div class="grid gap-3 md:grid-cols-2">
 			<input
 				class="input"
