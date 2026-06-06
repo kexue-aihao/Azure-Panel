@@ -138,6 +138,8 @@
 	let sizeError = $state('');
 	let imageError = $state('');
 	let createProgress = $state<CreateProgressEvent[]>([]);
+	let deleteProgress = $state<CreateProgressEvent[]>([]);
+	let deletingVmName = $state('');
 	let firewallVm = $state<Vm | null>(null);
 	let firewallRules = $state<FirewallRule[]>([]);
 	let firewallNsg = $state('');
@@ -279,6 +281,17 @@
 		);
 	}
 
+	function mergeDeleteProgress(event: CreateProgressEvent) {
+		const index = deleteProgress.findIndex((item) => item.step === event.step);
+		if (index === -1) {
+			deleteProgress = [...deleteProgress, event];
+			return;
+		}
+		deleteProgress = deleteProgress.map((item, itemIndex) =>
+			itemIndex === index ? { ...item, ...event } : item
+		);
+	}
+
 	function progressBadge(status: CreateProgressStatus) {
 		if (status === 'success') return 'bg-green-900/50 text-green-300';
 		if (status === 'error') return 'bg-red-900/50 text-red-300';
@@ -356,6 +369,53 @@
 			if (done) break;
 		}
 		if (!result) throw new Error('创建流程结束但未返回 VM 结果');
+		return result;
+	}
+
+	async function deleteResourceGroupWithProgress(payload: Record<string, unknown>) {
+		const token = localStorage.getItem('token');
+		const response = await fetch('/api/user/azure/vm/delete', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'application/x-ndjson',
+				...(token ? { Authorization: `Bearer ${token}` } : {})
+			},
+			body: JSON.stringify(payload)
+		});
+		if (!response.ok) {
+			const body = await response.json().catch(() => null);
+			throw new Error(body?.message ?? `删除请求失败 (${response.status})`);
+		}
+		if (!response.body) throw new Error('浏览器不支持读取删除进度流');
+
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = '';
+		let result: { message: string } | null = null;
+
+		while (true) {
+			const { value, done } = await reader.read();
+			buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+			const lines = buffer.split('\n');
+			buffer = lines.pop() ?? '';
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				const message = JSON.parse(line) as
+					| { type: 'progress'; event: CreateProgressEvent }
+					| { type: 'result'; result: { message: string } }
+					| { type: 'error'; message: string };
+				if (message.type === 'progress') {
+					mergeDeleteProgress(message.event);
+				} else if (message.type === 'result') {
+					result = message.result;
+				} else if (message.type === 'error') {
+					throw new Error(message.message);
+				}
+			}
+			if (done) break;
+		}
+		if (!result) throw new Error('删除流程结束但未返回结果');
 		return result;
 	}
 
@@ -636,21 +696,27 @@
 			return;
 		}
 		ipActionLoading = `${vm.name}:delete`;
+		deletingVmName = vm.name;
+		deleteProgress = [];
 		try {
-			await api('/api/user/azure/vm/delete', {
-				method: 'POST',
-				body: JSON.stringify({
-					account_id: accountId,
-					...proxyPayload(),
-					resource_group: vm.resource_group,
-					vm_name: vm.name
-				})
+			const result = await deleteResourceGroupWithProgress({
+				account_id: accountId,
+				...proxyPayload(),
+				resource_group: vm.resource_group,
+				vm_name: vm.name
 			});
-			toast = `已删除资源组 ${vm.resource_group} 及其中全部资源`;
+			toast = result.message;
 			resourceGroup = resourceGroup === vm.resource_group ? '' : resourceGroup;
 			await loadVms();
 		} catch (err) {
-			toast = err instanceof Error ? err.message : '删除资源组失败';
+			const message = err instanceof Error ? err.message : '删除资源组失败';
+			mergeDeleteProgress({
+				step: 'delete-failed',
+				status: 'error',
+				message,
+				timestamp: new Date().toISOString()
+			});
+			toast = message;
 		} finally {
 			ipActionLoading = '';
 		}
@@ -1280,6 +1346,37 @@
 		</tbody>
 	</table>
 </div>
+
+{#if deleteProgress.length}
+	<div class="card mt-4 space-y-3 p-5">
+		<div class="flex items-center justify-between gap-3">
+			<div>
+				<h2 class="text-lg font-medium">删除流程{deletingVmName ? `：${deletingVmName}` : ''}</h2>
+				<p class="mt-1 text-xs text-muted">
+					删除 VM 会通过 Azure 官方 API 删除完整资源组，耗时取决于资源组内资源数量。
+				</p>
+			</div>
+			<div class="text-xs text-muted">{deleteProgress.length} 个步骤</div>
+		</div>
+		<div class="space-y-2">
+			{#each deleteProgress as item}
+				<div class="rounded-lg border border-border/70 p-3">
+					<div class="flex flex-wrap items-center gap-2">
+						<span class={`badge ${progressBadge(item.status)}`}>{progressText(item.status)}</span>
+						<span class="font-mono text-xs text-muted">{item.step}</span>
+						<span class="text-sm">{item.message}</span>
+					</div>
+					{#if progressDetail(item.detail)}
+						<div class="mt-1 break-all text-xs text-muted">{progressDetail(item.detail)}</div>
+					{/if}
+					<div class="mt-1 text-[11px] text-muted">
+						{new Date(item.timestamp).toLocaleString()}
+					</div>
+				</div>
+			{/each}
+		</div>
+	</div>
+{/if}
 
 {#if firewallVm}
 	<div class="card mt-4 space-y-4 p-5">
