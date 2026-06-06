@@ -407,8 +407,19 @@ function agentHttpClient(agent: Agent): HttpClient {
 	const inner = createDefaultHttpClient();
 	return {
 		async sendRequest(request) {
-			if (!request.agent) request.agent = agent;
-			return inner.sendRequest(request);
+			const url = new URL(request.url);
+			// Azure SDK leaves the default HTTPS port empty; socks-proxy-agent can pass that
+			// empty port into the socks handshake and surface "SocksClient internal error".
+			const defaultPort = url.port || (url.protocol === 'https:' ? '443' : '80');
+			return inner.sendRequest({
+				...request,
+				agent,
+				disableKeepAlive: true,
+				requestOverrides: {
+					...request.requestOverrides,
+					port: defaultPort
+				}
+			});
 		}
 	};
 }
@@ -422,7 +433,10 @@ export function proxyClientOptions(proxy?: ProxyRuntimeConfig | null): ProxyClie
 	const agent =
 		proxy.type === 'shadowsocks'
 			? (new ShadowsocksProxyAgent(proxy) as Agent)
-			: (new SocksProxyAgent(socksProxyAgentUrl(proxy), { timeout: 30_000 }) as Agent);
+			: (new SocksProxyAgent(socksProxyAgentUrl(proxy), {
+					timeout: 30_000,
+					keepAlive: false
+				}) as Agent);
 	return {
 		agent,
 		httpClient: agentHttpClient(agent)
@@ -508,12 +522,12 @@ const PROXY_VALIDATION_URL =
 function proxyErrorMessage(proxy: ProxyRuntimeConfig, err: unknown) {
 	const message = err instanceof Error ? err.message : String(err);
 	if (/SocksClient internal error/i.test(message)) {
-		return `${proxy.type.toUpperCase()} proxy handshake failed: the port is reachable, but it did not behave like a SOCKS proxy. Please re-save it with automatic detection or HTTP type. Raw error: ${message}`;
+		return `${proxy.type.toUpperCase()} 代理握手失败：代理端口可连接，但 SOCKS 握手没有按预期返回。请重新保存代理让系统自动识别 HTTP/SOCKS 类型，或手动改为 HTTP 后再试。原始错误: ${message}`;
 	}
 	if (/Socks5|SOCKS|socks/i.test(message)) {
-		return `${proxy.type.toUpperCase()} proxy handshake failed: ${message}`;
+		return `${proxy.type.toUpperCase()} 代理握手失败: ${message}`;
 	}
-	return `Proxy outbound validation failed: ${message}`;
+	return `代理出站验证失败: ${message}`;
 }
 
 async function requestThroughProxy(proxy: ProxyRuntimeConfig, timeoutMs: number) {
