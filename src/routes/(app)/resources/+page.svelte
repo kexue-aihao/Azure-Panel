@@ -56,6 +56,28 @@
 		capacity: number;
 		provisioning_state: string;
 	};
+	type ProgressStatus = 'running' | 'success' | 'error' | 'info';
+	type ResourceGroupDeleteProgressEvent = {
+		step: string;
+		status: ProgressStatus;
+		message: string;
+		detail?: Record<string, string | number | boolean | null>;
+		timestamp: string;
+	};
+	type ResourceGroupDeleteResult = {
+		resource_group: string;
+		status: 'success' | 'error';
+		message: string;
+	};
+	type ResourceGroupDeleteStreamResult = {
+		results: ResourceGroupDeleteResult[];
+		success: number;
+		failed: number;
+	};
+	type ResourceGroupDeleteStreamMessage =
+		| { type: 'progress'; event: ResourceGroupDeleteProgressEvent }
+		| { type: 'result'; result: ResourceGroupDeleteStreamResult }
+		| { type: 'error'; message: string };
 
 	let accounts = $state<Account[]>([]);
 	let subscriptions = $state<Subscription[]>([]);
@@ -74,6 +96,10 @@
 	let providerLoading = $state(false);
 	let aiLoading = $state(false);
 	let deploymentLoading = $state(false);
+	let deletingGroups = $state(false);
+	let selectedResourceGroups = $state<string[]>([]);
+	let deleteProgress = $state<ResourceGroupDeleteProgressEvent[]>([]);
+	let deleteResults = $state<ResourceGroupDeleteResult[]>([]);
 	let toast = $state('');
 	let createAiForm = $state({
 		resource_group: '',
@@ -101,6 +127,16 @@
 			count: resources.filter((resource) => resource.resource_group === group.name).length
 		}))
 	);
+	const visibleResourceGroups = $derived(
+		groupedResourceCounts.filter((group) => !resourceGroup || group.name === resourceGroup)
+	);
+	const visibleResourceGroupNames = $derived(visibleResourceGroups.map((group) => group.name));
+	const allVisibleResourceGroupsSelected = $derived(
+		visibleResourceGroupNames.length > 0 &&
+			visibleResourceGroupNames.every((name) => selectedResourceGroups.includes(name))
+	);
+	const recentDeleteProgress = $derived(deleteProgress.slice(-12).reverse());
+	const deleteProgressPercent = $derived(resourceGroupDeleteProgressPercent(deleteProgress));
 
 	function params(extra: Record<string, string> = {}) {
 		const query = new URLSearchParams({
@@ -113,6 +149,102 @@
 
 	function setToastFromError(err: unknown, fallback: string) {
 		toast = err instanceof Error ? err.message : fallback;
+	}
+
+	function uniqueNames(names: string[]) {
+		return [...new Set(names.map((name) => name.trim()).filter(Boolean))];
+	}
+
+	function toggleResourceGroupSelection(name: string) {
+		selectedResourceGroups = selectedResourceGroups.includes(name)
+			? selectedResourceGroups.filter((item) => item !== name)
+			: [...selectedResourceGroups, name];
+	}
+
+	function toggleVisibleResourceGroups() {
+		selectedResourceGroups = allVisibleResourceGroupsSelected
+			? selectedResourceGroups.filter((name) => !visibleResourceGroupNames.includes(name))
+			: uniqueNames([...selectedResourceGroups, ...visibleResourceGroupNames]);
+	}
+
+	function clearResourceGroupSelection() {
+		selectedResourceGroups = [];
+	}
+
+	function addDeleteProgress(event: ResourceGroupDeleteProgressEvent) {
+		deleteProgress = [...deleteProgress, event].slice(-240);
+	}
+
+	function progressDetailNumber(
+		detail: ResourceGroupDeleteProgressEvent['detail'],
+		key: string
+	) {
+		const value = detail?.[key];
+		return typeof value === 'number' ? value : Number(value || 0);
+	}
+
+	function resourceGroupDeleteProgressPercent(progress: ResourceGroupDeleteProgressEvent[]) {
+		if (progress.length === 0) return deletingGroups ? 8 : 0;
+		if (progress.some((item) => item.step === 'batch-complete')) return 100;
+		const latest = progress.at(-1);
+		const total = Math.max(
+			1,
+			progressDetailNumber(latest?.detail, 'total') || selectedResourceGroups.length || 1
+		);
+		const finishedGroups = new Set(
+			progress
+				.filter((item) => item.step === 'delete-group-complete' || item.step === 'delete-group-failed')
+				.map((item) => String(item.detail?.resourceGroup ?? ''))
+				.filter(Boolean)
+		);
+		const polls = progressDetailNumber(latest?.detail, 'polls');
+		const currentWeight =
+			latest?.status === 'running' ? Math.min(0.85, 0.18 + polls * 0.08) : latest?.status ? 0.45 : 0;
+		return Math.min(95, Math.max(8, Math.round(((finishedGroups.size + currentWeight) / total) * 100)));
+	}
+
+	function progressFinished(progress: ResourceGroupDeleteProgressEvent[]) {
+		return progress.some((item) => item.step === 'batch-complete') || (!deletingGroups && progress.length > 0);
+	}
+
+	function progressTone(progress: ResourceGroupDeleteProgressEvent[]) {
+		if (deleteResults.length && deleteResults.every((item) => item.status === 'error')) return 'bg-red-500';
+		if (deleteResults.some((item) => item.status === 'error')) return 'bg-yellow-500';
+		if (progressFinished(progress)) return 'bg-green-500';
+		return 'bg-primary';
+	}
+
+	function progressAnimation(progress: ResourceGroupDeleteProgressEvent[]) {
+		return !progressFinished(progress) && progress.some((item) => item.status === 'running') ? 'running' : '';
+	}
+
+	function progressBadge(status: ProgressStatus) {
+		if (status === 'success') return 'bg-green-900/50 text-green-300';
+		if (status === 'error') return 'bg-red-900/50 text-red-300';
+		if (status === 'info') return 'bg-blue-900/50 text-blue-200';
+		return 'bg-yellow-900/50 text-yellow-300';
+	}
+
+	function progressText(status: ProgressStatus) {
+		if (status === 'success') return '完成';
+		if (status === 'error') return '失败';
+		if (status === 'info') return '提示';
+		return '进行中';
+	}
+
+	function progressDetail(detail?: ResourceGroupDeleteProgressEvent['detail']) {
+		if (!detail) return '';
+		const labels: Record<string, string> = {
+			resourceGroup: '资源组',
+			index: '序号',
+			total: '总数',
+			status: 'Azure 状态',
+			polls: '轮询',
+			subscriptionId: '订阅'
+		};
+		return Object.entries(detail)
+			.map(([key, value]) => `${labels[key] ?? key}: ${value}`)
+			.join(' · ');
 	}
 
 	async function loadAccounts() {
@@ -151,6 +283,9 @@
 			);
 			groups = data.groups;
 			resources = data.resources;
+			selectedResourceGroups = selectedResourceGroups.filter((name) =>
+				data.groups.some((group) => group.name === name)
+			);
 			if (resourceGroup && !groups.some((group) => group.name === resourceGroup)) resourceGroup = '';
 			if (resourceGroup && selectedGroup) createAiForm.location = selectedGroup.location;
 		} catch (err) {
@@ -322,6 +457,83 @@
 		toast = '已复制到剪贴板';
 	}
 
+	async function readResourceGroupDeleteStream(resourceGroups: string[]) {
+		const token = localStorage.getItem('token');
+		const response = await fetch('/api/user/azure/resource/groups', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'application/x-ndjson',
+				...(token ? { Authorization: `Bearer ${token}` } : {})
+			},
+			body: JSON.stringify({
+				account_id: accountId,
+				subscription_id: subscriptionId,
+				resource_groups: resourceGroups
+			})
+		});
+		if (!response.ok) {
+			const body = await response.json().catch(() => null);
+			throw new Error(body?.message ?? `删除资源组请求失败 (${response.status})`);
+		}
+		if (!response.body) throw new Error('浏览器不支持读取删除进度流');
+
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = '';
+		let result: ResourceGroupDeleteStreamResult | null = null;
+
+		while (true) {
+			const { value, done } = await reader.read();
+			buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+			const lines = buffer.split('\n');
+			buffer = lines.pop() ?? '';
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				const message = JSON.parse(line) as ResourceGroupDeleteStreamMessage;
+				if (message.type === 'progress') {
+					addDeleteProgress(message.event);
+				} else if (message.type === 'result') {
+					result = message.result;
+				} else if (message.type === 'error') {
+					throw new Error(message.message);
+				}
+			}
+			if (done) break;
+		}
+		if (!result) throw new Error('删除流程结束但未返回结果');
+		return result;
+	}
+
+	async function deleteResourceGroups(resourceGroups: string[]) {
+		if (!accountId || deletingGroups) return;
+		const targets = uniqueNames(resourceGroups);
+		if (targets.length === 0) {
+			toast = '请先选择要删除的资源组';
+			return;
+		}
+		deletingGroups = true;
+		deleteProgress = [];
+		deleteResults = [];
+		toast = `正在删除 ${targets.length} 个资源组...`;
+		try {
+			const result = await readResourceGroupDeleteStream(targets);
+			deleteResults = result.results;
+			selectedResourceGroups = selectedResourceGroups.filter(
+				(name) => !result.results.some((item) => item.resource_group === name && item.status === 'success')
+			);
+			if (resourceGroup && result.results.some((item) => item.resource_group === resourceGroup && item.status === 'success')) {
+				resourceGroup = '';
+			}
+			toast = `资源组批量删除完成：成功 ${result.success} 个，失败 ${result.failed} 个`;
+			await Promise.all([loadResources(), loadAiAccounts()]);
+		} catch (err) {
+			setToastFromError(err, '资源组删除失败');
+		} finally {
+			deletingGroups = false;
+		}
+	}
+
 	onMount(async () => {
 		await loadAccounts();
 		if (accountId) await changeAccount();
@@ -407,21 +619,82 @@
 			</div>
 		</div>
 
-		<div class="grid gap-3 md:grid-cols-3">
-			{#each groupedResourceCounts as group}
+		<div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/60 p-3">
+			<div class="text-sm">
+				<div class="font-medium">资源组批量操作</div>
+				<div class="mt-1 text-xs text-muted">
+					已选择 {selectedResourceGroups.length} 个，当前列表 {visibleResourceGroups.length} 个资源组
+				</div>
+			</div>
+			<div class="flex flex-wrap gap-2">
 				<button
-					class="rounded-lg border border-border p-3 text-left text-sm hover:border-primary"
-					onclick={() => {
-						resourceGroup = group.name;
-						createAiForm.resource_group = group.name;
-						createAiForm.location = group.location;
-						void loadResources();
-					}}
+					class="btn-secondary"
+					onclick={toggleVisibleResourceGroups}
+					disabled={deletingGroups || visibleResourceGroups.length === 0}
 				>
-					<div class="font-medium">{group.name}</div>
-					<div class="mt-1 text-xs text-muted">{group.location} / {group.count} resources</div>
+					{allVisibleResourceGroupsSelected ? '取消当前列表' : '全选当前列表'}
 				</button>
+				<button
+					class="btn-secondary"
+					onclick={clearResourceGroupSelection}
+					disabled={deletingGroups || selectedResourceGroups.length === 0}
+				>
+					清空选择
+				</button>
+				<button
+					class="btn-danger"
+					onclick={() => void deleteResourceGroups(selectedResourceGroups)}
+					disabled={deletingGroups || selectedResourceGroups.length === 0}
+				>
+					{deletingGroups ? '删除中...' : `删除选中 ${selectedResourceGroups.length} 个`}
+				</button>
+				<button
+					class="btn-danger"
+					onclick={() => void deleteResourceGroups(visibleResourceGroupNames)}
+					disabled={deletingGroups || visibleResourceGroupNames.length === 0}
+				>
+					一键删除当前列表资源组
+				</button>
+			</div>
+		</div>
+
+		<div class="grid gap-3 md:grid-cols-3">
+			{#each visibleResourceGroups as group}
+				<div
+					class={`rounded-lg border p-3 text-sm transition ${
+						selectedResourceGroups.includes(group.name)
+							? 'border-red-500/60 bg-red-500/10'
+							: 'border-border hover:border-primary'
+					}`}
+				>
+					<label class="mb-3 flex cursor-pointer items-center gap-2 text-xs text-muted">
+						<input
+							type="checkbox"
+							class="h-4 w-4 accent-red-500"
+							checked={selectedResourceGroups.includes(group.name)}
+							disabled={deletingGroups}
+							onchange={() => toggleResourceGroupSelection(group.name)}
+						/>
+						选择删除
+					</label>
+					<button
+						class="w-full text-left"
+						onclick={() => {
+							resourceGroup = group.name;
+							createAiForm.resource_group = group.name;
+							createAiForm.location = group.location;
+							void loadResources();
+						}}
+					>
+						<div class="break-all font-medium">{group.name}</div>
+						<div class="mt-1 text-xs text-muted">{group.location} / {group.count} resources</div>
+						<div class="mt-1 text-xs text-muted">状态：{group.provisioning_state || '-'}</div>
+					</button>
+				</div>
 			{/each}
+			{#if visibleResourceGroups.length === 0}
+				<div class="rounded-lg border border-border p-3 text-sm text-muted">暂无可操作资源组</div>
+			{/if}
 		</div>
 	</section>
 
@@ -454,6 +727,69 @@
 		</div>
 	</section>
 </div>
+
+{#if deletingGroups || deleteProgress.length > 0}
+	<section class="card mb-4 space-y-4 p-5">
+		<div class="flex flex-wrap items-start justify-between gap-3">
+			<div>
+				<h2 class="text-lg font-medium">资源组删除进度</h2>
+				<p class="mt-1 text-sm text-muted">
+					正在通过 Azure 官方 API 删除完整资源组，资源组内 VM、IP、NSG、VNet 等资源会一并清理。
+				</p>
+			</div>
+			<span class="badge {deletingGroups ? 'bg-yellow-900/50 text-yellow-300' : 'bg-green-900/50 text-green-300'}">
+				{deletingGroups ? '删除中' : '已结束'}
+			</span>
+		</div>
+
+		<div class={`progress-track ${progressAnimation(deleteProgress) || (deletingGroups ? 'running' : '')}`}>
+			<div
+				class={`progress-fill ${progressTone(deleteProgress)}`}
+				style={`width: ${deleteProgressPercent}%`}
+			></div>
+		</div>
+		<div class="flex justify-between text-xs text-muted">
+			<span>进度：{deleteProgressPercent}%</span>
+			<span>已记录 {deleteProgress.length} 个步骤</span>
+		</div>
+
+		{#if deleteResults.length > 0}
+			<div class="grid gap-2 md:grid-cols-2">
+				{#each deleteResults as result}
+					<div class="rounded-lg border border-border bg-background/70 p-3 text-sm">
+						<div class="flex items-center justify-between gap-2">
+							<span class="break-all font-medium">{result.resource_group}</span>
+							<span
+								class={`badge ${
+									result.status === 'success'
+										? 'bg-green-900/50 text-green-300'
+										: 'bg-red-900/50 text-red-300'
+								}`}
+							>
+								{result.status === 'success' ? '成功' : '失败'}
+							</span>
+						</div>
+						<div class="mt-2 break-all text-xs text-muted">{result.message}</div>
+					</div>
+				{/each}
+			</div>
+		{/if}
+
+		<div class="max-h-72 space-y-2 overflow-y-auto rounded-lg border border-border bg-background/60 p-3">
+			{#each recentDeleteProgress as item}
+				<div class="rounded-lg border border-border/60 bg-card/70 p-3 text-sm">
+					<div class="flex flex-wrap items-center justify-between gap-2">
+						<div class="font-medium">{item.message}</div>
+						<span class={`badge ${progressBadge(item.status)}`}>{progressText(item.status)}</span>
+					</div>
+					{#if progressDetail(item.detail)}
+						<div class="mt-1 break-all text-xs text-muted">{progressDetail(item.detail)}</div>
+					{/if}
+				</div>
+			{/each}
+		</div>
+	</section>
+{/if}
 
 <section class="card mb-4 overflow-x-auto">
 	<table class="w-full text-sm">
