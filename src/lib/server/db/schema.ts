@@ -94,8 +94,26 @@ export const workflowLogs = sqliteTable('workflow_logs', {
 		.$defaultFn(() => new Date())
 });
 
+export const executionLogs = sqliteTable('execution_logs', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	userId: integer('user_id')
+		.notNull()
+		.references(() => users.id, { onDelete: 'cascade' }),
+	accountId: integer('account_id'),
+	source: text('source').notNull().default('manual'),
+	action: text('action').notNull(),
+	status: text('status').notNull(),
+	message: text('message').notNull(),
+	resourceGroup: text('resource_group').default(''),
+	vmName: text('vm_name').default(''),
+	createdAt: integer('created_at', { mode: 'timestamp' })
+		.notNull()
+		.$defaultFn(() => new Date())
+});
+
 export type User = typeof users.$inferSelect;
 export type ProxyProfile = typeof proxyProfiles.$inferSelect;
 export type AzureAccount = typeof azureAccounts.$inferSelect;
 export type WorkflowPolicy = typeof workflowPolicies.$inferSelect;
 export type WorkflowLog = typeof workflowLogs.$inferSelect;
+export type ExecutionLog = typeof executionLogs.$inferSelect;

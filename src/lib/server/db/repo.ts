@@ -1,8 +1,16 @@
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { getDriver, getMysqlDb, getSqliteDb } from './index';
-import type { AzureAccount, ProxyProfile, User, WorkflowLog, WorkflowPolicy } from './schema';
+import type {
+	AzureAccount,
+	ExecutionLog,
+	ProxyProfile,
+	User,
+	WorkflowLog,
+	WorkflowPolicy
+} from './schema';
 import {
 	azureAccounts as sqliteAzureAccounts,
+	executionLogs as sqliteExecutionLogs,
 	proxyProfiles as sqliteProxyProfiles,
 	users as sqliteUsers,
 	workflowLogs as sqliteWorkflowLogs,
@@ -10,6 +18,7 @@ import {
 } from './schema';
 import {
 	azureAccounts as mysqlAzureAccounts,
+	executionLogs as mysqlExecutionLogs,
 	proxyProfiles as mysqlProxyProfiles,
 	users as mysqlUsers,
 	workflowLogs as mysqlWorkflowLogs,
@@ -369,6 +378,72 @@ export async function insertWorkflowLog(
 	getSqliteDb().insert(sqliteWorkflowLogs).values({ policyId, action, status, message }).run();
 }
 
+export type ExecutionLogInput = {
+	userId: number;
+	accountId?: number | null;
+	source?: string;
+	action: string;
+	status: string;
+	message: string;
+	resourceGroup?: string;
+	vmName?: string;
+};
+
+export type UnifiedExecutionLog = {
+	id: number;
+	source: string;
+	policyId: number | null;
+	accountId: number | null;
+	action: string;
+	status: string;
+	message: string;
+	resourceGroup: string;
+	vmName: string;
+	createdAt: Date;
+};
+
+export async function insertExecutionLog(input: ExecutionLogInput): Promise<void> {
+	const values = {
+		userId: input.userId,
+		accountId: input.accountId ?? null,
+		source: input.source ?? 'manual',
+		action: input.action,
+		status: input.status,
+		message: input.message,
+		resourceGroup: input.resourceGroup ?? '',
+		vmName: input.vmName ?? ''
+	};
+
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db.insert(mysqlExecutionLogs).values(values);
+		return;
+	}
+
+	getSqliteDb().insert(sqliteExecutionLogs).values(values).run();
+}
+
+export async function listExecutionLogs(userId: number): Promise<ExecutionLog[]> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const rows = await db
+			.select()
+			.from(mysqlExecutionLogs)
+			.where(eq(mysqlExecutionLogs.userId, userId))
+			.orderBy(desc(mysqlExecutionLogs.id))
+			.limit(100);
+		return rows as ExecutionLog[];
+	}
+
+	return getSqliteDb()
+		.select()
+		.from(sqliteExecutionLogs)
+		.where(eq(sqliteExecutionLogs.userId, userId))
+		.orderBy(desc(sqliteExecutionLogs.id))
+		.limit(100)
+		.all();
+}
+
 export async function listWorkflowLogs(userId: number, policyId?: number): Promise<WorkflowLog[]> {
 	const userPolicies = await listWorkflowsByUser(userId);
 	const ids = userPolicies.map((p) => p.id);
@@ -396,4 +471,42 @@ export async function listWorkflowLogs(userId: number, policyId?: number): Promi
 		.orderBy(desc(sqliteWorkflowLogs.id))
 		.limit(100)
 		.all();
+}
+
+export async function listUnifiedExecutionLogs(
+	userId: number,
+	policyId?: number
+): Promise<UnifiedExecutionLog[]> {
+	const [workflowRows, executionRows] = await Promise.all([
+		listWorkflowLogs(userId, policyId),
+		policyId ? Promise.resolve([] as ExecutionLog[]) : listExecutionLogs(userId)
+	]);
+	const workflowItems: UnifiedExecutionLog[] = workflowRows.map((log) => ({
+		id: log.id,
+		source: 'workflow',
+		policyId: log.policyId,
+		accountId: null,
+		action: log.action,
+		status: log.status,
+		message: log.message,
+		resourceGroup: '',
+		vmName: '',
+		createdAt: log.createdAt
+	}));
+	const executionItems: UnifiedExecutionLog[] = executionRows.map((log) => ({
+		id: log.id,
+		source: log.source,
+		policyId: null,
+		accountId: log.accountId ?? null,
+		action: log.action,
+		status: log.status,
+		message: log.message,
+		resourceGroup: log.resourceGroup ?? '',
+		vmName: log.vmName ?? '',
+		createdAt: log.createdAt
+	}));
+
+	return [...workflowItems, ...executionItems]
+		.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id - a.id)
+		.slice(0, 100);
 }

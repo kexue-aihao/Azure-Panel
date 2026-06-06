@@ -94,6 +94,21 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
 		KEY workflow_logs_policy_id_idx (policy_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS execution_logs (
+		id int NOT NULL AUTO_INCREMENT,
+		user_id int NOT NULL,
+		account_id int NULL,
+		source varchar(32) NOT NULL DEFAULT 'manual',
+		action varchar(64) NOT NULL,
+		status varchar(32) NOT NULL,
+		message text NOT NULL,
+		resource_group varchar(90) DEFAULT '',
+		vm_name varchar(64) DEFAULT '',
+		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (id),
+		KEY execution_logs_user_id_idx (user_id),
+		KEY execution_logs_account_id_idx (account_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 ];
 
@@ -276,6 +291,18 @@ export async function initDatabase() {
 			message TEXT NOT NULL,
 			created_at INTEGER NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS execution_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			account_id INTEGER,
+			source TEXT NOT NULL DEFAULT 'manual',
+			action TEXT NOT NULL,
+			status TEXT NOT NULL,
+			message TEXT NOT NULL,
+			resource_group TEXT DEFAULT '',
+			vm_name TEXT DEFAULT '',
+			created_at INTEGER NOT NULL
+		);
 	`);
 	const columns = sqlite.prepare('PRAGMA table_info(azure_accounts)').all() as Array<{ name: string }>;
 	if (!columns.some((column) => column.name === 'proxy_url_encrypted')) {
@@ -313,6 +340,8 @@ export async function initDatabase() {
 	sqlite.exec(`
 		CREATE INDEX IF NOT EXISTS proxy_profiles_user_id_idx ON proxy_profiles(user_id);
 		CREATE INDEX IF NOT EXISTS azure_accounts_proxy_profile_id_idx ON azure_accounts(proxy_profile_id);
+		CREATE INDEX IF NOT EXISTS execution_logs_user_id_idx ON execution_logs(user_id);
+		CREATE INDEX IF NOT EXISTS execution_logs_account_id_idx ON execution_logs(account_id);
 	`);
 	console.log('[db] Connected to SQLite:', dbPath);
 }

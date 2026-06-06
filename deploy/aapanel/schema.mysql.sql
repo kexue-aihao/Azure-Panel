@@ -85,3 +85,19 @@ CREATE TABLE IF NOT EXISTS `workflow_logs` (
   PRIMARY KEY (`id`),
   KEY `workflow_logs_policy_id_idx` (`policy_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `execution_logs` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `account_id` int NULL,
+  `source` varchar(32) NOT NULL DEFAULT 'manual',
+  `action` varchar(64) NOT NULL,
+  `status` varchar(32) NOT NULL,
+  `message` text NOT NULL,
+  `resource_group` varchar(90) DEFAULT '',
+  `vm_name` varchar(64) DEFAULT '',
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `execution_logs_user_id_idx` (`user_id`),
+  KEY `execution_logs_account_id_idx` (`account_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -7,6 +7,7 @@ import {
 	type CreateVmOptions,
 	type CreateVmResult
 } from '$lib/server/azure';
+import { insertExecutionLog } from '$lib/server/db/repo';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
@@ -34,6 +35,27 @@ function publicResult(result: CreateVmResult): VmCreateResponse {
 
 function streamMessage(controller: ReadableStreamDefaultController<Uint8Array>, payload: unknown) {
 	controller.enqueue(new TextEncoder().encode(`${JSON.stringify(payload)}\n`));
+}
+
+async function logVmCreateEvent(options: {
+	userId: number;
+	accountId: number;
+	resourceGroup: string;
+	vmName: string;
+	event: CreateVmProgressEvent;
+}) {
+	await insertExecutionLog({
+		userId: options.userId,
+		accountId: options.accountId,
+		source: 'vm_create',
+		action: options.event.step,
+		status: options.event.status,
+		message: options.event.message,
+		resourceGroup: options.resourceGroup,
+		vmName: options.vmName
+	}).catch((err) => {
+		console.warn('[execution-log] failed to write VM create event:', err);
+	});
 }
 
 export const POST: RequestHandler = async (event) => {
@@ -79,6 +101,13 @@ export const POST: RequestHandler = async (event) => {
 			const stream = new ReadableStream<Uint8Array>({
 				async start(controller) {
 					const progress = async (progressEvent: CreateVmProgressEvent) => {
+						await logVmCreateEvent({
+							userId: user.id,
+							accountId,
+							resourceGroup,
+							vmName,
+							event: progressEvent
+						});
 						streamMessage(controller, { type: 'progress', event: progressEvent });
 					};
 
@@ -89,6 +118,18 @@ export const POST: RequestHandler = async (event) => {
 						});
 						streamMessage(controller, { type: 'result', result: publicResult(result) });
 					} catch (err) {
+						await insertExecutionLog({
+							userId: user.id,
+							accountId,
+							source: 'vm_create',
+							action: 'failed',
+							status: 'error',
+							message: err instanceof Error ? err.message : String(err),
+							resourceGroup,
+							vmName
+						}).catch((logErr) =>
+							console.warn('[execution-log] failed to write VM create stream error:', logErr)
+						);
 						streamMessage(controller, {
 							type: 'error',
 							message: err instanceof Error ? err.message : String(err)
@@ -107,9 +148,29 @@ export const POST: RequestHandler = async (event) => {
 			});
 		}
 
-		const result = await createVmAdvanced(createAzureClients(account, proxy), vmOptions);
+		const result = await createVmAdvanced(createAzureClients(account, proxy), {
+			...vmOptions,
+			progress: (progressEvent) =>
+				logVmCreateEvent({
+					userId: user.id,
+					accountId,
+					resourceGroup,
+					vmName,
+					event: progressEvent
+				})
+		});
 		return ok(publicResult(result));
 	} catch (err) {
+		await insertExecutionLog({
+			userId: user.id,
+			accountId,
+			source: 'vm_create',
+			action: 'failed',
+			status: 'error',
+			message: err instanceof Error ? err.message : String(err),
+			resourceGroup,
+			vmName
+		}).catch((logErr) => console.warn('[execution-log] failed to write VM create error:', logErr));
 		return fail(err instanceof Error ? err.message : String(err), 500);
 	}
 };

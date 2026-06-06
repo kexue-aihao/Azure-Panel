@@ -1,5 +1,6 @@
 import { getUserAccountWithSelectedProxy } from '$lib/server/accounts';
 import { createAzureClients, deallocateVm } from '$lib/server/azure';
+import { insertExecutionLog } from '$lib/server/db/repo';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
@@ -18,8 +19,28 @@ export const POST: RequestHandler = async (event) => {
 			proxyProfileId: Number(body.proxy_profile_id ?? 0) || null
 		});
 		await deallocateVm(createAzureClients(account, proxy), resourceGroup, vmName);
+		await insertExecutionLog({
+			userId: user.id,
+			accountId,
+			source: 'vm_power',
+			action: 'power_off',
+			status: 'success',
+			message: `已触发关机(释放): ${vmName}`,
+			resourceGroup,
+			vmName
+		}).catch((logErr) => console.warn('[execution-log] failed to write power log:', logErr));
 		return ok({ message: `已触发关机(释放): ${vmName}` });
 	} catch (err) {
+		await insertExecutionLog({
+			userId: user.id,
+			accountId,
+			source: 'vm_power',
+			action: 'power_off',
+			status: 'error',
+			message: err instanceof Error ? err.message : String(err),
+			resourceGroup,
+			vmName
+		}).catch((logErr) => console.warn('[execution-log] failed to write power log:', logErr));
 		return fail(err instanceof Error ? err.message : String(err), 500);
 	}
 };

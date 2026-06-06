@@ -79,8 +79,22 @@ export const workflowLogs = mysqlTable('workflow_logs', {
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });
 
+export const executionLogs = mysqlTable('execution_logs', {
+	id: int('id').primaryKey().autoincrement(),
+	userId: int('user_id').notNull(),
+	accountId: int('account_id'),
+	source: varchar('source', { length: 32 }).notNull().default('manual'),
+	action: varchar('action', { length: 64 }).notNull(),
+	status: varchar('status', { length: 32 }).notNull(),
+	message: text('message').notNull(),
+	resourceGroup: varchar('resource_group', { length: 90 }).default(''),
+	vmName: varchar('vm_name', { length: 64 }).default(''),
+	createdAt: timestamp('created_at').notNull().defaultNow()
+});
+
 export type User = typeof users.$inferSelect;
 export type ProxyProfile = typeof proxyProfiles.$inferSelect;
 export type AzureAccount = typeof azureAccounts.$inferSelect;
 export type WorkflowPolicy = typeof workflowPolicies.$inferSelect;
 export type WorkflowLog = typeof workflowLogs.$inferSelect;
+export type ExecutionLog = typeof executionLogs.$inferSelect;
