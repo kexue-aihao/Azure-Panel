@@ -40,7 +40,7 @@ import {
 	buildSubscriptionAlertMessage,
 	getTelegramCredentials,
 	normalizeSubscriptionCheckIntervalHours,
-	sendTelegramMessage
+	sendTelegramMessageToTargets
 } from './telegram';
 
 let timer: NodeJS.Timeout | null = null;
@@ -327,8 +327,9 @@ async function notifyReplenishmentSuccess(options: {
 		const settings = await findNotificationSettingsByUser(options.policy.userId);
 		const credentials = getTelegramCredentials(settings);
 		if (!credentials) return;
-		await sendTelegramMessage({
-			...credentials,
+		await sendTelegramMessageToTargets({
+			token: credentials.token,
+			chatIds: credentials.chatIds,
 			text: buildReplenishmentMessage({
 				policyName: options.policy.name,
 				account: options.account,
@@ -626,8 +627,9 @@ async function notifySubscriptionStateIfNeeded(options: {
 		return;
 	}
 
-	await sendTelegramMessage({
-		...credentials,
+	await sendTelegramMessageToTargets({
+		token: credentials.token,
+		chatIds: credentials.chatIds,
 		text: buildSubscriptionAlertMessage({
 			account: options.account,
 			subscriptionId: options.status.subscriptionId,

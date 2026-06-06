@@ -100,6 +100,7 @@ export const notificationSettings = sqliteTable('notification_settings', {
 		.references(() => users.id, { onDelete: 'cascade' }),
 	telegramBotTokenEncrypted: text('telegram_bot_token_encrypted').notNull().default(''),
 	telegramChatId: text('telegram_chat_id').notNull().default(''),
+	telegramGroupChatIds: text('telegram_group_chat_ids').notNull().default(''),
 	enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
 	subscriptionCheckIntervalHours: integer('subscription_check_interval_hours')
 		.notNull()

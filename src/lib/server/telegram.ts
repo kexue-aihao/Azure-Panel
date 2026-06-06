@@ -8,6 +8,9 @@ export type TelegramPublicSettings = {
 	enabled: boolean;
 	telegram_chat_id: string;
 	telegram_chat_id_masked: string;
+	telegram_group_chat_ids: string;
+	telegram_group_chat_id_list: string[];
+	telegram_group_chat_id_masked_list: string[];
 	bot_token_configured: boolean;
 	bot_token_masked: string;
 	subscription_check_interval_hours: number;
@@ -17,6 +20,10 @@ export type TelegramPublicSettings = {
 
 function trimString(value: unknown) {
 	return String(value ?? '').trim();
+}
+
+function compactList(values: string[]) {
+	return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
 export function normalizeSubscriptionCheckIntervalHours(value: unknown) {
@@ -46,6 +53,25 @@ export function maskTelegramToken(token: string) {
 
 export function maskTelegramChatId(chatId: string) {
 	return maskMiddle(chatId, 3, 3);
+}
+
+export function parseTelegramChatIds(value: unknown): string[] {
+	if (Array.isArray(value)) {
+		return compactList(value.flatMap((item) => parseTelegramChatIds(item)));
+	}
+	return compactList(
+		trimString(value)
+			.split(/[\s,;，；]+/)
+			.map((item) => item.trim())
+	);
+}
+
+export function validateTelegramChatIds(chatIds: string[]) {
+	return chatIds.every((chatId) => /^-?\d{5,32}$/.test(chatId));
+}
+
+export function serializeTelegramGroupChatIds(chatIds: string[]) {
+	return parseTelegramChatIds(chatIds).join('\n');
 }
 
 export function maskSubscriptionId(subscriptionId: string) {
@@ -83,6 +109,11 @@ export function publicTelegramSettings(
 		enabled: Boolean(settings.enabled),
 		telegram_chat_id: settings.telegramChatId,
 		telegram_chat_id_masked: maskTelegramChatId(settings.telegramChatId),
+		telegram_group_chat_ids: settings.telegramGroupChatIds ?? '',
+		telegram_group_chat_id_list: parseTelegramChatIds(settings.telegramGroupChatIds),
+		telegram_group_chat_id_masked_list: parseTelegramChatIds(settings.telegramGroupChatIds).map(
+			maskTelegramChatId
+		),
 		bot_token_configured: Boolean(token),
 		bot_token_masked: maskTelegramToken(token),
 		subscription_check_interval_hours: normalizeSubscriptionCheckIntervalHours(
@@ -97,8 +128,9 @@ export function getTelegramCredentials(settings: NotificationSettings | null) {
 	if (!settings || !settings.enabled) return null;
 	const token = decryptSecret(settings.telegramBotTokenEncrypted);
 	const chatId = trimString(settings.telegramChatId);
-	if (!token || !chatId) return null;
-	return { token, chatId };
+	const chatIds = compactList([chatId, ...parseTelegramChatIds(settings.telegramGroupChatIds)]);
+	if (!token || chatIds.length === 0) return null;
+	return { token, chatId, chatIds };
 }
 
 export async function sendTelegramMessage(options: {
@@ -132,6 +164,98 @@ export async function sendTelegramMessage(options: {
 		if (!response.ok || payload?.ok === false) {
 			throw new Error(payload?.description || `Telegram sendMessage failed (${response.status})`);
 		}
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+export async function sendTelegramMessageToTargets(options: {
+	token: string;
+	chatIds: string[];
+	text: string;
+}): Promise<{ sent: string[]; failed: Array<{ chatId: string; error: string }> }> {
+	const sent: string[] = [];
+	const failed: Array<{ chatId: string; error: string }> = [];
+	for (const chatId of compactList(options.chatIds)) {
+		try {
+			await sendTelegramMessage({ token: options.token, chatId, text: options.text });
+			sent.push(chatId);
+		} catch (err) {
+			failed.push({ chatId, error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+	if (sent.length === 0 && failed.length > 0) {
+		throw new Error(failed.map((item) => `${maskTelegramChatId(item.chatId)}: ${item.error}`).join('; '));
+	}
+	return { sent, failed };
+}
+
+type TelegramChat = {
+	id?: number;
+	title?: string;
+	username?: string;
+	type?: string;
+};
+
+type TelegramUpdate = {
+	update_id?: number;
+	message?: { chat?: TelegramChat };
+	edited_message?: { chat?: TelegramChat };
+	channel_post?: { chat?: TelegramChat };
+	my_chat_member?: { chat?: TelegramChat };
+	chat_member?: { chat?: TelegramChat };
+};
+
+function chatFromUpdate(update: TelegramUpdate) {
+	return (
+		update.message?.chat ??
+		update.edited_message?.chat ??
+		update.channel_post?.chat ??
+		update.my_chat_member?.chat ??
+		update.chat_member?.chat ??
+		null
+	);
+}
+
+export async function discoverTelegramGroupChats(token: string) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 15_000);
+	try {
+		const response = await fetch(`https://api.telegram.org/bot${token}/getUpdates`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				accept: 'application/json'
+			},
+			body: JSON.stringify({
+				allowed_updates: ['message', 'edited_message', 'channel_post', 'my_chat_member', 'chat_member']
+			}),
+			signal: controller.signal
+		});
+		const text = await response.text();
+		let payload: { ok?: boolean; description?: string; result?: TelegramUpdate[] } | null = null;
+		try {
+			payload = text ? JSON.parse(text) : null;
+		} catch {
+			payload = null;
+		}
+		if (!response.ok || payload?.ok === false) {
+			throw new Error(payload?.description || `Telegram getUpdates failed (${response.status})`);
+		}
+		const chats = new Map<string, { chat_id: string; title: string; type: string; username: string }>();
+		for (const update of payload?.result ?? []) {
+			const chat = chatFromUpdate(update);
+			const chatId = chat?.id ? String(chat.id) : '';
+			const type = String(chat?.type ?? '');
+			if (!chatId || !['group', 'supergroup', 'channel'].includes(type)) continue;
+			chats.set(chatId, {
+				chat_id: chatId,
+				title: chat?.title || chat?.username || chatId,
+				type,
+				username: chat?.username ?? ''
+			});
+		}
+		return [...chats.values()];
 	} finally {
 		clearTimeout(timeout);
 	}

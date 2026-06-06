@@ -101,6 +101,7 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		user_id int NOT NULL,
 		telegram_bot_token_encrypted text NOT NULL,
 		telegram_chat_id varchar(64) NOT NULL DEFAULT '',
+		telegram_group_chat_ids text,
 		enabled tinyint(1) NOT NULL DEFAULT 0,
 		subscription_check_interval_hours int NOT NULL DEFAULT 6,
 		last_subscription_checked_at timestamp NULL DEFAULT NULL,
@@ -315,6 +316,11 @@ async function ensureMysqlSchema(pool: Pool) {
 		.catch((err) => {
 			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
 		});
+	await pool
+		.query('ALTER TABLE notification_settings ADD COLUMN telegram_group_chat_ids text NULL')
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
 }
 
 export async function initDatabase() {
@@ -422,6 +428,7 @@ export async function initDatabase() {
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			telegram_bot_token_encrypted TEXT NOT NULL DEFAULT '',
 			telegram_chat_id TEXT NOT NULL DEFAULT '',
+			telegram_group_chat_ids TEXT NOT NULL DEFAULT '',
 			enabled INTEGER NOT NULL DEFAULT 0,
 			subscription_check_interval_hours INTEGER NOT NULL DEFAULT 6,
 			last_subscription_checked_at INTEGER,
@@ -559,6 +566,12 @@ export async function initDatabase() {
 	}
 	if (!workflowColumns.some((column) => column.name === 'last_status_checked_at')) {
 		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN last_status_checked_at INTEGER');
+	}
+	const notificationColumns = sqlite.prepare('PRAGMA table_info(notification_settings)').all() as Array<{
+		name: string;
+	}>;
+	if (!notificationColumns.some((column) => column.name === 'telegram_group_chat_ids')) {
+		sqlite.exec("ALTER TABLE notification_settings ADD COLUMN telegram_group_chat_ids TEXT NOT NULL DEFAULT ''");
 	}
 	sqlite.exec(`
 		CREATE INDEX IF NOT EXISTS proxy_profiles_user_id_idx ON proxy_profiles(user_id);

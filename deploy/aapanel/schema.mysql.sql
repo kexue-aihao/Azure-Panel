@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS `notification_settings` (
   `user_id` int NOT NULL,
   `telegram_bot_token_encrypted` text NOT NULL,
   `telegram_chat_id` varchar(64) NOT NULL DEFAULT '',
+  `telegram_group_chat_ids` text,
   `enabled` tinyint(1) NOT NULL DEFAULT 0,
   `subscription_check_interval_hours` int NOT NULL DEFAULT 6,
   `last_subscription_checked_at` timestamp NULL DEFAULT NULL,

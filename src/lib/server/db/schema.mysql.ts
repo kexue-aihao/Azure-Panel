@@ -83,6 +83,7 @@ export const notificationSettings = mysqlTable('notification_settings', {
 	userId: int('user_id').notNull(),
 	telegramBotTokenEncrypted: text('telegram_bot_token_encrypted').notNull(),
 	telegramChatId: varchar('telegram_chat_id', { length: 64 }).notNull().default(''),
+	telegramGroupChatIds: text('telegram_group_chat_ids').notNull(),
 	enabled: boolean('enabled').notNull().default(false),
 	subscriptionCheckIntervalHours: int('subscription_check_interval_hours').notNull().default(6),
 	lastSubscriptionCheckedAt: timestamp('last_subscription_checked_at'),
