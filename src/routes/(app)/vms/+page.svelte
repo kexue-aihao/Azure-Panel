@@ -55,6 +55,24 @@
 		architecture: string;
 		hyperVGeneration: string;
 	};
+	type FirewallRule = {
+		name: string;
+		description: string;
+		protocol: string;
+		sourcePortRange: string;
+		destinationPortRange: string;
+		sourceAddressPrefix: string;
+		destinationAddressPrefix: string;
+		access: string;
+		priority: number;
+		direction: string;
+		provisioningState: string;
+	};
+	type FirewallRuleResponse = {
+		networkSecurityGroup: string;
+		networkSecurityGroupResourceGroup: string;
+		rules: FirewallRule[];
+	};
 	type CreateProgressStatus = 'running' | 'success' | 'error' | 'info';
 	type CreateProgressEvent = {
 		step: string;
@@ -94,14 +112,32 @@
 	let imageLoading = $state(false);
 	let createLoading = $state(false);
 	let ipActionLoading = $state('');
+	let firewallLoading = $state(false);
+	let firewallActionLoading = $state('');
 	let toast = $state('');
 	let sizeError = $state('');
 	let imageError = $state('');
 	let createProgress = $state<CreateProgressEvent[]>([]);
+	let firewallVm = $state<Vm | null>(null);
+	let firewallRules = $state<FirewallRule[]>([]);
+	let firewallNsg = $state('');
+	let firewallNsgResourceGroup = $state('');
 	let proxyMode = $state<ProxyMode>('account');
 	let proxyProfileId = $state('');
 	let brushIpPrefix = $state('85.211');
 	let brushMaxAttempts = $state(30);
+	let firewallForm = $state({
+		name: '',
+		protocol: 'Tcp',
+		source_port_range: '*',
+		destination_port_range: '22',
+		source_address_prefix: '*',
+		destination_address_prefix: '*',
+		access: 'Allow',
+		priority: 1000,
+		direction: 'Inbound',
+		description: ''
+	});
 	let createForm = $state({
 		resource_group: '',
 		location: 'malaysiawest',
@@ -577,6 +613,118 @@
 		}
 	}
 
+	function resetFirewallForm() {
+		firewallForm = {
+			name: '',
+			protocol: 'Tcp',
+			source_port_range: '*',
+			destination_port_range: '22',
+			source_address_prefix: '*',
+			destination_address_prefix: '*',
+			access: 'Allow',
+			priority: 1000,
+			direction: 'Inbound',
+			description: ''
+		};
+	}
+
+	function editFirewallRule(rule: FirewallRule) {
+		firewallForm = {
+			name: rule.name,
+			protocol: rule.protocol || '*',
+			source_port_range: rule.sourcePortRange || '*',
+			destination_port_range: rule.destinationPortRange || '*',
+			source_address_prefix: rule.sourceAddressPrefix || '*',
+			destination_address_prefix: rule.destinationAddressPrefix || '*',
+			access: rule.access || 'Allow',
+			priority: rule.priority || 1000,
+			direction: rule.direction || 'Inbound',
+			description: rule.description || ''
+		};
+	}
+
+	async function loadFirewallRules(vm = firewallVm) {
+		if (!accountId || !vm) return;
+		firewallLoading = true;
+		try {
+			const params = new URLSearchParams({
+				account_id: String(accountId),
+				resource_group: vm.resource_group,
+				vm_name: vm.name
+			});
+			appendProxyParams(params);
+			const result = await api<FirewallRuleResponse>(`/api/user/azure/vm/firewall?${params}`);
+			firewallVm = vm;
+			firewallRules = result.rules ?? [];
+			firewallNsg = result.networkSecurityGroup;
+			firewallNsgResourceGroup = result.networkSecurityGroupResourceGroup;
+			toast = `已加载 ${vm.name} 防火墙策略`;
+		} catch (err) {
+			toast = err instanceof Error ? err.message : '防火墙策略加载失败';
+		} finally {
+			firewallLoading = false;
+		}
+	}
+
+	async function openFirewall(vm: Vm) {
+		resetFirewallForm();
+		firewallVm = vm;
+		firewallRules = [];
+		firewallNsg = '';
+		firewallNsgResourceGroup = '';
+		await loadFirewallRules(vm);
+	}
+
+	async function saveFirewallRule(e: Event) {
+		e.preventDefault();
+		if (!accountId || !firewallVm) return;
+		firewallActionLoading = 'save';
+		try {
+			await api<FirewallRule>('/api/user/azure/vm/firewall', {
+				method: 'POST',
+				body: JSON.stringify({
+					account_id: accountId,
+					...proxyPayload(),
+					resource_group: firewallVm.resource_group,
+					vm_name: firewallVm.name,
+					...firewallForm,
+					priority: Number(firewallForm.priority)
+				})
+			});
+			toast = '防火墙规则已保存';
+			resetFirewallForm();
+			await loadFirewallRules(firewallVm);
+		} catch (err) {
+			toast = err instanceof Error ? err.message : '防火墙规则保存失败';
+		} finally {
+			firewallActionLoading = '';
+		}
+	}
+
+	async function deleteFirewallRule(rule: FirewallRule) {
+		if (!accountId || !firewallVm) return;
+		if (!confirm(`确认删除防火墙规则 ${rule.name} 吗？`)) return;
+		firewallActionLoading = `delete:${rule.name}`;
+		try {
+			await api('/api/user/azure/vm/firewall', {
+				method: 'DELETE',
+				body: JSON.stringify({
+					account_id: accountId,
+					...proxyPayload(),
+					resource_group: firewallVm.resource_group,
+					vm_name: firewallVm.name,
+					rule_name: rule.name
+				})
+			});
+			toast = '防火墙规则已删除';
+			await loadFirewallRules(firewallVm);
+		} catch (err) {
+			toast = err instanceof Error ? err.message : '防火墙规则删除失败';
+		} finally {
+			firewallActionLoading = '';
+		}
+	}
+
 	function badge(state: string) {
 		if (state === 'running' || state === 'starting') return 'bg-green-900/50 text-green-300';
 		if (state === 'deallocated' || state === 'stopped') return 'bg-red-900/50 text-red-300';
@@ -960,6 +1108,13 @@
 							>
 								刷 IPv4 段
 							</button>
+							<button
+								class="btn-secondary"
+								onclick={() => void openFirewall(vm)}
+								disabled={firewallLoading && firewallVm?.name === vm.name}
+							>
+								防火墙
+							</button>
 						</td>
 					</tr>
 				{/each}
@@ -967,3 +1122,125 @@
 		</tbody>
 	</table>
 </div>
+
+{#if firewallVm}
+	<div class="card mt-4 space-y-4 p-5">
+		<div class="flex flex-wrap items-center justify-between gap-3">
+			<div>
+				<h2 class="text-lg font-medium">防火墙策略：{firewallVm.name}</h2>
+				<p class="mt-1 text-xs text-muted">
+					使用 Azure 官方 Network Security Group API 管理网卡规则。NSG：{firewallNsg || '未绑定，保存规则时自动创建'}（{firewallNsgResourceGroup || '-'}）
+				</p>
+			</div>
+			<div class="flex gap-2">
+				<button class="btn-secondary" type="button" onclick={() => void loadFirewallRules()}>
+					{firewallLoading ? '刷新中...' : '刷新规则'}
+				</button>
+				<button class="btn-secondary" type="button" onclick={() => (firewallVm = null)}>
+					关闭
+				</button>
+			</div>
+		</div>
+
+		<form class="grid gap-3 lg:grid-cols-4" onsubmit={saveFirewallRule}>
+			<input class="input" bind:value={firewallForm.name} placeholder="规则名称，留空自动生成" />
+			<select class="input" bind:value={firewallForm.protocol}>
+				<option value="Tcp">Tcp</option>
+				<option value="Udp">Udp</option>
+				<option value="*">*</option>
+				<option value="Icmp">Icmp</option>
+			</select>
+			<input
+				class="input"
+				bind:value={firewallForm.destination_port_range}
+				placeholder="目标端口，如 22 或 1000-2000"
+				required
+			/>
+			<input
+				class="input"
+				type="number"
+				min="100"
+				max="4096"
+				bind:value={firewallForm.priority}
+				placeholder="优先级 100-4096"
+				required
+			/>
+			<input class="input" bind:value={firewallForm.source_address_prefix} placeholder="来源地址，默认 *" />
+			<input class="input" bind:value={firewallForm.source_port_range} placeholder="来源端口，默认 *" />
+			<select class="input" bind:value={firewallForm.access}>
+				<option value="Allow">允许</option>
+				<option value="Deny">拒绝</option>
+			</select>
+			<select class="input" bind:value={firewallForm.direction}>
+				<option value="Inbound">入站</option>
+				<option value="Outbound">出站</option>
+			</select>
+			<input
+				class="input lg:col-span-3"
+				bind:value={firewallForm.description}
+				placeholder="说明，可选"
+			/>
+			<div class="flex gap-2">
+				<button class="btn-primary" type="submit" disabled={firewallActionLoading === 'save'}>
+					{firewallActionLoading === 'save' ? '保存中...' : '保存规则'}
+				</button>
+				<button class="btn-secondary" type="button" onclick={resetFirewallForm}>清空</button>
+			</div>
+		</form>
+
+		<div class="overflow-x-auto rounded-xl border border-border">
+			<table class="w-full text-xs">
+				<thead class="text-muted">
+					<tr class="border-b border-border">
+						<th class="p-2 text-left">名称</th>
+						<th class="p-2 text-left">方向</th>
+						<th class="p-2 text-left">策略</th>
+						<th class="p-2 text-left">协议</th>
+						<th class="p-2 text-left">来源</th>
+						<th class="p-2 text-left">端口</th>
+						<th class="p-2 text-left">优先级</th>
+						<th class="p-2 text-left">状态</th>
+						<th class="p-2 text-left">操作</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#if firewallLoading}
+						<tr>
+							<td class="p-3 text-muted" colspan="9">正在加载防火墙策略...</td>
+						</tr>
+					{:else if firewallRules.length === 0}
+						<tr>
+							<td class="p-3 text-muted" colspan="9">暂无自定义防火墙规则</td>
+						</tr>
+					{:else}
+						{#each firewallRules as rule}
+							<tr class="border-b border-border/60">
+								<td class="p-2 font-mono">{rule.name}</td>
+								<td class="p-2">{rule.direction}</td>
+								<td class="p-2">{rule.access}</td>
+								<td class="p-2">{rule.protocol}</td>
+								<td class="p-2">{rule.sourceAddressPrefix}:{rule.sourcePortRange}</td>
+								<td class="p-2">{rule.destinationPortRange}</td>
+								<td class="p-2">{rule.priority}</td>
+								<td class="p-2">{rule.provisioningState || '-'}</td>
+								<td class="space-x-2 whitespace-nowrap p-2">
+									<button class="btn-secondary" type="button" onclick={() => editFirewallRule(rule)}>
+										编辑
+									</button>
+									<button
+										class="btn-danger"
+										type="button"
+										onclick={() => void deleteFirewallRule(rule)}
+										disabled={firewallActionLoading === `delete:${rule.name}`}
+									>
+										删除
+									</button>
+								</td>
+							</tr>
+						{/each}
+					{/if}
+				</tbody>
+			</table>
+		</div>
+	</div>
+{/if}

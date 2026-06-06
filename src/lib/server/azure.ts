@@ -165,6 +165,33 @@ export type BrushIpResult = ReplaceIpResult & {
 	matched: boolean;
 };
 
+export type VmFirewallRuleInfo = {
+	name: string;
+	description: string;
+	protocol: string;
+	sourcePortRange: string;
+	destinationPortRange: string;
+	sourceAddressPrefix: string;
+	destinationAddressPrefix: string;
+	access: string;
+	priority: number;
+	direction: string;
+	provisioningState: string;
+};
+
+export type VmFirewallRuleInput = {
+	name?: string;
+	description?: string;
+	protocol?: string;
+	sourcePortRange?: string;
+	destinationPortRange: string;
+	sourceAddressPrefix?: string;
+	destinationAddressPrefix?: string;
+	access?: string;
+	priority?: number;
+	direction?: string;
+};
+
 export type AzureClients = {
 	compute: ComputeManagementClient;
 	network: NetworkManagementClient;
@@ -2136,6 +2163,75 @@ function securityRuleName(port: string, index: number) {
 	return `allow-in-${safePort}-${index + 1}`;
 }
 
+function normalizeSecurityPortRange(value: string | undefined, fallback = '*') {
+	const raw = String(value ?? '').trim() || fallback;
+	if (raw === '*') return raw;
+	const range = raw.match(/^(\d{1,5})(?:-(\d{1,5}))?$/);
+	if (!range) throw new Error(`端口范围格式不正确: ${raw}`);
+	const start = Number(range[1]);
+	const end = Number(range[2] ?? range[1]);
+	if (start < 0 || start > 65535 || end < 0 || end > 65535 || start > end) {
+		throw new Error(`端口范围不正确: ${raw}`);
+	}
+	return start === end ? String(start) : `${start}-${end}`;
+}
+
+function normalizeSecurityRuleName(value: string | undefined, destinationPortRange: string) {
+	const fallback = `allow-in-${destinationPortRange === '*' ? 'all' : destinationPortRange.replace(/-/g, 'to')}`;
+	const clean = sanitizeResourceName(String(value ?? '').trim() || fallback).slice(0, 80);
+	return clean || fallback;
+}
+
+function normalizeSecurityProtocol(value?: string) {
+	const protocol = String(value ?? '*').trim();
+	const allowed = new Set(['*', 'Tcp', 'Udp', 'Icmp', 'Esp', 'Ah']);
+	if (!allowed.has(protocol)) throw new Error('协议只支持 *, Tcp, Udp, Icmp, Esp, Ah');
+	return protocol;
+}
+
+function normalizeSecurityAccess(value?: string) {
+	const access = String(value ?? 'Allow').trim();
+	if (access !== 'Allow' && access !== 'Deny') throw new Error('访问策略只支持 Allow 或 Deny');
+	return access;
+}
+
+function normalizeSecurityDirection(value?: string) {
+	const direction = String(value ?? 'Inbound').trim();
+	if (direction !== 'Inbound' && direction !== 'Outbound') throw new Error('方向只支持 Inbound 或 Outbound');
+	return direction;
+}
+
+function normalizeSecurityPriority(value?: number) {
+	const priority = Math.floor(Number(value ?? 1000));
+	if (!Number.isFinite(priority) || priority < 100 || priority > 4096) {
+		throw new Error('优先级必须在 100-4096 之间');
+	}
+	return priority;
+}
+
+function normalizeSecurityAddressPrefix(value: string | undefined, fallback = '*') {
+	const prefix = String(value ?? '').trim();
+	return prefix || fallback;
+}
+
+function toVmFirewallRuleInfo(rule: SecurityRule): VmFirewallRuleInfo {
+	return {
+		name: rule.name ?? '',
+		description: rule.description ?? '',
+		protocol: rule.protocol ?? '*',
+		sourcePortRange: rule.sourcePortRange ?? rule.sourcePortRanges?.join(',') ?? '*',
+		destinationPortRange:
+			rule.destinationPortRange ?? rule.destinationPortRanges?.join(',') ?? '*',
+		sourceAddressPrefix: rule.sourceAddressPrefix ?? rule.sourceAddressPrefixes?.join(',') ?? '*',
+		destinationAddressPrefix:
+			rule.destinationAddressPrefix ?? rule.destinationAddressPrefixes?.join(',') ?? '*',
+		access: rule.access ?? 'Allow',
+		priority: rule.priority ?? 0,
+		direction: rule.direction ?? 'Inbound',
+		provisioningState: rule.provisioningState ?? ''
+	};
+}
+
 async function reportCreateVmProgress(
 	reporter: CreateVmProgressReporter | undefined,
 	step: string,
@@ -2418,6 +2514,123 @@ async function createNetworkSecurityGroupForVm(
 		openPorts: openPorts.join(',')
 	});
 	return nsg;
+}
+
+async function ensureVmNetworkSecurityGroup(
+	clients: AzureClients,
+	resourceGroup: string,
+	vmName: string,
+	options: { createIfMissing?: boolean } = {}
+): Promise<{ resourceGroup: string; name: string; id: string } | null> {
+	const { vmLocation, nicResourceGroup, nicName, nic } = await getPrimaryNicAndIPv4Config(
+		clients,
+		resourceGroup,
+		vmName
+	);
+	const existingNsgId = nic.networkSecurityGroup?.id ?? '';
+	const existingNsgName = parseResourceName(existingNsgId);
+	const existingNsgResourceGroup = parseResourceGroup(existingNsgId);
+	if (existingNsgName && existingNsgResourceGroup) {
+		return {
+			resourceGroup: existingNsgResourceGroup,
+			name: existingNsgName,
+			id: existingNsgId
+		};
+	}
+	if (!options.createIfMissing) return null;
+
+	const nsgName = resourceName(vmName, 'nsg', 80);
+	const nsg = await clients.network.networkSecurityGroups.beginCreateOrUpdateAndWait(
+		nicResourceGroup,
+		nsgName,
+		{
+			location: vmLocation || nic.location || ''
+		}
+	);
+	if (!nsg.id) throw new Error('网络安全组创建失败');
+	nic.networkSecurityGroup = { id: nsg.id };
+	await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
+		nicResourceGroup,
+		nicName,
+		nic
+	);
+	return {
+		resourceGroup: nicResourceGroup,
+		name: nsgName,
+		id: nsg.id
+	};
+}
+
+export async function listVmFirewallRules(
+	clients: AzureClients,
+	resourceGroup: string,
+	vmName: string
+): Promise<{ networkSecurityGroup: string; networkSecurityGroupResourceGroup: string; rules: VmFirewallRuleInfo[] }> {
+	const nsg = await ensureVmNetworkSecurityGroup(clients, resourceGroup, vmName);
+	if (!nsg) {
+		return {
+			networkSecurityGroup: '',
+			networkSecurityGroupResourceGroup: '',
+			rules: []
+		};
+	}
+	const rules: VmFirewallRuleInfo[] = [];
+	for await (const rule of clients.network.securityRules.list(nsg.resourceGroup, nsg.name)) {
+		rules.push(toVmFirewallRuleInfo(rule));
+	}
+	rules.sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
+	return {
+		networkSecurityGroup: nsg.name,
+		networkSecurityGroupResourceGroup: nsg.resourceGroup,
+		rules
+	};
+}
+
+export async function upsertVmFirewallRule(
+	clients: AzureClients,
+	resourceGroup: string,
+	vmName: string,
+	input: VmFirewallRuleInput
+): Promise<VmFirewallRuleInfo> {
+	const destinationPortRange = normalizeSecurityPortRange(input.destinationPortRange);
+	const sourcePortRange = normalizeSecurityPortRange(input.sourcePortRange, '*');
+	const name = normalizeSecurityRuleName(input.name, destinationPortRange);
+	const nsg = await ensureVmNetworkSecurityGroup(clients, resourceGroup, vmName, {
+		createIfMissing: true
+	});
+	if (!nsg) throw new Error('网络安全组创建失败');
+	const rule = await clients.network.securityRules.beginCreateOrUpdateAndWait(
+		nsg.resourceGroup,
+		nsg.name,
+		name,
+		{
+			name,
+			description: String(input.description ?? '').trim().slice(0, 140),
+			protocol: normalizeSecurityProtocol(input.protocol),
+			sourcePortRange,
+			destinationPortRange,
+			sourceAddressPrefix: normalizeSecurityAddressPrefix(input.sourceAddressPrefix),
+			destinationAddressPrefix: normalizeSecurityAddressPrefix(input.destinationAddressPrefix),
+			access: normalizeSecurityAccess(input.access),
+			priority: normalizeSecurityPriority(input.priority),
+			direction: normalizeSecurityDirection(input.direction)
+		}
+	);
+	return toVmFirewallRuleInfo(rule);
+}
+
+export async function deleteVmFirewallRule(
+	clients: AzureClients,
+	resourceGroup: string,
+	vmName: string,
+	ruleName: string
+) {
+	const cleanName = sanitizeResourceName(ruleName.trim());
+	if (!cleanName) throw new Error('缺少规则名称');
+	const nsg = await ensureVmNetworkSecurityGroup(clients, resourceGroup, vmName);
+	if (!nsg) throw new Error('VM 尚未绑定网络安全组');
+	await clients.network.securityRules.beginDeleteAndWait(nsg.resourceGroup, nsg.name, cleanName);
+	return { networkSecurityGroup: nsg.name, ruleName: cleanName };
 }
 
 async function createNetworkForVm(
