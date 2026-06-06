@@ -3,7 +3,11 @@ import { ensureClientIpProxyProfile } from './auto-client-ip-proxy';
 import { DIRECT_PROXY, type AzureProxySelection } from './azure';
 import { findAccountByUser, findProxyProfileByUser, listAccountsByUser } from './db/repo';
 import type { AzureAccount, User } from './db/schema';
-import { proxyProfileToRuntimeReady, type ProxyRuntimeConfig } from './proxy';
+import {
+	proxyProfileToAzureReady,
+	proxyProfileToRuntimeReady,
+	type ProxyRuntimeConfig
+} from './proxy';
 
 export type AzureAccountWithProxy = {
 	account: AzureAccount;
@@ -24,13 +28,19 @@ export async function getUserAccount(userId: number, accountId: number): Promise
 export async function getUserAccountWithProxy(
 	userId: number,
 	accountId: number,
-	options: { clientIp?: string } = {}
+	options: { clientIp?: string; validateProxy?: boolean; timeoutMs?: number } = {}
 ): Promise<AzureAccountWithProxy> {
 	const account = await getUserAccount(userId, accountId);
 	if (!account.proxyProfileId) return { account, proxy: null };
 
 	const profile = await findProxyProfileByUser(userId, account.proxyProfileId);
-	return { account, proxy: profile ? await proxyProfileToRuntimeReady(profile, options) : null };
+	if (!profile) return { account, proxy: null };
+	return {
+		account,
+		proxy: options.validateProxy
+			? await proxyProfileToAzureReady(profile, options)
+			: await proxyProfileToRuntimeReady(profile, options)
+	};
 }
 
 export async function getUserAccountWithSelectedProxy(
@@ -38,6 +48,8 @@ export async function getUserAccountWithSelectedProxy(
 	accountId: number,
 	options: {
 		clientIp?: string;
+		validateProxy?: boolean;
+		timeoutMs?: number;
 		proxyMode?: string | null;
 		proxyProfileId?: number | null;
 	} = {}
@@ -50,7 +62,12 @@ export async function getUserAccountWithSelectedProxy(
 
 	if (mode === 'client_ip') {
 		const profile = await ensureClientIpProxyProfile(userId, options.clientIp ?? '');
-		return { account, proxy: await proxyProfileToRuntimeReady(profile, options) };
+		return {
+			account,
+			proxy: options.validateProxy
+				? await proxyProfileToAzureReady(profile, options)
+				: await proxyProfileToRuntimeReady(profile, options)
+		};
 	}
 
 	if (mode === 'profile') {
@@ -58,7 +75,12 @@ export async function getUserAccountWithSelectedProxy(
 		if (!profileId) throw new Error('缺少 proxy_profile_id');
 		const profile = await findProxyProfileByUser(userId, profileId);
 		if (!profile) throw new Error('代理配置不存在');
-		return { account, proxy: await proxyProfileToRuntimeReady(profile, options) };
+		return {
+			account,
+			proxy: options.validateProxy
+				? await proxyProfileToAzureReady(profile, options)
+				: await proxyProfileToRuntimeReady(profile, options)
+		};
 	}
 
 	throw new Error('代理选择无效');

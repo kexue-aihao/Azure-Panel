@@ -15,7 +15,9 @@ export const GET: RequestHandler = async (event) => {
 
 	try {
 		const { account, proxy } = await getUserAccountWithProxy(user.id, accountId, {
-			clientIp: getRequestClientIp(event)
+			clientIp: getRequestClientIp(event),
+			validateProxy: true,
+			timeoutMs: 10_000
 		});
 		const status = await getAccountSubscriptionStatus(account, proxy);
 

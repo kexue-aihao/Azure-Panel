@@ -34,7 +34,12 @@ import {
 } from './azure';
 import type { AzureAccount, ProxyProfile, WorkflowPolicy } from './db/schema';
 import { createRainbowDnsClient, syncDnsBindingToIp } from './dns';
-import { proxyProfileToRuntimeReady, proxySource, type ProxyRuntimeConfig } from './proxy';
+import {
+	maskProxy,
+	proxyProfileToAzureReady,
+	proxySource,
+	type ProxyRuntimeConfig
+} from './proxy';
 import {
 	buildReplenishmentMessage,
 	buildSubscriptionAlertMessage,
@@ -56,6 +61,10 @@ type WorkerAccountRuntime = {
 type WorkerBootProxyRuntime = {
 	name: string;
 	proxy: ProxyRuntimeConfig;
+};
+
+type WorkerRuntimeOptions = {
+	bootProxyPool?: WorkerBootProxyRuntime[];
 };
 
 type TrackedVm = {
@@ -191,9 +200,14 @@ async function collectBootProxyPool(policy: WorkflowPolicy): Promise<WorkerBootP
 
 	for (const profile of bootProfiles) {
 		try {
+			const proxy = await proxyProfileToAzureReady(profile, {
+				timeoutMs: 10_000,
+				autoDetectHttpSocks: true,
+				updateProfileType: true
+			});
 			pool.push({
 				name: profile.name,
-				proxy: await proxyProfileToRuntimeReady(profile)
+				proxy
 			});
 		} catch (err) {
 			await insertWorkflowLog(
@@ -229,34 +243,84 @@ function pickBootProxy(pool: WorkerBootProxyRuntime[]) {
 	return pool[Math.floor(Math.random() * pool.length)] ?? null;
 }
 
-async function createRuntimeForAccount(
+function bootProxyLabel(proxy: WorkerBootProxyRuntime | null) {
+	return proxy ? `${proxy.name} (${maskProxy(proxy.proxy)})` : '';
+}
+
+async function resolveWorkerProxyForAccount(
 	policyId: number,
-	account: AzureAccount
-): Promise<WorkerAccountRuntime | null> {
+	account: AzureAccount,
+	options: WorkerRuntimeOptions = {}
+): Promise<{ proxy: ProxyRuntimeConfig | null; label: string }> {
 	const proxyProfile = account.proxyProfileId
 		? await findProxyProfileByUser(account.userId, account.proxyProfileId)
 		: null;
+
 	if (proxyProfile && proxySource(proxyProfile) === 'client_ip') {
 		if (policyId > 0) {
 			await insertWorkflowLog(
 				policyId,
 				'account_pool',
 				'skipped',
-				`账号 ${account.name} 使用当前访问 IP 代理，后台定时任务无法使用，已跳过`
+				`账号 ${account.name} 使用当前访问 IP 代理，后台定时任务无法获取访问者 IP，改用补机代理池或直连`
 			);
 		}
-		return null;
+	} else if (proxyProfile) {
+		try {
+			const proxy = await proxyProfileToAzureReady(proxyProfile, {
+				timeoutMs: 10_000,
+				autoDetectHttpSocks: true,
+				updateProfileType: true
+			});
+			return {
+				proxy,
+				label: `账号绑定代理 ${proxyProfile.name} (${maskProxy(proxy)})`
+			};
+		} catch (err) {
+			if (policyId > 0) {
+				await insertWorkflowLog(
+					policyId,
+					'account_pool',
+					'warning',
+					`账号 ${account.name} 绑定代理 ${proxyProfile.name} 当前不可用，将尝试补机代理池备用出口: ${errorMessage(err)}`
+				);
+			}
+		}
 	}
 
-	const proxy = proxyProfile ? await proxyProfileToRuntimeReady(proxyProfile) : null;
-	return {
-		account,
-		proxy,
-		clients: createAzureClients(account, proxy)
-	};
+	const bootProxy = pickBootProxy(options.bootProxyPool ?? []);
+	if (bootProxy) {
+		return {
+			proxy: bootProxy.proxy,
+			label: `补机代理池 ${bootProxyLabel(bootProxy)}`
+		};
+	}
+
+	return { proxy: null, label: '服务器源站 IP/直连' };
 }
 
-async function collectAccountPoolRuntimes(policy: WorkflowPolicy, primaryAccount: AzureAccount) {
+async function createRuntimeForAccount(
+	policyId: number,
+	account: AzureAccount,
+	options: WorkerRuntimeOptions = {}
+): Promise<WorkerAccountRuntime | null> {
+	const { proxy: runtimeProxy, label } = await resolveWorkerProxyForAccount(policyId, account, options);
+	if (policyId > 0) {
+		await insertWorkflowLog(policyId, 'account_pool', 'success', `账号 ${account.name} 检测出口: ${label}`);
+	}
+	return {
+		account,
+		proxy: runtimeProxy,
+		clients: createAzureClients(account, runtimeProxy)
+	};
+
+}
+
+async function collectAccountPoolRuntimes(
+	policy: WorkflowPolicy,
+	primaryAccount: AzureAccount,
+	options: WorkerRuntimeOptions = {}
+) {
 	const accounts = await listAccountsByUser(policy.userId);
 	const runtimes: WorkerAccountRuntime[] = [];
 	await insertWorkflowLog(
@@ -267,7 +331,7 @@ async function collectAccountPoolRuntimes(policy: WorkflowPolicy, primaryAccount
 	);
 	for (const account of accounts) {
 		try {
-			const runtime = await createRuntimeForAccount(policy.id, account);
+			const runtime = await createRuntimeForAccount(policy.id, account, options);
 			if (runtime) runtimes.push(runtime);
 		} catch (err) {
 			await insertWorkflowLog(
@@ -280,7 +344,7 @@ async function collectAccountPoolRuntimes(policy: WorkflowPolicy, primaryAccount
 	}
 
 	if (!runtimes.some((runtime) => runtime.account.id === primaryAccount.id)) {
-		const primaryRuntime = await createRuntimeForAccount(policy.id, primaryAccount);
+		const primaryRuntime = await createRuntimeForAccount(policy.id, primaryAccount, options);
 		if (primaryRuntime) runtimes.push(primaryRuntime);
 	}
 	return runtimes;
@@ -438,7 +502,8 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 				continue;
 			}
 
-			const primaryRuntime = await createRuntimeForAccount(policy.id, account);
+			const bootProxyPool = await collectBootProxyPool(policy);
+			const primaryRuntime = await createRuntimeForAccount(policy.id, account, { bootProxyPool });
 			if (!primaryRuntime) continue;
 
 			const status = await getAccountSubscriptionStatus(account, primaryRuntime.proxy);
@@ -467,8 +532,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 			if (!shouldReplenish) continue;
 
 			const targetCount = safeReplenishTargetCount(policy);
-			const accountPoolRuntimes = await collectAccountPoolRuntimes(policy, account);
-			const bootProxyPool = await collectBootProxyPool(policy);
+			const accountPoolRuntimes = await collectAccountPoolRuntimes(policy, account, { bootProxyPool });
 			const tracked = await collectTrackedVms(policy, accountPoolRuntimes);
 			let running = 0;
 			const runningVms: TrackedVm[] = [];

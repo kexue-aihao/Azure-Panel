@@ -12,6 +12,7 @@ import {
 } from '@azure/core-rest-pipeline';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { decryptSecret } from './crypto';
+import { updateProxyProfileType } from './db/repo';
 import type { ProxyProfile } from './db/schema';
 import { ensureManagedProxyForProfile } from './managed-proxy-core';
 import { ShadowsocksProxyAgent } from './shadowsocks-agent';
@@ -594,6 +595,47 @@ export async function proxyProfileToRuntimeReady(
 	const managedProxy = await ensureManagedProxyForProfile(profile);
 	if (managedProxy) return managedProxy;
 	return proxyProfileToRuntime(profile, options);
+}
+
+function canAutoDetectHttpSocks(profile: ProxyProfile, proxy: ProxyRuntimeConfig) {
+	if (profile.managedCore) return false;
+	return proxy.type === 'http' || proxy.type === 'socks5';
+}
+
+export async function proxyProfileToAzureReady(
+	profile: ProxyProfile,
+	options: {
+		clientIp?: string;
+		timeoutMs?: number;
+		autoDetectHttpSocks?: boolean;
+		updateProfileType?: boolean;
+	} = {}
+): Promise<ProxyRuntimeConfig> {
+	const proxy = await proxyProfileToRuntimeReady(profile, { clientIp: options.clientIp });
+	const timeoutMs = options.timeoutMs ?? 10_000;
+	try {
+		return await validateProxyConnection(proxy, { clientIp: options.clientIp, timeoutMs });
+	} catch (firstErr) {
+		if (options.autoDetectHttpSocks !== false && canAutoDetectHttpSocks(profile, proxy)) {
+			try {
+				const detected = await detectWorkingBareProxyProtocol(proxy, {
+					clientIp: options.clientIp,
+					timeoutMs
+				});
+				if (options.updateProfileType !== false && detected.type !== profile.type) {
+					await updateProxyProfileType(profile.userId, profile.id, detected.type);
+				}
+				return detected;
+			} catch (detectErr) {
+				throw new Error(
+					`代理 ${profile.name} 当前类型 ${proxy.type.toUpperCase()} 验证失败，并且自动识别 HTTP/SOCKS 也失败: ${
+						detectErr instanceof Error ? detectErr.message : String(detectErr)
+					}`
+				);
+			}
+		}
+		throw firstErr;
+	}
 }
 
 function connectWithTimeout(options: { host: string; port: number; tls: boolean; timeoutMs: number }) {
