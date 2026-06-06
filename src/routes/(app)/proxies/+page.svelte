@@ -359,10 +359,14 @@
 		return result.telegram_error ? `；Telegram 未通知：${result.telegram_error}` : '';
 	}
 
-	async function checkProxyProfile(proxy: ProxyProfile) {
+	async function checkProxyProfile(proxy: ProxyProfile, options: { notify?: boolean } = {}) {
 		const result = await api<ProxyCheckResult>('/api/user/proxy/check', {
 			method: 'POST',
-			body: JSON.stringify({ proxy_id: proxy.id })
+			body: JSON.stringify({
+				proxy_id: proxy.id,
+				notify: options.notify !== false,
+				silent: options.notify === false
+			})
 		});
 		if (result.deleted) {
 			proxies = proxies.filter((item) => item.id !== proxy.id);
@@ -437,12 +441,12 @@
 			for (const proxy of targets) {
 				checkingProxyId = proxy.id;
 				try {
-					const result = await checkProxyProfile(proxy);
+					const result = await checkProxyProfile(proxy, { notify: false });
 					if (result.status === 'available') available += 1;
 					else if (result.status === 'deleted') deleted += 1;
 					else failed += 1;
 					proxyCheckResults = [result, ...proxyCheckResults].slice(0, 8);
-					toast = `正在单线程测活代理 ${proxyCheckProgress.done + 1}/${targets.length}：${result.message}${proxyNotifyText(result)}`;
+					toast = `正在静默单线程测活代理 ${proxyCheckProgress.done + 1}/${targets.length}：${result.message}`;
 				} catch (err) {
 					failed += 1;
 					const message = err instanceof Error ? err.message : String(err);
@@ -474,7 +478,7 @@
 					failed
 				};
 			}
-			toast = `代理单线程测活完成：可用 ${available} 个，已删除无效 ${deleted} 个，请求失败 ${failed} 个`;
+			toast = `代理静默单线程测活完成：可用 ${available} 个，已删除无效 ${deleted} 个，请求失败 ${failed} 个，未触发 Telegram 通知`;
 			await load();
 		} finally {
 			proxyChecking = false;
@@ -740,7 +744,7 @@
 				disabled={proxyChecking || customProxies.length === 0}
 				onclick={() => void checkAllProxies()}
 			>
-				{proxyChecking ? '测活中...' : '单线程测活全部代理'}
+				{proxyChecking ? '静默测活中...' : '一键静默测活并删除无效代理'}
 			</button>
 		</div>
 

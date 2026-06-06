@@ -1084,6 +1084,40 @@
 		}
 	}
 
+	async function enableDdos(vm: Vm) {
+		if (!accountId) return;
+		const ok = confirm(
+			`确认为 ${vm.name} 单独开启 Azure DDoS 防护计划吗？DDoS Protection Plan 可能产生 Azure 官方额外费用。`
+		);
+		if (!ok) return;
+		ipActionLoading = `${vm.name}:ddos`;
+		beginOperationProgress('开启 DDoS 防护计划', vm.name);
+		try {
+			const result = await requestOperationWithProgress<{
+				message: string;
+				ddos_protection_plan_name: string;
+				virtual_network_name: string;
+				public_ipv4: string;
+			}>('/api/user/azure/vm/ddos', {
+				method: 'POST',
+				body: {
+					account_id: accountId,
+					...proxyPayload(),
+					resource_group: vm.resource_group,
+					vm_name: vm.name
+				}
+			});
+			toast = `${result.message}，VNet=${result.virtual_network_name || '-'}，Plan=${result.ddos_protection_plan_name || '-'}`;
+			await loadVms();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'DDoS 防护开启失败';
+			failOperationProgress(message);
+			toast = message;
+		} finally {
+			ipActionLoading = '';
+		}
+	}
+
 	function resetFirewallForm() {
 		firewallForm = {
 			name: '',
@@ -1904,6 +1938,13 @@
 								disabled={firewallLoading && firewallVm?.name === vm.name}
 							>
 								{firewallLoading && firewallVm?.name === vm.name ? '加载中...' : '防火墙'}
+							</button>
+							<button
+								class="btn-secondary"
+								onclick={() => void enableDdos(vm)}
+								disabled={vmActionBusy(vm.name)}
+							>
+								{ipActionLoading === `${vm.name}:ddos` ? '开启中...' : 'DDoS'}
 							</button>
 							<button
 								class="btn-danger"

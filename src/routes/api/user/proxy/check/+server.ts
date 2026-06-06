@@ -88,15 +88,27 @@ async function notifyProxyHealth(input: {
 	}
 }
 
+function silentProxyHealthNotification() {
+	return {
+		telegram_notified: false,
+		telegram_sent: 0,
+		telegram_failed: 0,
+		telegram_error: ''
+	};
+}
+
 export const POST: RequestHandler = async (event) => {
 	const user = await requireUser(event);
 	const body = (await event.request.json().catch(() => ({}))) as {
 		proxy_id?: unknown;
 		delete_on_fail?: unknown;
+		notify?: unknown;
+		silent?: unknown;
 	};
 	const proxyProfileId = Number(body.proxy_id ?? 0) || 0;
 	if (!proxyProfileId) return fail('缺少 proxy_id');
 	const deleteOnFail = body.delete_on_fail !== false;
+	const notifyEnabled = body.notify !== false && body.silent !== true;
 
 	const profile = await findProxyProfileByUser(user.id, proxyProfileId);
 	if (!profile) return fail('代理配置不存在', 404);
@@ -114,13 +126,15 @@ export const POST: RequestHandler = async (event) => {
 		});
 		const refreshed = (await findProxyProfileByUser(user.id, proxyProfileId)) ?? profile;
 		const resultProfile = publicProxyProfile(refreshed);
-		const notify = await notifyProxyHealth({
-			userId: user.id,
-			profile: refreshed,
-			publicProfile: resultProfile,
-			status: 'available',
-			checkedAt
-		});
+		const notify = notifyEnabled
+			? await notifyProxyHealth({
+					userId: user.id,
+					profile: refreshed,
+					publicProfile: resultProfile,
+					status: 'available',
+					checkedAt
+				})
+			: silentProxyHealthNotification();
 
 		return ok({
 			proxy_id: proxyProfileId,
@@ -137,14 +151,16 @@ export const POST: RequestHandler = async (event) => {
 	} catch (err) {
 		const error = err instanceof Error ? err.message : String(err);
 		if (!deleteOnFail) {
-			const notify = await notifyProxyHealth({
-				userId: user.id,
-				profile,
-				publicProfile,
-				status: 'failed',
-				error,
-				checkedAt
-			});
+			const notify = notifyEnabled
+				? await notifyProxyHealth({
+						userId: user.id,
+						profile,
+						publicProfile,
+						status: 'failed',
+						error,
+						checkedAt
+					})
+				: silentProxyHealthNotification();
 
 			return ok({
 				proxy_id: proxyProfileId,
@@ -162,14 +178,16 @@ export const POST: RequestHandler = async (event) => {
 
 		await stopManagedProxyForProfile(profile).catch(() => undefined);
 		await deleteProxyProfile(user.id, proxyProfileId);
-		const notify = await notifyProxyHealth({
-			userId: user.id,
-			profile,
-			publicProfile,
-			status: 'deleted',
-			error,
-			checkedAt
-		});
+		const notify = notifyEnabled
+			? await notifyProxyHealth({
+					userId: user.id,
+					profile,
+					publicProfile,
+					status: 'deleted',
+					error,
+					checkedAt
+				})
+			: silentProxyHealthNotification();
 
 		return ok({
 			proxy_id: proxyProfileId,
