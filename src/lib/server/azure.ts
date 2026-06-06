@@ -1038,12 +1038,28 @@ function displayLocationName(location: string) {
 	return LOCATION_DISPLAY_NAMES[location.toLowerCase()] ?? location;
 }
 
+function regionOptionFromLocation(location: string): AzureRegionOption | null {
+	const name = normalizeLocationName(location);
+	if (!name) return null;
+	return {
+		name,
+		displayName: displayLocationName(name),
+		availableSizeCount: 0,
+		highestCoreSize: null,
+		largestMemorySize: null
+	};
+}
+
 function isAzureRegionOption(region: AzureRegionOption | null): region is AzureRegionOption {
 	return region !== null;
 }
 
 function azureErrorMessage(err: unknown) {
-	if (err instanceof Error && err.message) return err.message;
+	const message = err instanceof Error && err.message ? err.message : '';
+	if (/aborted|body stream|response as text|terminated|socket hang up/i.test(message)) {
+		return `${message}。Azure 返回数据较大时代理链路可能中断，已尝试改用轻量官方 API 回退；如果仍失败，请切换直连或更稳定的代理后重试`;
+	}
+	if (message) return message;
 	const record = err as {
 		message?: unknown;
 		code?: unknown;
@@ -1354,6 +1370,21 @@ async function listResourceSkuCapabilitiesForLocation(
 	}));
 }
 
+async function listResourceSkuCapabilitiesForLocationSafe(
+	clients: AzureClients,
+	location: string
+): Promise<VmCapability[]> {
+	try {
+		return await listResourceSkuCapabilitiesForLocation(clients, location);
+	} catch (err) {
+		console.warn(
+			`[azure] ResourceSkus location query failed for ${location}, falling back to VirtualMachineSizes:`,
+			azureErrorMessage(err)
+		);
+		return [];
+	}
+}
+
 async function listResourceSkuCapabilitiesByRegion(
 	clients: AzureClients
 ): Promise<Map<string, VmCapability[]>> {
@@ -1413,6 +1444,35 @@ async function listVmSizeCapabilitiesForLocation(
 		...capability,
 		restrictionReasons: [...capability.restrictionReasons]
 	}));
+}
+
+async function listProviderVmRegions(clients: AzureClients): Promise<AzureRegionOption[]> {
+	const key = `provider-vm-regions:${clients.subscriptionId}`;
+	const regions = await cachedAzureQuery(
+		key,
+		cacheTtlMs('AZURE_REGION_CACHE_TTL_SECONDS', 300),
+		async () => {
+			const computeProvider = await clients.resources.providers.get('Microsoft.Compute');
+			const virtualMachines = computeProvider.resourceTypes?.find(
+				(resourceType) => resourceType.resourceType?.toLowerCase() === 'virtualmachines'
+			);
+			const fromProvider =
+				virtualMachines?.locations?.map(regionOptionFromLocation).filter(isAzureRegionOption) ?? [];
+			if (fromProvider.length > 0) return fromProvider;
+
+			const providerTypes = await clients.resources.providerResourceTypes.list('Microsoft.Compute');
+			const vmType = providerTypes.value?.find(
+				(resourceType) => resourceType.resourceType?.toLowerCase() === 'virtualmachines'
+			);
+			return vmType?.locations?.map(regionOptionFromLocation).filter(isAzureRegionOption) ?? [];
+		}
+	);
+
+	const byName = new Map<string, AzureRegionOption>();
+	for (const region of regions) {
+		if (!byName.has(region.name)) byName.set(region.name, { ...region });
+	}
+	return [...byName.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
 function resourceGroupToInfo(group: ResourceGroup): AzureResourceGroupInfo {
@@ -1524,7 +1584,7 @@ export async function listVmCapabilities(
 	location: string
 ): Promise<VmCapabilitiesResult> {
 	const [resourceSkus, legacySizes, quotas] = await Promise.all([
-		listResourceSkuCapabilitiesForLocation(clients, location),
+		listResourceSkuCapabilitiesForLocationSafe(clients, location),
 		listVmSizeCapabilitiesForLocation(clients, location).catch(() => []),
 		listComputeQuotas(clients, location)
 	]);
@@ -1553,7 +1613,15 @@ export async function listAvailableVmRegions(clients: AzureClients): Promise<Azu
 	try {
 		byRegion = await listResourceSkuCapabilitiesByRegion(clients);
 	} catch (err) {
-		throw new Error(`查询 Azure 官方可用规格失败：${azureErrorMessage(err)}`);
+		const fallbackRegions = await listProviderVmRegions(clients).catch(() => []);
+		if (fallbackRegions.length > 0) {
+			console.warn(
+				'[azure] ResourceSkus region discovery failed, falling back to provider locations:',
+				azureErrorMessage(err)
+			);
+			return fallbackRegions;
+		}
+		throw new Error(`查询 Azure 官方可用区域失败：${azureErrorMessage(err)}`);
 	}
 
 	if (byRegion.size === 0) {

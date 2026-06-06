@@ -315,10 +315,10 @@
 	}
 
 	function regionLabel(region: AzureRegionOption) {
-		const parts = [
-			`${region.displayName || region.name} (${region.name})`,
-			`${region.availableSizeCount} 个可用规格`
-		];
+		const parts = [`${region.displayName || region.name} (${region.name})`];
+		if (region.availableSizeCount > 0) {
+			parts.push(`${region.availableSizeCount} 个可用规格`);
+		}
 		if (region.highestCoreSize) {
 			parts.push(`最高 ${region.highestCoreSize.name}/${region.highestCoreSize.cores}C`);
 		}
