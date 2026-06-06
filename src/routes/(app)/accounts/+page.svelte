@@ -362,6 +362,12 @@
 								{proxySavingAccountId === account.id ? '保存中...' : '保存代理'}
 							</button>
 						</div>
+						{#if proxySavingAccountId === account.id}
+							<div class="progress-track mt-3">
+								<div class="progress-fill running bg-primary" style="width: 70%"></div>
+							</div>
+							<div class="mt-1 text-xs text-muted">正在保存此账号的代理出口配置...</div>
+						{/if}
 					</div>
 					<div class="flex shrink-0 flex-col gap-2">
 						<a class="btn-secondary" href={`/resources?account_id=${account.id}`}>查看资源</a>

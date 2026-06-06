@@ -351,6 +351,10 @@
 		return 'bg-primary';
 	}
 
+	function progressAnimation(progress: CreateProgressEvent[]) {
+		return progress.some((item) => item.status === 'running') ? 'running' : '';
+	}
+
 	function beginOperationProgress(title: string, target: string) {
 		operationTitle = title;
 		operationTarget = target;
@@ -1424,9 +1428,9 @@
 					<div class="text-sm font-medium">创建流程</div>
 					<div class="text-xs text-muted">{createProgress.length} 个步骤</div>
 				</div>
-				<div class="mb-3 h-2 overflow-hidden rounded-full bg-border">
+				<div class="progress-track mb-3">
 					<div
-						class={`h-full rounded-full transition-all duration-300 ${progressTone(createProgress)}`}
+						class={`progress-fill ${progressTone(createProgress)} ${progressAnimation(createProgress)}`}
 						style={`width: ${progressPercent(createProgress)}%`}
 					></div>
 				</div>
@@ -1484,9 +1488,9 @@
 			</div>
 			<div class="text-xs text-muted">{deleteProgress.length} 个步骤</div>
 		</div>
-		<div class="h-2 overflow-hidden rounded-full bg-border">
+		<div class="progress-track">
 			<div
-				class={`h-full rounded-full transition-all duration-300 ${progressTone(deleteProgress)}`}
+				class={`progress-fill ${progressTone(deleteProgress)} ${progressAnimation(deleteProgress)}`}
 				style={`width: ${progressPercent(deleteProgress)}%`}
 			></div>
 		</div>
@@ -1523,9 +1527,9 @@
 			</div>
 			<div class="text-xs text-muted">{operationProgress.length} 个步骤</div>
 		</div>
-		<div class="h-2 overflow-hidden rounded-full bg-border">
+		<div class="progress-track">
 			<div
-				class={`h-full rounded-full transition-all duration-300 ${progressTone(operationProgress)}`}
+				class={`progress-fill ${progressTone(operationProgress)} ${progressAnimation(operationProgress)}`}
 				style={`width: ${progressPercent(operationProgress)}%`}
 			></div>
 		</div>
