@@ -147,7 +147,7 @@
 		admin_username: 'azureuser',
 		admin_password: '',
 		enable_ipv6: true,
-		open_ports: '22,80,443',
+		open_ports: '*',
 		enable_ddos_protection: false,
 		userdata: '',
 		ip_prefix: '',
@@ -969,10 +969,10 @@
 				id="create-open-ports"
 				class="input"
 				bind:value={createForm.open_ports}
-				placeholder="22,80,443 或 1000-2000，* 表示全部端口"
+				placeholder="* 表示全部端口，也可填写 22,80,443 或 1000-2000"
 			/>
 			<p class="mt-1 text-xs text-muted">
-				创建时会同步创建 Azure 网络安全组（NSG）并绑定到网卡，只放行这里填写的入站端口。
+				创建时会同步创建 Azure 网络安全组（NSG）并绑定到网卡；默认使用 * 放行全部入站端口。
 			</p>
 		</div>
 		<label class="flex items-center gap-2 text-sm">

@@ -2134,7 +2134,7 @@ function normalizeOpenPorts(value?: string | string[]) {
 	const ports = rawParts
 		.map((part) => String(part).trim())
 		.filter(Boolean);
-	const normalized = ports.length > 0 ? ports : ['22', '80', '443'];
+	const normalized = ports.length > 0 ? ports : ['*'];
 	const unique: string[] = [];
 
 	for (const port of normalized) {
