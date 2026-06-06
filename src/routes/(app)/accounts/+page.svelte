@@ -49,6 +49,13 @@
 		tenantId: string;
 	};
 	type AccountAddResult = Account & { pool_count?: number };
+	type AccountPoolCheckResult = {
+		pool_count: number;
+		notified: boolean;
+		sent: number;
+		failed: number;
+		notify_error: string;
+	};
 
 	let accounts = $state<Account[]>([]);
 	let proxies = $state<ProxyProfile[]>([]);
@@ -66,6 +73,7 @@
 	let toast = $state('');
 	let accountProxyDrafts = $state<Record<number, { proxy_mode: ProxyMode; proxy_profile_id: string }>>({});
 	let proxySavingAccountId = $state<number | null>(null);
+	let checkingPoolCount = $state(false);
 	let fixedProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
 
 	function resetForm() {
@@ -310,6 +318,27 @@
 		}
 	}
 
+	async function checkPoolCountAndNotify() {
+		checkingPoolCount = true;
+		try {
+			const result = await api<AccountPoolCheckResult>('/api/user/azure/account/pool/check', {
+				method: 'POST'
+			});
+			await load();
+			if (result.notified) {
+				toast = `号池剩余 ${result.pool_count} 个账号，已通知 ${result.sent} 个 Telegram 目标${
+					result.failed ? `，失败 ${result.failed} 个` : ''
+				}`;
+			} else {
+				toast = `号池剩余 ${result.pool_count} 个账号，Telegram 未通知：${result.notify_error || '没有可用通知目标'}`;
+			}
+		} catch (err) {
+			toast = err instanceof Error ? err.message : '号池剩余数量检测失败';
+		} finally {
+			checkingPoolCount = false;
+		}
+	}
+
 	onMount(() => {
 		void load();
 		void loadClientIpProxy();
@@ -440,8 +469,24 @@
 	<div class="card space-y-3 p-5">
 		<div class="flex items-center justify-between gap-3">
 			<h2 class="text-lg font-medium">Azure 账号池</h2>
-			<span class="badge bg-primary/10 text-primary">剩余 {accounts.length} 个</span>
+			<div class="flex flex-wrap items-center justify-end gap-2">
+				<span class="badge bg-primary/10 text-primary">剩余 {accounts.length} 个</span>
+				<button
+					class="btn-secondary text-xs"
+					type="button"
+					onclick={() => void checkPoolCountAndNotify()}
+					disabled={checkingPoolCount}
+				>
+					{checkingPoolCount ? '检测通知中...' : '检测剩余并通知'}
+				</button>
+			</div>
 		</div>
+		{#if checkingPoolCount}
+			<div class="progress-track running">
+				<div class="progress-fill bg-primary" style="width: 65%"></div>
+			</div>
+			<p class="text-xs text-muted">正在检测 Azure 号池剩余数量并发送 Telegram 通知...</p>
+		{/if}
 		{#if accounts.length === 0}
 			<p class="text-sm text-muted">号池里还没有账号</p>
 		{:else}
