@@ -57,10 +57,23 @@
 			remark?: string;
 		};
 	};
+	type ProxyAddResult =
+		| ProxyProfile
+		| {
+				mode: 'api';
+				raw_type: 'auto' | 'http' | 'socks5';
+				total_candidates: number;
+				imported: number;
+				failed: number;
+				errors: string[];
+				proxies: ProxyProfile[];
+		  };
 
 	let proxies = $state<ProxyProfile[]>([]);
 	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
 	let shareLink = $state('');
+	let proxyApiUrl = $state('');
+	let proxyApiLimit = $state(10);
 	let rawProxyType = $state<'auto' | 'socks5' | 'http'>('auto');
 	let managedCore = $state<'sing-box' | 'xray'>('sing-box');
 	let parsedShareLink = $state<ParsedShareLink | null>(null);
@@ -95,6 +108,7 @@
 	let requiresUsername = $derived(form.type === 'http' || form.type === 'https' || form.type === 'socks5');
 	let isShadowsocks = $derived(form.type === 'shadowsocks');
 	let isManagedShareLink = $derived(Boolean(parsedShareLink?.managed_supported && shareLink.trim()));
+	let isProxyApiMode = $derived(Boolean(proxyApiUrl.trim()));
 	let customProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
 
 	async function load() {
@@ -111,17 +125,27 @@
 		if (saving) return;
 		saving = true;
 		try {
-			await api('/api/user/proxy/add', {
+			const result = await api<ProxyAddResult>('/api/user/proxy/add', {
 				method: 'POST',
 				body: JSON.stringify({
 					...form,
 					share_link: shareLink,
+					proxy_api_url: proxyApiUrl,
+					proxy_api_limit: proxyApiLimit,
 					raw_type: rawProxyType,
 					managed_core: managedCore
 				})
 			});
-			toast = '代理配置已添加';
+			if ('mode' in result && result.mode === 'api') {
+				toast = `代理 API 导入完成：成功 ${result.imported} 个，失败 ${result.failed} 个，识别 ${result.total_candidates} 条${
+					result.errors.length ? `；前几条错误：${result.errors.slice(0, 3).join('；')}` : ''
+				}`;
+			} else {
+				toast = '代理配置已添加';
+			}
 			shareLink = '';
+			proxyApiUrl = '';
+			proxyApiLimit = 10;
 			rawProxyType = 'auto';
 			managedCore = 'sing-box';
 			parsedShareLink = null;
@@ -319,7 +343,38 @@
 			{/if}
 		</div>
 
-		<input class="input" bind:value={form.name} placeholder="标注" required />
+		<div class="space-y-2 rounded-lg border border-border bg-background p-3">
+			<label class="text-sm text-muted" for="proxy-api-url">代理 API 链接（可选，支持批量导入）</label>
+			<textarea
+				id="proxy-api-url"
+				class="input min-h-20 font-mono text-xs"
+				bind:value={proxyApiUrl}
+				placeholder="例如 https://www.miyaip.com/api/ProxyLogic/Generate?Num=10&SessionTime=30&Server=us&Format=0&Crc=...&GenType=socks5"
+			></textarea>
+			<div class="grid gap-2 sm:grid-cols-[160px_140px_1fr]">
+				<select class="input" bind:value={rawProxyType} onchange={clearParsedShareLink}>
+					<option value="auto">自动识别 http/socks5</option>
+					<option value="socks5">API 返回按 socks5</option>
+					<option value="http">API 返回按 http</option>
+				</select>
+				<input
+					class="input"
+					type="number"
+					min="1"
+					max="100"
+					bind:value={proxyApiLimit}
+					placeholder="导入数量"
+				/>
+				<div class="text-xs text-muted">
+					API 返回支持一行一个代理、JSON 数组、或嵌套字段；若链接里有 GenType=socks5/http，会自动按该协议优先识别。
+				</div>
+			</div>
+			<p class="text-xs text-muted">
+				填写代理 API 链接后点击下方提交，会自动拉取、解析、逐条验证并保存可用代理；API Key 会只保存在页面请求中，不会写入数据库。
+			</p>
+		</div>
+
+		<input class="input" bind:value={form.name} placeholder="标注或批量导入前缀" required={!isProxyApiMode} />
 
 		{#if isManagedShareLink}
 			<div class="flex flex-wrap items-center gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
@@ -328,6 +383,15 @@
 				</button>
 				<span class="text-xs text-emerald-200">
 					无需填写主机和端口，保存后会出现在右侧代理档案中。
+				</span>
+			</div>
+		{:else if isProxyApiMode}
+			<div class="flex flex-wrap items-center gap-3 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2">
+				<button class="btn-primary" type="submit" disabled={saving}>
+					{saving ? '导入中...' : '拉取 API 并批量导入'}
+				</button>
+				<span class="text-xs text-sky-100">
+					无需填写主机和端口，将从 API 拉取代理后自动识别、验证并保存。
 				</span>
 			</div>
 		{:else}
@@ -385,7 +449,7 @@
 				保存前会验证代理端口可连接。账号添加页可直接选择“当前访问网站 IP（自动识别）”。
 			</p>
 			<button class="btn-primary" type="submit" disabled={saving}>
-				{saving ? '提交中...' : '验证并提交'}
+				{saving ? '提交中...' : proxyApiUrl.trim() ? '拉取 API 并批量导入' : '验证并提交'}
 			</button>
 		{/if}
 	</form>

@@ -99,6 +99,13 @@ export type ParsedProxyShareLink = {
 	};
 };
 
+export type ParsedProxyApiResponse = {
+	rawType: Extract<ProxyType, 'http' | 'socks5'> | 'auto';
+	totalCandidates: number;
+	proxies: ParsedProxyShareLink[];
+	errors: string[];
+};
+
 const DEFAULT_PORTS: Record<ProxyType, number> = {
 	http: 80,
 	https: 443,
@@ -364,6 +371,106 @@ export function parseProxyShareLink(
 	}
 	if (protocol === 'ss') return parseShadowsocksShareLink(normalized, parsed);
 	return unsupportedShareLink(parsed);
+}
+
+function collectProxyApiStrings(value: unknown, output: string[]) {
+	if (typeof value === 'string') {
+		output.push(value);
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) collectProxyApiStrings(item, output);
+		return;
+	}
+	if (value && typeof value === 'object') {
+		for (const item of Object.values(value)) collectProxyApiStrings(item, output);
+	}
+}
+
+function splitProxyApiCandidates(value: string) {
+	return value
+		.replace(/<br\s*\/?>/gi, '\n')
+		.replace(/\r/g, '\n')
+		.split(/[\n,;\t ]+/)
+		.map((item) => item.trim())
+		.filter(Boolean);
+}
+
+function proxyShareLinkKey(item: ParsedProxyShareLink) {
+	if (item.proxy) {
+		const proxy = item.proxy;
+		return [
+			proxy.type,
+			proxy.host,
+			proxy.port,
+			proxy.username ?? '',
+			proxy.password ?? '',
+			proxy.method ?? ''
+		].join('|');
+	}
+	return [item.protocol, item.details.host ?? '', item.details.port ?? '', item.name].join('|');
+}
+
+export function inferProxyApiRawType(
+	apiUrl: string,
+	fallbackRawType?: string
+): Extract<ProxyType, 'http' | 'socks5'> | 'auto' {
+	const fallback = normalizeBareProxyType(fallbackRawType);
+	if (fallback !== 'auto') return fallback;
+
+	try {
+		const parsed = new URL(apiUrl);
+		const fromQuery =
+			parsed.searchParams.get('GenType') ??
+			parsed.searchParams.get('type') ??
+			parsed.searchParams.get('protocol');
+		if (fromQuery) return normalizeBareProxyType(fromQuery);
+	} catch {
+		// The fetch layer will report URL format errors; parsing here is only for hints.
+	}
+
+	return 'auto';
+}
+
+export function parseProxyApiResponse(
+	responseText: string,
+	options: { apiUrl?: string; rawType?: string } = {}
+): ParsedProxyApiResponse {
+	const rawType = inferProxyApiRawType(options.apiUrl ?? '', options.rawType);
+	const sources = [responseText];
+	try {
+		collectProxyApiStrings(JSON.parse(responseText), sources);
+	} catch {
+		// Plain text proxy pools are expected, e.g. one host:port:user:pass per line.
+	}
+
+	const candidates = [...new Set(sources.flatMap(splitProxyApiCandidates))].slice(0, 300);
+	const proxies: ParsedProxyShareLink[] = [];
+	const errors: string[] = [];
+	const seen = new Set<string>();
+
+	for (const candidate of candidates) {
+		try {
+			const parsed = parseProxyShareLink(candidate, { rawType });
+			if (!parsed.supported) {
+				errors.push(`${candidate}: ${parsed.message}`);
+				continue;
+			}
+			const key = proxyShareLinkKey(parsed);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			proxies.push(parsed);
+		} catch (err) {
+			errors.push(`${candidate}: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	return {
+		rawType,
+		totalCandidates: candidates.length,
+		proxies,
+		errors: errors.slice(0, 20)
+	};
 }
 
 export function buildProxyUrl(proxy: ProxyRuntimeConfig): string {
