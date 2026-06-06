@@ -1,9 +1,10 @@
 import Database from 'better-sqlite3';
 import { drizzle as drizzleSqlite } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzleMysql } from 'drizzle-orm/mysql2';
-import { createPool, type Pool } from 'mysql2/promise';
+import { createPool, type Pool, type RowDataPacket } from 'mysql2/promise';
 import { mkdirSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
+import { getConfiguredAdminEmails } from '../admin';
 import { getProjectRoot, readEnv } from '../runtime-env';
 import * as sqliteSchema from './schema';
 import * as mysqlSchema from './schema.mysql';
@@ -14,6 +15,7 @@ export type MysqlDb = ReturnType<typeof drizzleMysql<typeof mysqlSchema>>;
 
 let driver: DbDriver = 'sqlite';
 let sqliteDb: SqliteDb | null = null;
+let sqliteRawDb: Database.Database | null = null;
 let mysqlPool: Pool | null = null;
 let mysqlDb: MysqlDb | null = null;
 
@@ -22,9 +24,13 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		id int NOT NULL AUTO_INCREMENT,
 		email varchar(255) NOT NULL,
 		password_hash varchar(255) NOT NULL,
+		role varchar(16) NOT NULL DEFAULT 'user',
+		disabled tinyint(1) NOT NULL DEFAULT 0,
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
-		UNIQUE KEY users_email_unique (email)
+		UNIQUE KEY users_email_unique (email),
+		KEY users_role_idx (role),
+		KEY users_disabled_idx (disabled)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS proxy_profiles (
 		id int NOT NULL AUTO_INCREMENT,
@@ -150,7 +156,7 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		ip_brush_max_attempts int NOT NULL DEFAULT 30,
 		check_interval_seconds int NOT NULL DEFAULT 120,
 		status_check_enabled tinyint(1) NOT NULL DEFAULT 1,
-		status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned',
+		status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled',
 		dns_binding_id int NOT NULL DEFAULT 0,
 		last_account_status varchar(64) NOT NULL DEFAULT '',
 		last_status_checked_at timestamp NULL DEFAULT NULL,
@@ -208,6 +214,11 @@ export function getSqliteDb(): SqliteDb {
 	return sqliteDb;
 }
 
+export function getSqliteRawDb(): Database.Database {
+	if (!sqliteRawDb) throw new Error('SQLite database is not initialized');
+	return sqliteRawDb;
+}
+
 export function getDb() {
 	if (driver === 'mysql') {
 		const { db, pool } = getMysqlDb();
@@ -216,11 +227,64 @@ export function getDb() {
 	return { db: getSqliteDb(), driver: 'sqlite' as const };
 }
 
+async function ensureMysqlAdminUsers(pool: Pool) {
+	const adminEmails = getConfiguredAdminEmails();
+	for (const email of adminEmails) {
+		await pool.query("UPDATE users SET role = 'admin' WHERE LOWER(email) = ?", [email]);
+	}
+
+	const [rows] = await pool.query<RowDataPacket[]>(
+		"SELECT COUNT(*) AS count FROM users WHERE role = 'admin'"
+	);
+	const adminCount = Number(rows[0]?.count ?? 0);
+	if (adminCount > 0) return;
+
+	await pool.query(
+		"UPDATE users SET role = 'admin' WHERE id = (SELECT id FROM (SELECT id FROM users ORDER BY id ASC LIMIT 1) first_user)"
+	);
+}
+
+function ensureSqliteAdminUsers(sqlite: Database.Database) {
+	const adminEmails = getConfiguredAdminEmails();
+	for (const email of adminEmails) {
+		sqlite.prepare("UPDATE users SET role = 'admin' WHERE lower(email) = ?").run(email);
+	}
+
+	const row = sqlite.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin'").get() as
+		| { count?: number }
+		| undefined;
+	const adminCount = Number(row?.count ?? 0);
+	if (adminCount > 0) return;
+
+	sqlite.exec(
+		"UPDATE users SET role = 'admin' WHERE id = (SELECT id FROM users ORDER BY id ASC LIMIT 1)"
+	);
+}
+
 async function ensureMysqlSchema(pool: Pool) {
 	await pool.query('SELECT 1');
 	for (const statement of MYSQL_SCHEMA_STATEMENTS) {
 		await pool.query(statement);
 	}
+	await pool
+		.query("ALTER TABLE users ADD COLUMN role varchar(16) NOT NULL DEFAULT 'user'")
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
+		.query('ALTER TABLE users ADD COLUMN disabled tinyint(1) NOT NULL DEFAULT 0')
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool.query("UPDATE users SET role = 'user' WHERE role IS NULL OR role = ''");
+	await pool.query('UPDATE users SET disabled = 0 WHERE disabled IS NULL');
+	await pool.query('CREATE INDEX users_role_idx ON users (role)').catch((err) => {
+		if ((err as { code?: string }).code !== 'ER_DUP_KEYNAME') throw err;
+	});
+	await pool.query('CREATE INDEX users_disabled_idx ON users (disabled)').catch((err) => {
+		if ((err as { code?: string }).code !== 'ER_DUP_KEYNAME') throw err;
+	});
+	await ensureMysqlAdminUsers(pool);
 	await pool.query('ALTER TABLE azure_accounts ADD COLUMN proxy_url_encrypted text NULL').catch((err) => {
 		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
 	});
@@ -296,11 +360,14 @@ async function ensureMysqlSchema(pool: Pool) {
 		});
 	await pool
 		.query(
-			"ALTER TABLE workflow_policies ADD COLUMN status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned'"
+			"ALTER TABLE workflow_policies ADD COLUMN status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled'"
 		)
 		.catch((err) => {
 			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
 		});
+	await pool.query(
+		"UPDATE workflow_policies SET status_trigger_states = 'banned,warning,warned,disabled' WHERE LOWER(REPLACE(status_trigger_states, ' ', '')) = 'banned,warning,warned'"
+	);
 	await pool
 		.query('ALTER TABLE workflow_policies ADD COLUMN dns_binding_id int NOT NULL DEFAULT 0')
 		.catch((err) => {
@@ -361,6 +428,8 @@ export async function initDatabase() {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			email TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'user',
+			disabled INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS proxy_profiles (
@@ -470,7 +539,7 @@ export async function initDatabase() {
 			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30,
 			check_interval_seconds INTEGER NOT NULL DEFAULT 120,
 			status_check_enabled INTEGER NOT NULL DEFAULT 1,
-			status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned',
+			status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned,disabled',
 			dns_binding_id INTEGER NOT NULL DEFAULT 0,
 			last_account_status TEXT NOT NULL DEFAULT '',
 			last_status_checked_at INTEGER,
@@ -498,11 +567,26 @@ export async function initDatabase() {
 			created_at INTEGER NOT NULL
 		);
 	`);
-	const columns = sqlite.prepare('PRAGMA table_info(azure_accounts)').all() as Array<{ name: string }>;
-	if (!columns.some((column) => column.name === 'proxy_url_encrypted')) {
+	sqliteRawDb = sqlite;
+
+	const userColumns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+	if (!userColumns.some((column) => column.name === 'role')) {
+		sqlite.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
+	}
+	if (!userColumns.some((column) => column.name === 'disabled')) {
+		sqlite.exec('ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0');
+	}
+	sqlite.exec("UPDATE users SET role = 'user' WHERE role IS NULL OR role = ''");
+	sqlite.exec('UPDATE users SET disabled = 0 WHERE disabled IS NULL');
+	ensureSqliteAdminUsers(sqlite);
+
+	const accountColumns = sqlite.prepare('PRAGMA table_info(azure_accounts)').all() as Array<{
+		name: string;
+	}>;
+	if (!accountColumns.some((column) => column.name === 'proxy_url_encrypted')) {
 		sqlite.exec("ALTER TABLE azure_accounts ADD COLUMN proxy_url_encrypted TEXT DEFAULT ''");
 	}
-	if (!columns.some((column) => column.name === 'proxy_profile_id')) {
+	if (!accountColumns.some((column) => column.name === 'proxy_profile_id')) {
 		sqlite.exec('ALTER TABLE azure_accounts ADD COLUMN proxy_profile_id INTEGER');
 	}
 	const proxyColumns = sqlite.prepare('PRAGMA table_info(proxy_profiles)').all() as Array<{
@@ -555,9 +639,12 @@ export async function initDatabase() {
 	}
 	if (!workflowColumns.some((column) => column.name === 'status_trigger_states')) {
 		sqlite.exec(
-			"ALTER TABLE workflow_policies ADD COLUMN status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned'"
+			"ALTER TABLE workflow_policies ADD COLUMN status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned,disabled'"
 		);
 	}
+	sqlite.exec(
+		"UPDATE workflow_policies SET status_trigger_states = 'banned,warning,warned,disabled' WHERE lower(replace(status_trigger_states, ' ', '')) = 'banned,warning,warned'"
+	);
 	if (!workflowColumns.some((column) => column.name === 'dns_binding_id')) {
 		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN dns_binding_id INTEGER NOT NULL DEFAULT 0');
 	}
@@ -574,6 +661,8 @@ export async function initDatabase() {
 		sqlite.exec("ALTER TABLE notification_settings ADD COLUMN telegram_group_chat_ids TEXT NOT NULL DEFAULT ''");
 	}
 	sqlite.exec(`
+		CREATE INDEX IF NOT EXISTS users_role_idx ON users(role);
+		CREATE INDEX IF NOT EXISTS users_disabled_idx ON users(disabled);
 		CREATE INDEX IF NOT EXISTS proxy_profiles_user_id_idx ON proxy_profiles(user_id);
 		CREATE INDEX IF NOT EXISTS azure_accounts_proxy_profile_id_idx ON azure_accounts(proxy_profile_id);
 		CREATE INDEX IF NOT EXISTS dns_configs_user_id_idx ON dns_configs(user_id);

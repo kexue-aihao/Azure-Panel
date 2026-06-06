@@ -82,7 +82,7 @@
 		ip_brush_max_attempts: 30,
 		check_interval_seconds: '',
 		status_check_enabled: true,
-		status_trigger_states: 'banned,warning,warned',
+		status_trigger_states: 'banned,warning,warned,disabled',
 		dns_binding_id: ''
 	});
 	let toast = $state('');
@@ -391,7 +391,7 @@
 			placeholder="异常时目标补机数量"
 		/>
 		<p class="text-xs text-muted">
-			只有当前触发检测账号的订阅状态为 banned、warning 或 warned 时才会执行自动补机；补机账号会从 Azure 号池随机抽取正常订阅账号。
+			只有当前触发检测账号的订阅状态为 banned、warning、warned 或 disabled 时才会执行自动补机；补机账号会从 Azure 号池随机抽取正常订阅账号。
 		</p>
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={form.auto_start} /> 自动启动已停止的 VM
@@ -545,7 +545,7 @@
 								: '否'} · 间隔 {workflow.check_interval_seconds}s
 						</p>
 						<p class="text-xs text-muted">
-							状态检测: {workflow.status_check_enabled ? '开启' : '关闭'} · 触发状态: banned / warning / warned ·
+							状态检测: {workflow.status_check_enabled ? '开启' : '关闭'} · 触发状态: banned / warning / warned / disabled ·
 							上次状态: {workflow.last_account_status || '-'}
 						</p>
 						<p class="text-xs text-muted">

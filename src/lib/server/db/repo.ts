@@ -1,5 +1,7 @@
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import { getDriver, getMysqlDb, getSqliteDb } from './index';
+import type { RowDataPacket } from 'mysql2';
+import { ADMIN_ROLE, USER_ROLE, isConfiguredAdminEmail, normalizeUserRole } from '../admin';
+import { getDriver, getMysqlDb, getSqliteDb, getSqliteRawDb } from './index';
 import type {
 	AzureAccount,
 	DnsConfig,
@@ -37,6 +39,42 @@ import {
 	workflowPolicies as mysqlWorkflowPolicies
 } from './schema.mysql';
 
+export type AdminUserSummary = {
+	id: number;
+	email: string;
+	role: string;
+	disabled: boolean;
+	createdAt: Date;
+	accountCount: number;
+	proxyCount: number;
+	dnsConfigCount: number;
+	dnsBindingCount: number;
+	workflowCount: number;
+	executionLogCount: number;
+};
+
+function sqliteDate(value: unknown): Date {
+	if (value instanceof Date) return value;
+	if (typeof value === 'number') return new Date(value);
+	if (typeof value === 'string' && /^\d+$/.test(value)) return new Date(Number(value));
+	return new Date(String(value ?? Date.now()));
+}
+
+async function countUsers(): Promise<number> {
+	if (getDriver() === 'mysql') {
+		const { pool } = getMysqlDb();
+		const [rows] = await pool.query<Array<{ count: number } & RowDataPacket>>(
+			'SELECT COUNT(*) AS count FROM users'
+		);
+		return Number(rows[0]?.count ?? 0);
+	}
+
+	const row = getSqliteRawDb().prepare('SELECT COUNT(*) AS count FROM users').get() as
+		| { count?: number }
+		| undefined;
+	return Number(row?.count ?? 0);
+}
+
 export async function findUserById(id: number): Promise<User | null> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();
@@ -58,15 +96,222 @@ export async function findUserByEmail(email: string): Promise<User | null> {
 }
 
 export async function createUser(email: string, passwordHash: string): Promise<User> {
+	const role = isConfiguredAdminEmail(email) || (await countUsers()) === 0 ? ADMIN_ROLE : USER_ROLE;
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();
-		const result = await db.insert(mysqlUsers).values({ email, passwordHash }).$returningId();
+		const result = await db.insert(mysqlUsers).values({ email, passwordHash, role }).$returningId();
 		const id = Number(result[0]?.id);
 		if (!id) throw new Error('Failed to create user');
 		return (await findUserById(id))!;
 	}
 
-	return getSqliteDb().insert(sqliteUsers).values({ email, passwordHash }).returning().get()!;
+	return getSqliteDb().insert(sqliteUsers).values({ email, passwordHash, role }).returning().get()!;
+}
+
+export async function countAdminUsers(): Promise<number> {
+	if (getDriver() === 'mysql') {
+		const { pool } = getMysqlDb();
+		const [rows] = await pool.query<Array<{ count: number } & RowDataPacket>>(
+			"SELECT COUNT(*) AS count FROM users WHERE role = 'admin'"
+		);
+		return Number(rows[0]?.count ?? 0);
+	}
+
+	const row = getSqliteRawDb()
+		.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin'")
+		.get() as { count?: number } | undefined;
+	return Number(row?.count ?? 0);
+}
+
+export async function countActiveAdminUsers(): Promise<number> {
+	if (getDriver() === 'mysql') {
+		const { pool } = getMysqlDb();
+		const [rows] = await pool.query<Array<{ count: number } & RowDataPacket>>(
+			"SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND disabled = 0"
+		);
+		return Number(rows[0]?.count ?? 0);
+	}
+
+	const row = getSqliteRawDb()
+		.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND disabled = 0")
+		.get() as { count?: number } | undefined;
+	return Number(row?.count ?? 0);
+}
+
+export async function updateUserAdminFields(
+	userId: number,
+	values: { role?: string; disabled?: boolean }
+): Promise<User | null> {
+	const updateValues: Partial<Pick<User, 'role' | 'disabled'>> = {};
+	if (values.role !== undefined) updateValues.role = normalizeUserRole(values.role);
+	if (values.disabled !== undefined) updateValues.disabled = values.disabled;
+
+	if (Object.keys(updateValues).length === 0) return findUserById(userId);
+
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db.update(mysqlUsers).set(updateValues).where(eq(mysqlUsers.id, userId));
+		return findUserById(userId);
+	}
+
+	return (
+		getSqliteDb()
+			.update(sqliteUsers)
+			.set(updateValues)
+			.where(eq(sqliteUsers.id, userId))
+			.returning()
+			.get() ?? null
+	);
+}
+
+export async function deleteUserAndOwnedData(userId: number): Promise<void> {
+	if (getDriver() === 'mysql') {
+		const { pool } = getMysqlDb();
+		await pool.query(
+			`DELETE workflow_logs FROM workflow_logs
+			 INNER JOIN workflow_policies ON workflow_logs.policy_id = workflow_policies.id
+			 WHERE workflow_policies.user_id = ?`,
+			[userId]
+		);
+		await pool.query('DELETE FROM workflow_policies WHERE user_id = ?', [userId]);
+		await pool.query('DELETE FROM subscription_notification_states WHERE user_id = ?', [userId]);
+		await pool.query('DELETE FROM notification_settings WHERE user_id = ?', [userId]);
+		await pool.query('DELETE FROM dns_record_bindings WHERE user_id = ?', [userId]);
+		await pool.query('DELETE FROM dns_configs WHERE user_id = ?', [userId]);
+		await pool.query('DELETE FROM execution_logs WHERE user_id = ?', [userId]);
+		await pool.query('DELETE FROM azure_accounts WHERE user_id = ?', [userId]);
+		await pool.query('DELETE FROM proxy_profiles WHERE user_id = ?', [userId]);
+		await pool.query('DELETE FROM users WHERE id = ?', [userId]);
+		return;
+	}
+
+	const sqlite = getSqliteRawDb();
+	const remove = sqlite.transaction(() => {
+		sqlite
+			.prepare(
+				`DELETE FROM workflow_logs
+				 WHERE policy_id IN (SELECT id FROM workflow_policies WHERE user_id = ?)`
+			)
+			.run(userId);
+		sqlite.prepare('DELETE FROM workflow_policies WHERE user_id = ?').run(userId);
+		sqlite.prepare('DELETE FROM subscription_notification_states WHERE user_id = ?').run(userId);
+		sqlite.prepare('DELETE FROM notification_settings WHERE user_id = ?').run(userId);
+		sqlite.prepare('DELETE FROM dns_record_bindings WHERE user_id = ?').run(userId);
+		sqlite.prepare('DELETE FROM dns_configs WHERE user_id = ?').run(userId);
+		sqlite.prepare('DELETE FROM execution_logs WHERE user_id = ?').run(userId);
+		sqlite.prepare('DELETE FROM azure_accounts WHERE user_id = ?').run(userId);
+		sqlite.prepare('DELETE FROM proxy_profiles WHERE user_id = ?').run(userId);
+		sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
+	});
+	remove();
+}
+
+export async function listAdminUsers(): Promise<AdminUserSummary[]> {
+	if (getDriver() === 'mysql') {
+		const { pool } = getMysqlDb();
+		const [rows] = await pool.query<
+			Array<{
+				id: number;
+				email: string;
+				role: string;
+				disabled: number | boolean;
+				createdAt: Date;
+				accountCount: number;
+				proxyCount: number;
+				dnsConfigCount: number;
+				dnsBindingCount: number;
+				workflowCount: number;
+				executionLogCount: number;
+			} & RowDataPacket>
+		>(`
+			SELECT
+				u.id,
+				u.email,
+				u.role,
+				u.disabled,
+				u.created_at AS createdAt,
+				COALESCE(aa.count, 0) AS accountCount,
+				COALESCE(pp.count, 0) AS proxyCount,
+				COALESCE(dc.count, 0) AS dnsConfigCount,
+				COALESCE(db.count, 0) AS dnsBindingCount,
+				COALESCE(wp.count, 0) AS workflowCount,
+				COALESCE(el.count, 0) AS executionLogCount
+			FROM users u
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM azure_accounts GROUP BY user_id) aa ON aa.user_id = u.id
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM proxy_profiles GROUP BY user_id) pp ON pp.user_id = u.id
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM dns_configs GROUP BY user_id) dc ON dc.user_id = u.id
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM dns_record_bindings GROUP BY user_id) db ON db.user_id = u.id
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM workflow_policies GROUP BY user_id) wp ON wp.user_id = u.id
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM execution_logs GROUP BY user_id) el ON el.user_id = u.id
+			ORDER BY u.id DESC
+		`);
+		return rows.map((row) => ({
+			id: Number(row.id),
+			email: row.email,
+			role: normalizeUserRole(row.role),
+			disabled: Boolean(row.disabled),
+			createdAt: row.createdAt,
+			accountCount: Number(row.accountCount ?? 0),
+			proxyCount: Number(row.proxyCount ?? 0),
+			dnsConfigCount: Number(row.dnsConfigCount ?? 0),
+			dnsBindingCount: Number(row.dnsBindingCount ?? 0),
+			workflowCount: Number(row.workflowCount ?? 0),
+			executionLogCount: Number(row.executionLogCount ?? 0)
+		}));
+	}
+
+	const rows = getSqliteRawDb()
+		.prepare(
+			`
+			SELECT
+				u.id,
+				u.email,
+				u.role,
+				u.disabled,
+				u.created_at AS createdAt,
+				COALESCE(aa.count, 0) AS accountCount,
+				COALESCE(pp.count, 0) AS proxyCount,
+				COALESCE(dc.count, 0) AS dnsConfigCount,
+				COALESCE(db.count, 0) AS dnsBindingCount,
+				COALESCE(wp.count, 0) AS workflowCount,
+				COALESCE(el.count, 0) AS executionLogCount
+			FROM users u
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM azure_accounts GROUP BY user_id) aa ON aa.user_id = u.id
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM proxy_profiles GROUP BY user_id) pp ON pp.user_id = u.id
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM dns_configs GROUP BY user_id) dc ON dc.user_id = u.id
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM dns_record_bindings GROUP BY user_id) db ON db.user_id = u.id
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM workflow_policies GROUP BY user_id) wp ON wp.user_id = u.id
+			LEFT JOIN (SELECT user_id, COUNT(*) AS count FROM execution_logs GROUP BY user_id) el ON el.user_id = u.id
+			ORDER BY u.id DESC
+			`
+		)
+		.all() as Array<{
+		id: number;
+		email: string;
+		role: string;
+		disabled: number | boolean;
+		createdAt: unknown;
+		accountCount: number;
+		proxyCount: number;
+		dnsConfigCount: number;
+		dnsBindingCount: number;
+		workflowCount: number;
+		executionLogCount: number;
+	}>;
+
+	return rows.map((row) => ({
+		id: Number(row.id),
+		email: row.email,
+		role: normalizeUserRole(row.role),
+		disabled: Boolean(row.disabled),
+		createdAt: sqliteDate(row.createdAt),
+		accountCount: Number(row.accountCount ?? 0),
+		proxyCount: Number(row.proxyCount ?? 0),
+		dnsConfigCount: Number(row.dnsConfigCount ?? 0),
+		dnsBindingCount: Number(row.dnsBindingCount ?? 0),
+		workflowCount: Number(row.workflowCount ?? 0),
+		executionLogCount: Number(row.executionLogCount ?? 0)
+	}));
 }
 
 export async function listProxyProfilesByUser(userId: number): Promise<ProxyProfile[]> {
@@ -934,7 +1179,7 @@ export async function insertExecutionLog(input: ExecutionLogInput): Promise<void
 	getSqliteDb().insert(sqliteExecutionLogs).values(values).run();
 }
 
-export async function listExecutionLogs(userId: number): Promise<ExecutionLog[]> {
+export async function listExecutionLogs(userId: number, limit = 100): Promise<ExecutionLog[]> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();
 		const rows = await db
@@ -942,7 +1187,7 @@ export async function listExecutionLogs(userId: number): Promise<ExecutionLog[]>
 			.from(mysqlExecutionLogs)
 			.where(eq(mysqlExecutionLogs.userId, userId))
 			.orderBy(desc(mysqlExecutionLogs.id))
-			.limit(100);
+			.limit(limit);
 		return rows as ExecutionLog[];
 	}
 
@@ -951,11 +1196,15 @@ export async function listExecutionLogs(userId: number): Promise<ExecutionLog[]>
 		.from(sqliteExecutionLogs)
 		.where(eq(sqliteExecutionLogs.userId, userId))
 		.orderBy(desc(sqliteExecutionLogs.id))
-		.limit(100)
+		.limit(limit)
 		.all();
 }
 
-export async function listWorkflowLogs(userId: number, policyId?: number): Promise<WorkflowLog[]> {
+export async function listWorkflowLogs(
+	userId: number,
+	policyId?: number,
+	limit = 100
+): Promise<WorkflowLog[]> {
 	const userPolicies = await listWorkflowsByUser(userId);
 	const ids = userPolicies.map((p) => p.id);
 
@@ -971,7 +1220,7 @@ export async function listWorkflowLogs(userId: number, policyId?: number): Promi
 			.from(mysqlWorkflowLogs)
 			.where(inArray(mysqlWorkflowLogs.policyId, targetIds))
 			.orderBy(desc(mysqlWorkflowLogs.id))
-			.limit(100);
+			.limit(limit);
 		return rows as WorkflowLog[];
 	}
 
@@ -980,17 +1229,18 @@ export async function listWorkflowLogs(userId: number, policyId?: number): Promi
 		.from(sqliteWorkflowLogs)
 		.where(inArray(sqliteWorkflowLogs.policyId, targetIds))
 		.orderBy(desc(sqliteWorkflowLogs.id))
-		.limit(100)
+		.limit(limit)
 		.all();
 }
 
 export async function listUnifiedExecutionLogs(
 	userId: number,
-	policyId?: number
+	policyId?: number,
+	limit = 100
 ): Promise<UnifiedExecutionLog[]> {
 	const [workflowRows, executionRows] = await Promise.all([
-		listWorkflowLogs(userId, policyId),
-		policyId ? Promise.resolve([] as ExecutionLog[]) : listExecutionLogs(userId)
+		listWorkflowLogs(userId, policyId, limit),
+		policyId ? Promise.resolve([] as ExecutionLog[]) : listExecutionLogs(userId, limit)
 	]);
 	const workflowItems: UnifiedExecutionLog[] = workflowRows.map((log) => ({
 		id: log.id,
@@ -1019,5 +1269,5 @@ export async function listUnifiedExecutionLogs(
 
 	return [...workflowItems, ...executionItems]
 		.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id - a.id)
-		.slice(0, 100);
+		.slice(0, limit);
 }

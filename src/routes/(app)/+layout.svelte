@@ -1,12 +1,22 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
+	import { api } from '$lib/api';
 	import { onMount } from 'svelte';
 
 	let { children } = $props();
 	let email = $state('');
+	let isAdmin = $state(false);
 
-	const nav = [
+	type CurrentUser = {
+		id: number;
+		email: string;
+		role: string;
+		is_admin: boolean;
+		disabled: boolean;
+	};
+
+	const baseNav = [
 		{ href: '/vms', label: 'VM 管理' },
 		{ href: '/accounts', label: 'Azure 号池' },
 		{ href: '/resources', label: '资源浏览' },
@@ -16,6 +26,23 @@
 		{ href: '/notifications', label: '通知设置' },
 		{ href: '/logs', label: '执行日志' }
 	];
+	const nav = $derived(
+		isAdmin ? [...baseNav, { href: '/admin', label: '管理员后台' }] : baseNav
+	);
+
+	async function loadCurrentUser() {
+		try {
+			const user = await api<CurrentUser>('/api/user/me');
+			email = user.email;
+			isAdmin = user.is_admin;
+			localStorage.setItem('email', user.email);
+			localStorage.setItem('role', user.role);
+			localStorage.setItem('is_admin', String(user.is_admin));
+			localStorage.setItem('user', JSON.stringify(user));
+		} catch {
+			logout();
+		}
+	}
 
 	onMount(() => {
 		if (!localStorage.getItem('token')) {
@@ -23,11 +50,16 @@
 			return;
 		}
 		email = localStorage.getItem('email') ?? '';
+		isAdmin = localStorage.getItem('is_admin') === 'true';
+		void loadCurrentUser();
 	});
 
 	function logout() {
 		localStorage.removeItem('token');
 		localStorage.removeItem('email');
+		localStorage.removeItem('role');
+		localStorage.removeItem('is_admin');
+		localStorage.removeItem('user');
 		goto('/login');
 	}
 </script>

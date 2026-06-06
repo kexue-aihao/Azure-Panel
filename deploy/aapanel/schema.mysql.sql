@@ -8,9 +8,13 @@ CREATE TABLE IF NOT EXISTS `users` (
   `id` int NOT NULL AUTO_INCREMENT,
   `email` varchar(255) NOT NULL,
   `password_hash` varchar(255) NOT NULL,
+  `role` varchar(16) NOT NULL DEFAULT 'user',
+  `disabled` tinyint(1) NOT NULL DEFAULT 0,
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `users_email_unique` (`email`)
+  UNIQUE KEY `users_email_unique` (`email`),
+  KEY `users_role_idx` (`role`),
+  KEY `users_disabled_idx` (`disabled`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `proxy_profiles` (
@@ -143,7 +147,7 @@ CREATE TABLE IF NOT EXISTS `workflow_policies` (
   `ip_brush_max_attempts` int NOT NULL DEFAULT 30,
   `check_interval_seconds` int NOT NULL DEFAULT 120,
   `status_check_enabled` tinyint(1) NOT NULL DEFAULT 1,
-  `status_trigger_states` varchar(120) NOT NULL DEFAULT 'banned,warning,warned',
+  `status_trigger_states` varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled',
   `dns_binding_id` int NOT NULL DEFAULT 0,
   `last_account_status` varchar(64) NOT NULL DEFAULT '',
   `last_status_checked_at` timestamp NULL DEFAULT NULL,

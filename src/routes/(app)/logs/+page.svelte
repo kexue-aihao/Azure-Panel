@@ -16,6 +16,8 @@
 	};
 
 	let logs = $state<Log[]>([]);
+	let exporting = $state(false);
+	let exportMessage = $state('');
 	const beijingTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
 		timeZone: 'Asia/Shanghai',
 		year: 'numeric',
@@ -29,6 +31,54 @@
 
 	async function load() {
 		logs = await api<Log[]>('/api/user/workflow/logs');
+	}
+
+	function buildExportFilename() {
+		const now = new Date();
+		const pad = (value: number) => String(value).padStart(2, '0');
+		return `azure-panel-logs-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(
+			now.getDate()
+		)}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.csv`;
+	}
+
+	async function exportLogs() {
+		if (exporting) return;
+		exporting = true;
+		exportMessage = '';
+		try {
+			const token = localStorage.getItem('token');
+			const response = await fetch('/api/user/workflow/logs/export', {
+				headers: {
+					Accept: 'text/csv',
+					...(token ? { Authorization: `Bearer ${token}` } : {})
+				}
+			});
+			if (!response.ok) {
+				const text = await response.text();
+				let message = text || `导出失败 (${response.status})`;
+				try {
+					const body = JSON.parse(text) as { message?: string; detail?: string };
+					message = body.message ?? body.detail ?? message;
+				} catch {
+					// Keep the raw server response when it is not JSON.
+				}
+				throw new Error(message);
+			}
+			const blob = await response.blob();
+			const url = URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			link.href = url;
+			link.download = buildExportFilename();
+			document.body.appendChild(link);
+			link.click();
+			link.remove();
+			URL.revokeObjectURL(url);
+			exportMessage = '日志导出完成';
+		} catch (error) {
+			exportMessage = error instanceof Error ? error.message : '日志导出失败';
+		} finally {
+			exporting = false;
+		}
 	}
 
 	onMount(() => {
@@ -63,7 +113,20 @@
 	}
 </script>
 
-<h1 class="mb-4 text-2xl font-semibold">执行日志</h1>
+<div class="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+	<div>
+		<h1 class="text-2xl font-semibold">执行日志</h1>
+		<p class="mt-1 text-sm text-muted">可一键导出最近日志记录，便于核查开机、补机和代理检测流程。</p>
+	</div>
+	<div class="flex flex-col items-start gap-2 sm:flex-row sm:items-center">
+		{#if exportMessage}
+			<span class="text-sm text-muted">{exportMessage}</span>
+		{/if}
+		<button class="btn-primary whitespace-nowrap" type="button" disabled={exporting} onclick={() => void exportLogs()}>
+			{exporting ? '正在导出...' : '一键导出日志'}
+		</button>
+	</div>
+</div>
 
 <div class="card overflow-x-auto">
 	<table class="w-full text-sm">

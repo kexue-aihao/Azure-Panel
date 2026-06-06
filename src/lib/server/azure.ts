@@ -822,7 +822,7 @@ export async function listAccountSubscriptions(
 	});
 }
 
-export const DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES = 'banned,warning,warned';
+export const DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES = 'banned,warning,warned,disabled';
 
 function normalizeSubscriptionState(state: string) {
 	const normalized = state.trim().toLowerCase();
@@ -836,7 +836,7 @@ export function normalizeSubscriptionTriggerStates(value?: string | null) {
 		.split(/[,\s，]+/)
 		.map(normalizeSubscriptionState)
 		.filter(Boolean);
-	return states.length ? [...new Set(states)] : ['banned', 'warning'];
+	return states.length ? [...new Set(states)] : ['banned', 'warning', 'disabled'];
 }
 
 export function isAzureSubscriptionAbnormal(state?: string | null) {

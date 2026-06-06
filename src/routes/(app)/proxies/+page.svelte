@@ -88,6 +88,21 @@
 		errors: string[];
 		proxies: ProxyApiCandidate[];
 	};
+	type ProxyCheckResult = {
+		proxy_id: number;
+		name: string;
+		status: 'available' | 'deleted' | 'failed';
+		deleted: boolean;
+		message: string;
+		error: string;
+		proxy: ProxyProfile | null;
+		runtime_type: string;
+		checked_at: string;
+		telegram_notified: boolean;
+		telegram_sent: number;
+		telegram_failed: number;
+		telegram_error: string;
+	};
 
 	let proxies = $state<ProxyProfile[]>([]);
 	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
@@ -99,6 +114,10 @@
 	let parsedShareLink = $state<ParsedShareLink | null>(null);
 	let saving = $state(false);
 	let apiImportProgress = $state({ done: 0, total: 0, imported: 0, failed: 0 });
+	let proxyChecking = $state(false);
+	let checkingProxyId = $state<number | null>(null);
+	let proxyCheckProgress = $state({ done: 0, total: 0, available: 0, deleted: 0, failed: 0 });
+	let proxyCheckResults = $state<ProxyCheckResult[]>([]);
 	let form = $state({
 		name: '',
 		type: 'http' as ProxyType,
@@ -328,6 +347,138 @@
 			await load();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '删除失败';
+		}
+	}
+
+	function proxyNotifyText(result: ProxyCheckResult) {
+		if (result.telegram_notified) {
+			return `；已通知 ${result.telegram_sent} 个 Telegram 目标${
+				result.telegram_failed ? `，失败 ${result.telegram_failed} 个` : ''
+			}`;
+		}
+		return result.telegram_error ? `；Telegram 未通知：${result.telegram_error}` : '';
+	}
+
+	async function checkProxyProfile(proxy: ProxyProfile) {
+		const result = await api<ProxyCheckResult>('/api/user/proxy/check', {
+			method: 'POST',
+			body: JSON.stringify({ proxy_id: proxy.id })
+		});
+		if (result.deleted) {
+			proxies = proxies.filter((item) => item.id !== proxy.id);
+		} else if (result.proxy) {
+			proxies = proxies.map((item) => (item.id === result.proxy?.id ? result.proxy : item));
+		}
+		return result;
+	}
+
+	async function checkOneProxy(proxy: ProxyProfile) {
+		if (proxyChecking) return;
+		proxyChecking = true;
+		checkingProxyId = proxy.id;
+		proxyCheckProgress = { done: 0, total: 1, available: 0, deleted: 0, failed: 0 };
+		proxyCheckResults = [];
+		try {
+			const result = await checkProxyProfile(proxy);
+			proxyCheckResults = [result];
+			proxyCheckProgress = {
+				done: 1,
+				total: 1,
+				available: result.status === 'available' ? 1 : 0,
+				deleted: result.status === 'deleted' ? 1 : 0,
+				failed: result.status === 'failed' ? 1 : 0
+			};
+			toast = `${result.message}${proxyNotifyText(result)}`;
+			await load();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			proxyCheckProgress = { done: 1, total: 1, available: 0, deleted: 0, failed: 1 };
+			proxyCheckResults = [
+				{
+					proxy_id: proxy.id,
+					name: proxy.name,
+					status: 'failed' as const,
+					deleted: false,
+					message: `代理测活失败：${proxy.name}`,
+					error: message,
+					proxy: null,
+					runtime_type: '',
+					checked_at: new Date().toISOString(),
+					telegram_notified: false,
+					telegram_sent: 0,
+					telegram_failed: 0,
+					telegram_error: ''
+				}
+			];
+			toast = message;
+		} finally {
+			proxyChecking = false;
+			checkingProxyId = null;
+		}
+	}
+
+	async function checkAllProxies() {
+		if (proxyChecking) return;
+		const targets = [...customProxies];
+		if (targets.length === 0) {
+			toast = '没有可测活的自定义固定代理';
+			return;
+		}
+
+		proxyChecking = true;
+		checkingProxyId = null;
+		proxyCheckResults = [];
+		let available = 0;
+		let deleted = 0;
+		let failed = 0;
+		proxyCheckProgress = { done: 0, total: targets.length, available, deleted, failed };
+
+		try {
+			for (const proxy of targets) {
+				checkingProxyId = proxy.id;
+				try {
+					const result = await checkProxyProfile(proxy);
+					if (result.status === 'available') available += 1;
+					else if (result.status === 'deleted') deleted += 1;
+					else failed += 1;
+					proxyCheckResults = [result, ...proxyCheckResults].slice(0, 8);
+					toast = `正在单线程测活代理 ${proxyCheckProgress.done + 1}/${targets.length}：${result.message}${proxyNotifyText(result)}`;
+				} catch (err) {
+					failed += 1;
+					const message = err instanceof Error ? err.message : String(err);
+					proxyCheckResults = [
+						{
+							proxy_id: proxy.id,
+							name: proxy.name,
+							status: 'failed' as const,
+							deleted: false,
+							message: `代理测活请求失败：${proxy.name}`,
+							error: message,
+							proxy: null,
+							runtime_type: '',
+							checked_at: new Date().toISOString(),
+							telegram_notified: false,
+							telegram_sent: 0,
+							telegram_failed: 0,
+							telegram_error: ''
+						},
+						...proxyCheckResults
+					].slice(0, 8);
+					toast = `代理 ${proxy.name} 测活请求失败：${message}`;
+				}
+				proxyCheckProgress = {
+					done: proxyCheckProgress.done + 1,
+					total: targets.length,
+					available,
+					deleted,
+					failed
+				};
+			}
+			toast = `代理单线程测活完成：可用 ${available} 个，已删除无效 ${deleted} 个，请求失败 ${failed} 个`;
+			await load();
+		} finally {
+			proxyChecking = false;
+			checkingProxyId = null;
 		}
 	}
 
@@ -575,13 +726,48 @@
 	</form>
 
 	<div class="card overflow-x-auto p-5">
-		<div class="mb-4">
-			<h2 class="text-lg font-medium">代理档案</h2>
-			<p class="mt-1 text-sm text-muted">
-				Azure 账号选择“不使用代理”时，Azure 看到的是网站源站服务器的出站 IP。
-				选择下面的代理档案后，验证、查询、开关机、自动补机会走代理出口。
-			</p>
+		<div class="mb-4 flex flex-wrap items-start justify-between gap-3">
+			<div>
+				<h2 class="text-lg font-medium">代理档案</h2>
+				<p class="mt-1 text-sm text-muted">
+					Azure 账号选择“不使用代理”时，Azure 看到的是网站源站服务器的出站 IP。
+					选择下面的代理档案后，验证、查询、开关机、自动补机会走代理出口。
+				</p>
+			</div>
+			<button
+				class="btn-secondary"
+				type="button"
+				disabled={proxyChecking || customProxies.length === 0}
+				onclick={() => void checkAllProxies()}
+			>
+				{proxyChecking ? '测活中...' : '单线程测活全部代理'}
+			</button>
 		</div>
+
+		{#if proxyChecking && proxyCheckProgress.total > 0}
+			<div class="mb-4 rounded-lg border border-sky-500/30 bg-sky-500/10 p-3">
+				<div class="progress-track running">
+					<div
+						class="progress-fill bg-primary"
+						style={`width: ${Math.max(8, Math.round((proxyCheckProgress.done / proxyCheckProgress.total) * 100))}%`}
+					></div>
+				</div>
+				<div class="mt-2 text-xs text-sky-100">
+					已处理 {proxyCheckProgress.done}/{proxyCheckProgress.total}，可用 {proxyCheckProgress.available} 个，已删除无效 {proxyCheckProgress.deleted} 个，请求失败 {proxyCheckProgress.failed} 个
+				</div>
+			</div>
+		{/if}
+
+		{#if proxyCheckResults.length > 0}
+			<div class="mb-4 space-y-2 rounded-lg border border-border bg-background p-3 text-xs">
+				<div class="font-medium">最近测活结果</div>
+				{#each proxyCheckResults as result}
+					<div class={result.status === 'available' ? 'text-emerald-300' : result.status === 'deleted' ? 'text-amber-300' : 'text-red-300'}>
+						{result.name}: {result.message}{result.error ? `，错误：${result.error}` : ''}
+					</div>
+				{/each}
+			</div>
+		{/if}
 
 		<table class="w-full text-sm">
 			<thead class="text-muted">
@@ -643,7 +829,18 @@
 							<td class="p-3">{proxy.port}</td>
 							<td class="p-3">{proxy.auth_enabled ? '已配置' : '无'}</td>
 							<td class="p-3">
-								<button class="btn-danger" onclick={() => void remove(proxy.id)}>删除</button>
+								<div class="flex flex-wrap gap-2">
+									<button
+										class="btn-secondary"
+										disabled={proxyChecking}
+										onclick={() => void checkOneProxy(proxy)}
+									>
+										{checkingProxyId === proxy.id ? '测活中...' : '测活'}
+									</button>
+									<button class="btn-danger" disabled={proxyChecking} onclick={() => void remove(proxy.id)}>
+										删除
+									</button>
+								</div>
 							</td>
 						</tr>
 					{/each}

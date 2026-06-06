@@ -4,6 +4,8 @@ export const users = sqliteTable('users', {
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	email: text('email').notNull().unique(),
 	passwordHash: text('password_hash').notNull(),
+	role: text('role').notNull().default('user'),
+	disabled: integer('disabled', { mode: 'boolean' }).notNull().default(false),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()
 		.$defaultFn(() => new Date())
@@ -160,7 +162,7 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	ipBrushMaxAttempts: integer('ip_brush_max_attempts').notNull().default(30),
 	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(120),
 	statusCheckEnabled: integer('status_check_enabled', { mode: 'boolean' }).notNull().default(true),
-	statusTriggerStates: text('status_trigger_states').notNull().default('banned,warning,warned'),
+	statusTriggerStates: text('status_trigger_states').notNull().default('banned,warning,warned,disabled'),
 	dnsBindingId: integer('dns_binding_id').notNull().default(0),
 	lastAccountStatus: text('last_account_status').notNull().default(''),
 	lastStatusCheckedAt: integer('last_status_checked_at', { mode: 'timestamp' }),

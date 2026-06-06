@@ -11,6 +11,8 @@ export const users = mysqlTable('users', {
 	id: int('id').primaryKey().autoincrement(),
 	email: varchar('email', { length: 255 }).notNull().unique(),
 	passwordHash: varchar('password_hash', { length: 255 }).notNull(),
+	role: varchar('role', { length: 16 }).notNull().default('user'),
+	disabled: boolean('disabled').notNull().default(false),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });
 
@@ -131,7 +133,7 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	statusCheckEnabled: boolean('status_check_enabled').notNull().default(true),
 	statusTriggerStates: varchar('status_trigger_states', { length: 120 })
 		.notNull()
-		.default('banned,warning,warned'),
+		.default('banned,warning,warned,disabled'),
 	dnsBindingId: int('dns_binding_id').notNull().default(0),
 	lastAccountStatus: varchar('last_account_status', { length: 64 }).notNull().default(''),
 	lastStatusCheckedAt: timestamp('last_status_checked_at'),

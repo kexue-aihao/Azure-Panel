@@ -9,16 +9,37 @@
 	let message = $state('');
 	let loading = $state(false);
 
+	type AuthResponse = {
+		token: string;
+		email: string;
+		role?: string;
+		is_admin?: boolean;
+		user?: {
+			id: number;
+			email: string;
+			role: string;
+			is_admin: boolean;
+			disabled: boolean;
+		};
+	};
+
+	function persistAuth(data: AuthResponse) {
+		localStorage.setItem('token', data.token);
+		localStorage.setItem('email', data.email);
+		localStorage.setItem('role', data.user?.role ?? data.role ?? 'user');
+		localStorage.setItem('is_admin', String(data.user?.is_admin ?? data.is_admin ?? false));
+		if (data.user) localStorage.setItem('user', JSON.stringify(data.user));
+	}
+
 	async function login() {
 		loading = true;
 		message = '';
 		try {
-			const data = await api<{ token: string; email: string }>('/api/guest/login', {
+			const data = await api<AuthResponse>('/api/guest/login', {
 				method: 'POST',
 				body: JSON.stringify({ email, password })
 			});
-			localStorage.setItem('token', data.token);
-			localStorage.setItem('email', data.email);
+			persistAuth(data);
 			await goto('/vms');
 		} catch (err) {
 			message = err instanceof Error ? err.message : '登录失败';
@@ -31,12 +52,11 @@
 		loading = true;
 		message = '';
 		try {
-			const data = await api<{ token: string; email: string }>('/api/guest/register', {
+			const data = await api<AuthResponse>('/api/guest/register', {
 				method: 'POST',
 				body: JSON.stringify({ email: registerEmail, password: registerPassword })
 			});
-			localStorage.setItem('token', data.token);
-			localStorage.setItem('email', data.email);
+			persistAuth(data);
 			await goto('/vms');
 		} catch (err) {
 			message = err instanceof Error ? err.message : '注册失败';
