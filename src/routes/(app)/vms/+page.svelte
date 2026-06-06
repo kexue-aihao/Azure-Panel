@@ -317,7 +317,6 @@
 	}
 
 	function beginCreateProgressDialog() {
-		createProgressDialogOpen = true;
 		createProgress = [
 			{
 				step: 'prepare',
@@ -332,6 +331,17 @@
 				timestamp: new Date().toISOString()
 			}
 		];
+		createProgressDialogOpen = true;
+	}
+
+	async function waitForCreateProgressFirstPaint() {
+		await tick();
+		if (typeof requestAnimationFrame !== 'function') {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			return;
+		}
+		await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+		await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
 	}
 
 	function closeCreateProgressDialog() {
@@ -824,7 +834,7 @@
 		refreshCreateNames();
 		createLoading = true;
 		beginCreateProgressDialog();
-		await tick();
+		await waitForCreateProgressFirstPaint();
 		try {
 			const result = await createVmWithProgress({
 				...createForm,
@@ -1466,7 +1476,7 @@
 		>
 			{createLoading ? '创建中...' : '创建 VM'}
 		</button>
-		{#if createProgress.length}
+		{#if createProgress.length && !createProgressDialogOpen}
 			<div class="rounded-xl border border-border bg-background p-3">
 				<div class="mb-3 flex items-center justify-between gap-3">
 					<div class="text-sm font-medium">创建流程</div>
