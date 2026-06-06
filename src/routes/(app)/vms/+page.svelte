@@ -1519,7 +1519,7 @@
 			启用 Azure DDoS 防护计划并关联到虚拟网络
 		</label>
 		<p class="-mt-2 text-xs text-muted">
-			DDoS Protection Plan 可能产生 Azure 官方额外费用，只有勾选后才会创建并在流程里显示进度。
+			DDoS Protection Plan 可能产生 Azure 官方额外费用；如果当前订阅或区域不允许创建，将自动跳过并继续创建 VM。
 		</p>
 		<div class="grid gap-3 md:grid-cols-2">
 			<input
@@ -1536,6 +1536,9 @@
 				placeholder="最大刷 IP 次数"
 			/>
 		</div>
+		<p class="-mt-2 text-xs text-muted">
+			创建 VM 时超过最大刷 IP 次数仍未命中，会保留最后一次刷到的 IPv4 并继续下一步。
+		</p>
 		<textarea
 			class="input min-h-36 font-mono text-xs"
 			bind:value={createForm.userdata}

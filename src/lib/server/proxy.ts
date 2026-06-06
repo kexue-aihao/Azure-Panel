@@ -511,23 +511,78 @@ function socksProxyAgentUrl(proxy: ProxyRuntimeConfig): string {
 	return proxyUrl;
 }
 
-function agentHttpClient(agent: Agent): HttpClient {
+function createProxyAgent(proxy: ProxyRuntimeConfig): Agent {
+	return proxy.type === 'shadowsocks'
+		? (new ShadowsocksProxyAgent(proxy) as Agent)
+		: (new SocksProxyAgent(socksProxyAgentUrl(proxy), {
+				timeout: 30_000,
+				keepAlive: false
+			}) as Agent);
+}
+
+function cleanupAgentAfterResponse(agent: Agent, response: Awaited<ReturnType<HttpClient['sendRequest']>>) {
+	const cleanup = () => {
+		try {
+			agent.destroy();
+		} catch {
+			// Best-effort cleanup; the request already completed.
+		}
+	};
+	const stream = response.readableStreamBody as
+		| { once?: (event: string, listener: () => void) => unknown }
+		| undefined;
+	if (stream?.once) {
+		stream.once('end', cleanup);
+		stream.once('error', cleanup);
+		stream.once('close', cleanup);
+		return;
+	}
+	cleanup();
+}
+
+function proxyAgentRequestOverrides(url: URL, agent: Agent) {
+	const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+	const servername = url.protocol === 'https:' && !net.isIP(url.hostname) ? url.hostname : undefined;
+	return {
+		protocol: url.protocol,
+		hostname: url.hostname,
+		host: url.hostname,
+		path: `${url.pathname}${url.search}`,
+		port,
+		agent,
+		...(servername ? { servername } : {})
+	};
+}
+
+function agentHttpClient(proxy: ProxyRuntimeConfig): HttpClient {
 	const inner = createDefaultHttpClient();
 	return {
 		async sendRequest(request) {
 			const url = new URL(request.url);
-			// Azure SDK leaves the default HTTPS port empty; socks-proxy-agent can pass that
-			// empty port into the socks handshake and surface "SocksClient internal error".
-			const defaultPort = url.port || (url.protocol === 'https:' ? '443' : '80');
-			return inner.sendRequest({
-				...request,
-				agent,
-				disableKeepAlive: true,
-				requestOverrides: {
-					...request.requestOverrides,
-					port: defaultPort
+			const agent = createProxyAgent(proxy);
+			const headers = createHttpHeaders(request.headers.toJSON({ preserveCase: true }));
+			if (!headers.has('connection')) headers.set('Connection', 'close');
+			try {
+				const response = await inner.sendRequest({
+					...request,
+					agent,
+					disableKeepAlive: true,
+					headers,
+					requestOverrides: {
+						...request.requestOverrides,
+						...proxyAgentRequestOverrides(url, agent)
+					}
+				});
+				cleanupAgentAfterResponse(agent, response);
+				return response;
+			} catch (err) {
+				try {
+					agent.destroy();
+				} catch {
+					// Best-effort cleanup; the proxy error below is more useful to callers.
 				}
-			});
+				throw new Error(proxyErrorMessage(proxy, err));
+			}
 		}
 	};
 }
@@ -538,16 +593,8 @@ export function proxyClientOptions(proxy?: ProxyRuntimeConfig | null): ProxyClie
 		return { proxyOptions: proxySettings(proxy) };
 	}
 
-	const agent =
-		proxy.type === 'shadowsocks'
-			? (new ShadowsocksProxyAgent(proxy) as Agent)
-			: (new SocksProxyAgent(socksProxyAgentUrl(proxy), {
-					timeout: 30_000,
-					keepAlive: false
-				}) as Agent);
 	return {
-		agent,
-		httpClient: agentHttpClient(agent)
+		httpClient: agentHttpClient(proxy)
 	};
 }
 
@@ -667,16 +714,40 @@ function connectWithTimeout(options: { host: string; port: number; tls: boolean;
 
 const PROXY_VALIDATION_URL =
 	'https://management.azure.com/metadata/endpoints?api-version=2020-01-01';
+const PROXY_VALIDATION_CACHE_TTL_MS = 45_000;
+const proxyValidationCache = new Map<
+	string,
+	{ expiresAt: number; promise: Promise<ProxyRuntimeConfig> }
+>();
+
+function proxyValidationCacheKey(proxy: ProxyRuntimeConfig, timeoutMs: number) {
+	return [
+		proxy.type,
+		proxy.host,
+		proxy.port,
+		proxy.username ?? '',
+		proxy.password ?? '',
+		proxy.method ?? '',
+		timeoutMs
+	].join('|');
+}
 
 function proxyErrorMessage(proxy: ProxyRuntimeConfig, err: unknown) {
 	const message = err instanceof Error ? err.message : String(err);
-	if (/SocksClient internal error/i.test(message)) {
+	const code =
+		err && typeof err === 'object' && 'code' in err ? String((err as { code?: unknown }).code ?? '') : '';
+	const combined = [message, code].filter(Boolean).join(' | ');
+	if (/代理出站|代理握手失败|代理请求发送失败/i.test(message)) return message;
+	if (/SocksClient internal error/i.test(combined)) {
 		return `${proxy.type.toUpperCase()} 代理握手失败：代理端口可连接，但 SOCKS 握手没有按预期返回。请重新保存代理让系统自动识别 HTTP/SOCKS 类型，或手动改为 HTTP 后再试。原始错误: ${message}`;
 	}
-	if (/Socks5|SOCKS|socks/i.test(message)) {
+	if (/Socks5|SOCKS|socks/i.test(combined)) {
 		return `${proxy.type.toUpperCase()} 代理握手失败: ${message}`;
 	}
-	return `代理出站验证失败: ${message}`;
+	if (/REQUEST_SEND_ERROR/i.test(combined)) {
+		return `代理请求发送失败，请检查代理协议、账号密码和出口连通性: ${message}`;
+	}
+	return `代理出站失败: ${message}`;
 }
 
 async function requestThroughProxy(proxy: ProxyRuntimeConfig, timeoutMs: number) {
@@ -710,6 +781,40 @@ export async function validateProxyConnection(
 		host: resolveClientIpProxyHost(proxy.host, options.clientIp)
 	};
 	const timeoutMs = options.timeoutMs ?? 8000;
+	const now = Date.now();
+	const cacheKey = proxyValidationCacheKey(resolved, timeoutMs);
+	const cached = proxyValidationCache.get(cacheKey);
+	if (cached && cached.expiresAt > now) return cached.promise;
+
+	const promise = validateProxyConnectionUncached(resolved, timeoutMs)
+		.then((validated) => {
+			proxyValidationCache.set(cacheKey, {
+				expiresAt: Date.now() + PROXY_VALIDATION_CACHE_TTL_MS,
+				promise: Promise.resolve(validated)
+			});
+			return validated;
+		})
+		.catch((err) => {
+			proxyValidationCache.delete(cacheKey);
+			throw err;
+		});
+	proxyValidationCache.set(cacheKey, {
+		expiresAt: now + PROXY_VALIDATION_CACHE_TTL_MS,
+		promise
+	});
+	if (proxyValidationCache.size > 256) {
+		for (const [key, value] of proxyValidationCache) {
+			if (value.expiresAt <= now) proxyValidationCache.delete(key);
+			if (proxyValidationCache.size <= 192) break;
+		}
+	}
+	return promise;
+}
+
+async function validateProxyConnectionUncached(
+	resolved: ProxyRuntimeConfig,
+	timeoutMs: number
+): Promise<ProxyRuntimeConfig> {
 	try {
 		await requestThroughProxy(resolved, timeoutMs);
 		return resolved;

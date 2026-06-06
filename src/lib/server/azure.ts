@@ -2606,6 +2606,7 @@ async function createMatchingIPv4PublicIp(
 		maxAttempts?: number;
 		nameSalt?: string;
 		ddosProtectionPlanId?: string;
+		fallbackToLastOnMiss?: boolean;
 		progress?: CreateVmProgressReporter;
 	}
 ): Promise<{ pip: PublicIPAddress; attempts: number; matched: boolean }> {
@@ -2654,6 +2655,17 @@ async function createMatchingIPv4PublicIp(
 				}
 			);
 			return { pip, attempts: attempt, matched: Boolean(targetPrefix) };
+		}
+
+		if (options.fallbackToLastOnMiss && attempt >= maxAttempts) {
+			await reportCreateVmProgress(
+				options.progress,
+				'public-ipv4',
+				'info',
+				`IPv4 ${address || '-'} 未命中 ${targetPrefix}，已达到最大次数，保留该 IP 并继续创建`,
+				{ attempt, maxAttempts, ip: address, targetPrefix, publicIpName: name, matched: false }
+			);
+			return { pip, attempts: attempt, matched: false };
 		}
 
 		await reportCreateVmProgress(
@@ -2748,9 +2760,29 @@ async function createDdosProtectionPlanForVm(
 			}
 		);
 	} catch (err) {
-		throw new Error(`Azure DDoS 防护计划创建失败: ${formatAzureError(err)}`);
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(
+			options.progress,
+			'ddos-plan',
+			'info',
+			'Azure DDoS 防护计划创建失败，已跳过并继续创建 VM',
+			{
+				planName,
+				error: message.length > 600 ? `${message.slice(0, 600)}...` : message
+			}
+		);
+		return null;
 	}
-	if (!plan.id) throw new Error('DDoS 防护计划创建失败');
+	if (!plan.id) {
+		await reportCreateVmProgress(
+			options.progress,
+			'ddos-plan',
+			'info',
+			'DDoS 防护计划未返回资源 ID，已跳过并继续创建 VM',
+			{ planName }
+		);
+		return null;
+	}
 	await reportCreateVmProgress(options.progress, 'ddos-plan', 'success', 'Azure DDoS 防护计划已创建', {
 		planName,
 		planId: plan.id
@@ -3116,6 +3148,7 @@ async function createNetworkForVm(
 		targetPrefix: normalizeCreateIpPrefix(options.ipPrefix),
 		maxAttempts: options.ipBrushMaxAttempts,
 		ddosProtectionPlanId: ddosPlan?.id,
+		fallbackToLastOnMiss: true,
 		progress: options.progress
 	});
 	const ipv6 = options.enableIpv6

@@ -35,9 +35,10 @@ export async function getUserAccountWithProxy(
 
 	const profile = await findProxyProfileByUser(userId, account.proxyProfileId);
 	if (!profile) return { account, proxy: null };
+	const validateProxy = options.validateProxy !== false;
 	return {
 		account,
-		proxy: options.validateProxy
+		proxy: validateProxy
 			? await proxyProfileToAzureReady(profile, options)
 			: await proxyProfileToRuntimeReady(profile, options)
 	};
@@ -62,9 +63,10 @@ export async function getUserAccountWithSelectedProxy(
 
 	if (mode === 'client_ip') {
 		const profile = await ensureClientIpProxyProfile(userId, options.clientIp ?? '');
+		const validateProxy = options.validateProxy !== false;
 		return {
 			account,
-			proxy: options.validateProxy
+			proxy: validateProxy
 				? await proxyProfileToAzureReady(profile, options)
 				: await proxyProfileToRuntimeReady(profile, options)
 		};
@@ -75,9 +77,10 @@ export async function getUserAccountWithSelectedProxy(
 		if (!profileId) throw new Error('缺少 proxy_profile_id');
 		const profile = await findProxyProfileByUser(userId, profileId);
 		if (!profile) throw new Error('代理配置不存在');
+		const validateProxy = options.validateProxy !== false;
 		return {
 			account,
-			proxy: options.validateProxy
+			proxy: validateProxy
 				? await proxyProfileToAzureReady(profile, options)
 				: await proxyProfileToRuntimeReady(profile, options)
 		};
