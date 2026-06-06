@@ -9,53 +9,14 @@ import {
 import {
 	CLIENT_IP_PROXY_HOST,
 	detectWorkingBareProxyProtocol,
-	inferProxyApiRawType,
 	normalizeProxyRuntime,
-	parseProxyApiResponse,
 	parseProxyShareLink,
 	publicProxyProfile,
 	type ProxyRuntimeConfig,
 	validateProxyConnection
 } from '$lib/server/proxy';
+import { fetchProxyApiText, MAX_PROXY_API_IMPORT, parseProxyApiImport } from '../_api-import';
 import type { RequestHandler } from './$types';
-
-const MAX_PROXY_API_BYTES = 1024 * 1024;
-const MAX_PROXY_API_IMPORT = 100;
-
-async function fetchProxyApiText(apiUrl: string) {
-	let parsed: URL;
-	try {
-		parsed = new URL(apiUrl);
-	} catch {
-		throw new Error('代理 API 链接格式无效');
-	}
-	if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-		throw new Error('代理 API 链接仅支持 http:// 或 https://');
-	}
-
-	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), 20_000);
-	try {
-		const response = await fetch(parsed, {
-			method: 'GET',
-			headers: {
-				accept: 'text/plain, application/json, */*',
-				'user-agent': 'Azure-Panel proxy-api-import'
-			},
-			signal: controller.signal
-		});
-		const length = Number(response.headers.get('content-length') ?? 0);
-		if (Number.isFinite(length) && length > MAX_PROXY_API_BYTES) {
-			throw new Error('代理 API 返回内容过大，请减少 Num 数量');
-		}
-		const text = await response.text();
-		if (!response.ok) throw new Error(`代理 API 请求失败 (${response.status}): ${text.slice(0, 200)}`);
-		if (text.length > MAX_PROXY_API_BYTES) throw new Error('代理 API 返回内容过大，请减少 Num 数量');
-		return text;
-	} finally {
-		clearTimeout(timeout);
-	}
-}
 
 async function resolveProxyForSave(options: {
 	proxy: ProxyRuntimeConfig;
@@ -102,18 +63,17 @@ export const POST: RequestHandler = async (event) => {
 	if (proxyApiUrl) {
 		try {
 			const responseText = await fetchProxyApiText(proxyApiUrl);
-			const rawType = inferProxyApiRawType(proxyApiUrl, String(body.raw_type ?? body.type ?? ''));
-			const parsed = parseProxyApiResponse(responseText, { apiUrl: proxyApiUrl, rawType });
-			const limit = Math.min(
-				MAX_PROXY_API_IMPORT,
-				Math.max(1, Number(body.proxy_api_limit ?? parsed.proxies.length) || parsed.proxies.length)
-			);
+			const parsed = parseProxyApiImport(responseText, {
+				apiUrl: proxyApiUrl,
+				rawType: String(body.raw_type ?? body.type ?? ''),
+				limit: body.proxy_api_limit
+			});
 			const saved = [];
 			const errors = [...parsed.errors];
 			const requestedName = String(body.name ?? '').trim();
 			let index = 0;
 
-			for (const item of parsed.proxies.slice(0, limit)) {
+			for (const item of parsed.proxies.slice(0, MAX_PROXY_API_IMPORT)) {
 				if (!item.proxy) {
 					errors.push(`${item.name}: 代理内容为空`);
 					continue;
@@ -195,9 +155,10 @@ export const POST: RequestHandler = async (event) => {
 				method: String(body.method ?? '')
 			});
 		}
+		const shouldAutoDetectProtocol = body.auto_detect_protocol === true;
 		proxy = await resolveProxyForSave({
 			proxy,
-			protocol: parsedShareLink?.protocol,
+			protocol: parsedShareLink?.protocol ?? (shouldAutoDetectProtocol ? 'auto' : undefined),
 			clientIp
 		});
 	} catch (err) {

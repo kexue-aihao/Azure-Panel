@@ -68,6 +68,26 @@
 				errors: string[];
 				proxies: ProxyProfile[];
 		  };
+	type ProxyApiCandidate = {
+		name: string;
+		protocol: string;
+		message: string;
+		proxy: {
+			type: ProxyType;
+			host: string;
+			port: number;
+			username: string;
+			password: string;
+			method: string;
+		} | null;
+	};
+	type ProxyApiParseResult = {
+		mode: 'api_parse';
+		raw_type: 'auto' | 'http' | 'socks5';
+		total_candidates: number;
+		errors: string[];
+		proxies: ProxyApiCandidate[];
+	};
 
 	let proxies = $state<ProxyProfile[]>([]);
 	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
@@ -78,6 +98,7 @@
 	let managedCore = $state<'sing-box' | 'xray'>('sing-box');
 	let parsedShareLink = $state<ParsedShareLink | null>(null);
 	let saving = $state(false);
+	let apiImportProgress = $state({ done: 0, total: 0, imported: 0, failed: 0 });
 	let form = $state({
 		name: '',
 		type: 'http' as ProxyType,
@@ -120,11 +141,111 @@
 		clientIpProxy = detected;
 	}
 
+	function resetFormAfterSave() {
+		shareLink = '';
+		proxyApiUrl = '';
+		proxyApiLimit = 10;
+		rawProxyType = 'auto';
+		managedCore = 'sing-box';
+		parsedShareLink = null;
+		apiImportProgress = { done: 0, total: 0, imported: 0, failed: 0 };
+		form = {
+			name: '',
+			type: 'http',
+			source: 'fixed',
+			host: '',
+			port: 0,
+			method: '',
+			username: '',
+			password: ''
+		};
+	}
+
+	async function importProxyApiSequentially() {
+		const requestedName = form.name.trim();
+		const parsed = await api<ProxyApiParseResult>('/api/user/proxy/api/parse', {
+			method: 'POST',
+			body: JSON.stringify({
+				proxy_api_url: proxyApiUrl,
+				proxy_api_limit: proxyApiLimit,
+				raw_type: rawProxyType
+			})
+		});
+		const importLimit = Math.min(100, Math.max(1, Number(proxyApiLimit) || 10));
+		const candidates = parsed.proxies.filter((item) => item.proxy).slice(0, importLimit);
+		const errors = [...parsed.errors];
+		let imported = 0;
+		apiImportProgress = { done: 0, total: candidates.length, imported, failed: errors.length };
+
+		if (candidates.length === 0) {
+			throw new Error(
+				`代理 API 未解析到可导入代理。已识别 ${parsed.total_candidates} 条${
+					errors.length ? `，错误：${errors.slice(0, 3).join('；')}` : ''
+				}`
+			);
+		}
+
+		for (const candidate of candidates) {
+			try {
+				const proxy = candidate.proxy;
+				if (!proxy) throw new Error('代理内容为空');
+				const saved = await api<ProxyProfile>('/api/user/proxy/add', {
+					method: 'POST',
+					body: JSON.stringify({
+						name: requestedName ? `${requestedName}-${imported + 1}` : candidate.name || `API代理-${imported + 1}`,
+						type: proxy.type,
+						host: proxy.host,
+						port: proxy.port,
+						username: proxy.username,
+						password: proxy.password,
+						method: proxy.method,
+						raw_type: candidate.protocol || rawProxyType,
+						auto_detect_protocol: candidate.protocol === 'auto'
+					})
+				});
+				imported += 1;
+				proxies = [saved, ...proxies];
+			} catch (err) {
+				errors.push(
+					`${candidate.name || candidate.proxy?.host || 'API代理'}: ${
+						err instanceof Error ? err.message : String(err)
+					}`
+				);
+			}
+			apiImportProgress = {
+				done: apiImportProgress.done + 1,
+				total: candidates.length,
+				imported,
+				failed: errors.length
+			};
+			toast = `正在单线程导入代理 ${apiImportProgress.done}/${candidates.length}，成功 ${imported} 个，失败 ${errors.length} 个`;
+		}
+
+		if (imported === 0) {
+			throw new Error(
+				`代理 API 未导入任何可用代理。已识别 ${parsed.total_candidates} 条，错误：${
+					errors.slice(0, 5).join('；') || '没有可解析的代理'
+				}`
+			);
+		}
+
+		toast = `代理 API 单线程导入完成：成功 ${imported} 个，失败 ${errors.length} 个，识别 ${parsed.total_candidates} 条${
+			errors.length ? `；前几条错误：${errors.slice(0, 3).join('；')}` : ''
+		}`;
+	}
+
 	async function submit(e: Event) {
 		e.preventDefault();
 		if (saving) return;
 		saving = true;
 		try {
+			if (isProxyApiMode) {
+				await importProxyApiSequentially();
+				resetFormAfterSave();
+				await load();
+				return;
+			}
+
 			const result = await api<ProxyAddResult>('/api/user/proxy/add', {
 				method: 'POST',
 				body: JSON.stringify({
@@ -143,27 +264,13 @@
 			} else {
 				toast = '代理配置已添加';
 			}
-			shareLink = '';
-			proxyApiUrl = '';
-			proxyApiLimit = 10;
-			rawProxyType = 'auto';
-			managedCore = 'sing-box';
-			parsedShareLink = null;
-			form = {
-				name: '',
-				type: 'http',
-				source: 'fixed',
-				host: '',
-				port: 0,
-				method: '',
-				username: '',
-				password: ''
-			};
+			resetFormAfterSave();
 			await load();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '添加失败';
 		} finally {
 			saving = false;
+			if (!proxyApiUrl.trim()) apiImportProgress = { done: 0, total: 0, imported: 0, failed: 0 };
 		}
 	}
 
@@ -388,11 +495,24 @@
 		{:else if isProxyApiMode}
 			<div class="flex flex-wrap items-center gap-3 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2">
 				<button class="btn-primary" type="submit" disabled={saving}>
-					{saving ? '导入中...' : '拉取 API 并批量导入'}
+					{saving ? '单线程导入中...' : '拉取 API 并单线程导入'}
 				</button>
 				<span class="text-xs text-sky-100">
-					无需填写主机和端口，将从 API 拉取代理后自动识别、验证并保存。
+					无需填写主机和端口，将从 API 拉取代理后逐条识别、验证并保存，避免长请求超时。
 				</span>
+				{#if saving && apiImportProgress.total > 0}
+					<div class="basis-full">
+						<div class="progress-track running">
+							<div
+								class="progress-fill bg-primary"
+								style={`width: ${Math.max(8, Math.round((apiImportProgress.done / apiImportProgress.total) * 100))}%`}
+							></div>
+						</div>
+						<div class="mt-1 text-xs text-sky-100">
+							已处理 {apiImportProgress.done}/{apiImportProgress.total}，成功 {apiImportProgress.imported} 个，失败 {apiImportProgress.failed} 个
+						</div>
+					</div>
+				{/if}
 			</div>
 		{:else}
 			<div class={isShadowsocks ? 'grid gap-3 sm:grid-cols-2' : 'grid gap-3'}>
