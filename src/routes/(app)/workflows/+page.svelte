@@ -4,6 +4,28 @@
 
 	type Account = { id: number; name: string };
 	type DnsBinding = { id: number; name: string; fqdn: string; enabled: boolean };
+	type AzureRegionOption = {
+		name: string;
+		displayName: string;
+		availableSizeCount: number;
+		highestCoreSize: { name: string; cores: number } | null;
+		largestMemorySize: { name: string; memoryGB: number } | null;
+	};
+	type VmSizeOption = {
+		name: string;
+		cores: number;
+		memory_gb: number;
+		quota_localized_name: string;
+		quota_remaining: number;
+		quota_required: number;
+	};
+	type VmImageOption = {
+		label: string;
+		imageReference: string;
+		osType: 'Linux' | 'Windows' | 'Unknown';
+		architecture: string;
+		hyperVGeneration: string;
+	};
 	type AccountStatus = {
 		state: string;
 		abnormal: boolean;
@@ -34,6 +56,9 @@
 
 	let accounts = $state<Account[]>([]);
 	let dnsBindings = $state<DnsBinding[]>([]);
+	let regions = $state<AzureRegionOption[]>([]);
+	let vmSizes = $state<VmSizeOption[]>([]);
+	let vmImages = $state<VmImageOption[]>([]);
 	let workflows = $state<Workflow[]>([]);
 	let form = $state({
 		account_id: '',
@@ -61,11 +86,158 @@
 	let toast = $state('');
 	let checkingStatus = $state(false);
 	let statusResult = $state<AccountStatus | null>(null);
+	let regionLoading = $state(false);
+	let sizeLoading = $state(false);
+	let imageLoading = $state(false);
+	let regionError = $state('');
+	let sizeError = $state('');
+	let imageError = $state('');
+	let createOptionsRequestId = 0;
+
+	function regionLabel(region: AzureRegionOption) {
+		const parts = [`${region.displayName || region.name} (${region.name})`];
+		if (region.availableSizeCount > 0) parts.push(`${region.availableSizeCount} 个可用规格`);
+		if (region.highestCoreSize) {
+			parts.push(`最高 ${region.highestCoreSize.name}/${region.highestCoreSize.cores}C`);
+		}
+		if (region.largestMemorySize) {
+			parts.push(`最大内存 ${region.largestMemorySize.name}/${region.largestMemorySize.memoryGB}GB`);
+		}
+		return parts.join('，');
+	}
+
+	function sizeLabel(size: VmSizeOption) {
+		const memory = Number.isFinite(size.memory_gb) ? `${size.memory_gb} GB` : '-';
+		const quota =
+			size.quota_remaining || size.quota_required
+				? `，剩余 ${size.quota_remaining}/${size.quota_required} vCPU`
+				: '';
+		return `${size.name}，${size.cores}C / ${memory}${quota}`;
+	}
+
+	function imageLabel(image: VmImageOption) {
+		const meta = [image.osType, image.architecture, image.hyperVGeneration]
+			.filter(Boolean)
+			.join(' / ');
+		return meta ? `${image.label} - ${meta}` : image.label;
+	}
+
+	function clearCreateOptions() {
+		regions = [];
+		vmSizes = [];
+		vmImages = [];
+		regionError = '';
+		sizeError = '';
+		imageError = '';
+	}
 
 	async function load() {
 		accounts = await api<Account[]>('/api/user/azure/account/list');
 		dnsBindings = await api<DnsBinding[]>('/api/user/dns/binding/list');
 		workflows = await api<Workflow[]>('/api/user/workflow/list');
+	}
+
+	async function loadRegions() {
+		if (!form.account_id) {
+			clearCreateOptions();
+			return;
+		}
+
+		regionLoading = true;
+		regionError = '';
+		try {
+			const params = new URLSearchParams({ account_id: String(form.account_id) });
+			regions = await api<AzureRegionOption[]>(`/api/user/azure/region/list?${params.toString()}`);
+			if (regions.length && !regions.some((region) => region.name === form.location)) {
+				form.location = regions[0].name;
+			}
+			await loadCreateOptions();
+		} catch (err) {
+			regions = [];
+			vmSizes = [];
+			vmImages = [];
+			regionError = err instanceof Error ? err.message : '区域识别失败';
+			toast = regionError;
+		} finally {
+			regionLoading = false;
+		}
+	}
+
+	async function loadVmSizes(requestId: number) {
+		if (!form.account_id || !form.location.trim()) {
+			vmSizes = [];
+			sizeError = '';
+			sizeLoading = false;
+			return;
+		}
+
+		sizeLoading = true;
+		sizeError = '';
+		try {
+			const params = new URLSearchParams({
+				account_id: String(form.account_id),
+				location: form.location.trim()
+			});
+			const result = await api<{ sizes: VmSizeOption[] }>(`/api/user/azure/vm/sizes?${params.toString()}`);
+			if (requestId !== createOptionsRequestId) return;
+			vmSizes = result.sizes ?? [];
+			if (vmSizes.length && !vmSizes.some((size) => size.name === form.vm_size)) {
+				form.vm_size = vmSizes[0].name;
+			}
+		} catch (err) {
+			if (requestId !== createOptionsRequestId) return;
+			vmSizes = [];
+			sizeError = err instanceof Error ? err.message : '规格查询失败';
+		} finally {
+			if (requestId === createOptionsRequestId) sizeLoading = false;
+		}
+	}
+
+	async function loadVmImages(requestId: number) {
+		if (!form.account_id || !form.location.trim()) {
+			vmImages = [];
+			imageError = '';
+			imageLoading = false;
+			return;
+		}
+
+		imageLoading = true;
+		imageError = '';
+		try {
+			const params = new URLSearchParams({
+				account_id: String(form.account_id),
+				location: form.location.trim()
+			});
+			const images = await api<VmImageOption[]>(`/api/user/azure/image/list?${params.toString()}`);
+			if (requestId !== createOptionsRequestId) return;
+			vmImages = images ?? [];
+			if (
+				vmImages.length &&
+				!vmImages.some((image) => image.imageReference === form.image_reference)
+			) {
+				form.image_reference = vmImages[0].imageReference;
+			}
+		} catch (err) {
+			if (requestId !== createOptionsRequestId) return;
+			vmImages = [];
+			imageError = err instanceof Error ? err.message : '系统镜像查询失败';
+		} finally {
+			if (requestId === createOptionsRequestId) imageLoading = false;
+		}
+	}
+
+	async function loadCreateOptions() {
+		const requestId = ++createOptionsRequestId;
+		await Promise.all([loadVmSizes(requestId), loadVmImages(requestId)]);
+	}
+
+	async function changeAccount() {
+		statusResult = null;
+		await loadRegions();
+	}
+
+	async function changeLocation() {
+		await loadCreateOptions();
 	}
 
 	async function submit(e: Event) {
@@ -154,7 +326,7 @@
 <div class="grid gap-6 xl:grid-cols-2">
 	<form class="card space-y-3 p-5" onsubmit={submit}>
 		<h2 class="text-lg font-medium">创建补机策略</h2>
-		<select class="input" bind:value={form.account_id} required>
+		<select class="input" bind:value={form.account_id} onchange={() => void changeAccount()} required>
 			<option value="">选择 Azure 账号</option>
 			{#each accounts as account}
 				<option value={account.id}>{account.name}</option>
@@ -162,7 +334,30 @@
 		</select>
 		<input class="input" bind:value={form.name} placeholder="策略名称" required />
 		<input class="input" bind:value={form.resource_group} placeholder="资源组" required />
-		<input class="input" bind:value={form.location} placeholder="区域" />
+		<div>
+			<label class="mb-1 block text-xs text-muted" for="workflow-location-select">补机开启区域</label>
+			<select
+				id="workflow-location-select"
+				class="input"
+				bind:value={form.location}
+				onchange={() => void changeLocation()}
+				disabled={regionLoading || regions.length === 0}
+				required
+			>
+				{#if regionLoading}
+					<option value={form.location}>正在从官方 API 查询可开区域...</option>
+				{:else if regions.length === 0}
+					<option value={form.location}>{regionError || '请先选择 Azure 账号加载可开区域'}</option>
+				{:else}
+					{#each regions as region}
+						<option value={region.name}>{regionLabel(region)}</option>
+					{/each}
+				{/if}
+			</select>
+			{#if regionError}
+				<p class="mt-1 text-xs text-red-300">{regionError}</p>
+			{/if}
+		</div>
 		<input
 			class="input"
 			bind:value={form.vm_names}
@@ -206,12 +401,53 @@
 				{statusResult.should_run_workflow ? '命中触发条件，会执行补机流程。' : '未命中触发条件，不会执行补机。'}
 			</div>
 		{/if}
-		<input class="input" bind:value={form.vm_size} placeholder="VM 规格" />
-		<input
-			class="input"
-			bind:value={form.image_reference}
-			placeholder="镜像 publisher:offer:sku:version"
-		/>
+		<div>
+			<label class="mb-1 block text-xs text-muted" for="workflow-size-select">补机实例规格</label>
+			<select
+				id="workflow-size-select"
+				class="input"
+				bind:value={form.vm_size}
+				disabled={sizeLoading || vmSizes.length === 0}
+				required
+			>
+				{#if sizeLoading}
+					<option value={form.vm_size}>正在从官方 API 查询实例规格...</option>
+				{:else if vmSizes.length === 0}
+					<option value={form.vm_size}>{sizeError || '请先选择账号和区域加载规格'}</option>
+				{:else}
+					{#each vmSizes as size}
+						<option value={size.name}>{sizeLabel(size)}</option>
+					{/each}
+				{/if}
+			</select>
+			{#if sizeError}
+				<p class="mt-1 text-xs text-red-300">{sizeError}</p>
+			{/if}
+		</div>
+		<div>
+			<label class="mb-1 block text-xs text-muted" for="workflow-image-select">安装系统</label>
+			<select
+				id="workflow-image-select"
+				class="input"
+				bind:value={form.image_reference}
+				disabled={imageLoading || vmImages.length === 0}
+				required
+			>
+				{#if imageLoading}
+					<option value={form.image_reference}>正在从官方 API 查询安装系统...</option>
+				{:else if vmImages.length === 0}
+					<option value={form.image_reference}>{imageError || '请先选择账号和区域加载系统'}</option>
+				{:else}
+					{#each vmImages as image}
+						<option value={image.imageReference}>{imageLabel(image)}</option>
+					{/each}
+				{/if}
+			</select>
+			{#if imageError}
+				<p class="mt-1 text-xs text-red-300">{imageError}</p>
+			{/if}
+			<p class="mt-1 break-all text-xs text-muted">{form.image_reference}</p>
+		</div>
 		<input class="input" bind:value={form.name_prefix} placeholder="自动创建 VM 前缀" />
 		<input class="input" bind:value={form.admin_username} placeholder="管理员用户名" />
 		<input
