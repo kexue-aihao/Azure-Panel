@@ -363,8 +363,8 @@
 							</button>
 						</div>
 						{#if proxySavingAccountId === account.id}
-							<div class="progress-track mt-3">
-								<div class="progress-fill running bg-primary" style="width: 70%"></div>
+							<div class="progress-track running mt-3">
+								<div class="progress-fill bg-primary" style="width: 70%"></div>
 							</div>
 							<div class="mt-1 text-xs text-muted">正在保存此账号的代理出口配置...</div>
 						{/if}

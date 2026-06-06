@@ -1428,9 +1428,9 @@
 					<div class="text-sm font-medium">创建流程</div>
 					<div class="text-xs text-muted">{createProgress.length} 个步骤</div>
 				</div>
-				<div class="progress-track mb-3">
+				<div class={`progress-track mb-3 ${progressAnimation(createProgress)}`}>
 					<div
-						class={`progress-fill ${progressTone(createProgress)} ${progressAnimation(createProgress)}`}
+						class={`progress-fill ${progressTone(createProgress)}`}
 						style={`width: ${progressPercent(createProgress)}%`}
 					></div>
 				</div>
@@ -1488,9 +1488,9 @@
 			</div>
 			<div class="text-xs text-muted">{deleteProgress.length} 个步骤</div>
 		</div>
-		<div class="progress-track">
+		<div class={`progress-track ${progressAnimation(deleteProgress)}`}>
 			<div
-				class={`progress-fill ${progressTone(deleteProgress)} ${progressAnimation(deleteProgress)}`}
+				class={`progress-fill ${progressTone(deleteProgress)}`}
 				style={`width: ${progressPercent(deleteProgress)}%`}
 			></div>
 		</div>
@@ -1527,9 +1527,9 @@
 			</div>
 			<div class="text-xs text-muted">{operationProgress.length} 个步骤</div>
 		</div>
-		<div class="progress-track">
+		<div class={`progress-track ${progressAnimation(operationProgress)}`}>
 			<div
-				class={`progress-fill ${progressTone(operationProgress)} ${progressAnimation(operationProgress)}`}
+				class={`progress-fill ${progressTone(operationProgress)}`}
 				style={`width: ${progressPercent(operationProgress)}%`}
 			></div>
 		</div>

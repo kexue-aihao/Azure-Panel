@@ -31,50 +31,61 @@
 		@apply bg-border text-white;
 	}
 	.progress-track {
-		@apply h-2 overflow-hidden rounded-full bg-border;
+		@apply relative h-2 overflow-hidden rounded-full bg-border;
+		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 	}
 	.progress-fill {
-		@apply relative h-full overflow-hidden rounded-full transition-all duration-300;
+		@apply h-full overflow-hidden rounded-full transition-all duration-300;
 	}
-	.progress-fill.running {
+	.progress-track.running {
 		background-image: linear-gradient(
-			135deg,
-			rgba(255, 255, 255, 0.28) 25%,
-			transparent 25%,
-			transparent 50%,
-			rgba(255, 255, 255, 0.28) 50%,
-			rgba(255, 255, 255, 0.28) 75%,
-			transparent 75%,
-			transparent
+			90deg,
+			rgba(59, 130, 246, 0.12),
+			rgba(59, 130, 246, 0.22),
+			rgba(59, 130, 246, 0.12)
 		);
-		background-size: 1rem 1rem;
-		animation: progress-stripes 0.8s linear infinite;
+		background-size: 200% 100%;
+		animation: progress-track-flow 1.2s linear infinite;
 	}
-	.progress-fill.running::after {
+	.progress-track.running::before {
 		content: '';
 		position: absolute;
-		inset: 0;
-		background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
-		animation: progress-shine 1.4s ease-in-out infinite;
-		transform: translateX(-100%);
+		top: 0;
+		bottom: 0;
+		left: -45%;
+		width: 45%;
+		border-radius: inherit;
+		background: linear-gradient(
+			90deg,
+			transparent,
+			rgba(255, 255, 255, 0.4),
+			rgba(255, 255, 255, 0.86),
+			rgba(255, 255, 255, 0.4),
+			transparent
+		);
+		filter: drop-shadow(0 0 0.45rem rgba(96, 165, 250, 0.7));
+		animation: progress-runner 1.05s ease-in-out infinite;
+		z-index: 1;
+	}
+	.progress-track.running .progress-fill {
+		opacity: 0.45;
 	}
 }
 
-@keyframes progress-stripes {
+@keyframes progress-track-flow {
 	from {
-		background-position: 0 0;
+		background-position: 200% 0;
 	}
 	to {
-		background-position: 1rem 0;
+		background-position: 0 0;
 	}
 }
 
-@keyframes progress-shine {
+@keyframes progress-runner {
 	0% {
-		transform: translateX(-100%);
+		left: -45%;
 	}
-	55%,
 	100% {
-		transform: translateX(100%);
+		left: 100%;
 	}
 }
