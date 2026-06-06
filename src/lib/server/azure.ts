@@ -2319,7 +2319,7 @@ export async function deleteResourceGroupWithProgress(
 	let polls = 0;
 	while (!poller.isDone()) {
 		polls += 1;
-		await reportCreateVmProgress(progress, 'delete-polling', 'running', `正在删除资源组，轮询第 ${polls} 次`, {
+		await reportCreateVmProgress(progress, 'delete-polling', 'running', `等待 Azure 后台删除完成，状态检查第 ${polls} 次`, {
 			resourceGroup,
 			status: poller.getOperationState().status,
 			polls

@@ -96,6 +96,30 @@
 	let imageError = $state('');
 	let createOptionsRequestId = 0;
 
+	function randomSuffix(length = 10) {
+		const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+		const cryptoApi = globalThis.crypto;
+		let value = '';
+		if (cryptoApi?.getRandomValues) {
+			const bytes = new Uint8Array(length);
+			cryptoApi.getRandomValues(bytes);
+			for (const byte of bytes) value += chars[byte % chars.length];
+			return value;
+		}
+		for (let i = 0; i < length; i += 1) {
+			value += chars[Math.floor(Math.random() * chars.length)];
+		}
+		return value;
+	}
+
+	function randomResourceGroupName() {
+		return `rg-auto-${randomSuffix(10)}`;
+	}
+
+	function fillRandomResourceGroup() {
+		form.resource_group = randomResourceGroupName();
+	}
+
 	function regionLabel(region: AzureRegionOption) {
 		const parts = [`${region.displayName || region.name} (${region.name})`];
 		if (region.availableSizeCount > 0) parts.push(`${region.availableSizeCount} 个可用规格`);
@@ -270,6 +294,7 @@
 			});
 			toast = '补机策略已创建';
 			statusResult = null;
+			fillRandomResourceGroup();
 			await load();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '创建失败';
@@ -318,6 +343,7 @@
 	}
 
 	onMount(() => {
+		fillRandomResourceGroup();
 		void load();
 	});
 </script>
@@ -353,7 +379,10 @@
 			</p>
 		</div>
 		<input class="input" bind:value={form.name} placeholder="策略名称" required />
-		<input class="input" bind:value={form.resource_group} placeholder="资源组" required />
+		<div class="flex gap-2">
+			<input class="input" bind:value={form.resource_group} placeholder="资源组" required />
+			<button class="btn-secondary shrink-0" type="button" onclick={fillRandomResourceGroup}>换一个</button>
+		</div>
 		<div>
 			<label class="mb-1 block text-xs text-muted" for="workflow-location-select">补机开启区域</label>
 			<select

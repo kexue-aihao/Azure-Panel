@@ -121,40 +121,53 @@ export const POST: RequestHandler = async (event) => {
 			})
 		);
 
-		const results: DeleteResult[] = [];
-		for (const [index, resourceGroup] of resourceGroups.entries()) {
-			const report = async (item: DeleteProgressEvent) => {
-				const detail = { ...(item.detail ?? {}), resourceGroup, index: index + 1, total: resourceGroups.length };
-				const eventWithGroup = { ...item, detail };
-				await progress?.(eventWithGroup);
-				await writeDeleteLog({
-					userId: user.id,
-					accountId,
-					resourceGroup,
-					event: eventWithGroup
-				});
-			};
+		await progress?.(
+			progressEvent('batch-submit', 'running', `正在并发提交 ${resourceGroups.length} 个资源组删除请求`, {
+				mode: 'parallel',
+				total: resourceGroups.length
+			})
+		);
 
-			try {
-				await report(
-					progressEvent('delete-group-start', 'running', `开始删除资源组 ${resourceGroup}`, {
-						resourceGroup
-					})
-				);
-				await deleteResourceGroupWithProgress(clients, resourceGroup, report);
-				const message = `资源组 ${resourceGroup} 已删除`;
-				results.push({ resource_group: resourceGroup, status: 'success', message });
-				await report(progressEvent('delete-group-complete', 'success', message, { resourceGroup }));
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				results.push({ resource_group: resourceGroup, status: 'error', message });
-				await report(
-					progressEvent('delete-group-failed', 'error', `资源组 ${resourceGroup} 删除失败: ${message}`, {
-						resourceGroup
-					})
-				);
-			}
-		}
+		const results = await Promise.all(
+			resourceGroups.map(async (resourceGroup, index): Promise<DeleteResult> => {
+				const report = async (item: DeleteProgressEvent) => {
+					const detail = {
+						...(item.detail ?? {}),
+						resourceGroup,
+						index: index + 1,
+						total: resourceGroups.length
+					};
+					const eventWithGroup = { ...item, detail };
+					await progress?.(eventWithGroup);
+					await writeDeleteLog({
+						userId: user.id,
+						accountId,
+						resourceGroup,
+						event: eventWithGroup
+					});
+				};
+
+				try {
+					await report(
+						progressEvent('delete-group-start', 'running', `开始删除资源组 ${resourceGroup}`, {
+							resourceGroup
+						})
+					);
+					await deleteResourceGroupWithProgress(clients, resourceGroup, report);
+					const message = `资源组 ${resourceGroup} 已删除`;
+					await report(progressEvent('delete-group-complete', 'success', message, { resourceGroup }));
+					return { resource_group: resourceGroup, status: 'success', message };
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					await report(
+						progressEvent('delete-group-failed', 'error', `资源组 ${resourceGroup} 删除失败: ${message}`, {
+							resourceGroup
+						})
+					);
+					return { resource_group: resourceGroup, status: 'error', message };
+				}
+			})
+		);
 
 		const success = results.filter((item) => item.status === 'success').length;
 		const failed = results.length - success;

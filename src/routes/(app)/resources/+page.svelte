@@ -239,7 +239,7 @@
 			index: '序号',
 			total: '总数',
 			status: 'Azure 状态',
-			polls: '轮询',
+			polls: '状态检查',
 			subscriptionId: '订阅'
 		};
 		return Object.entries(detail)
@@ -515,7 +515,7 @@
 		deletingGroups = true;
 		deleteProgress = [];
 		deleteResults = [];
-		toast = `正在删除 ${targets.length} 个资源组...`;
+		toast = `正在并发提交 ${targets.length} 个资源组删除请求...`;
 		try {
 			const result = await readResourceGroupDeleteStream(targets);
 			deleteResults = result.results;
@@ -646,14 +646,14 @@
 					onclick={() => void deleteResourceGroups(selectedResourceGroups)}
 					disabled={deletingGroups || selectedResourceGroups.length === 0}
 				>
-					{deletingGroups ? '删除中...' : `删除选中 ${selectedResourceGroups.length} 个`}
+					{deletingGroups ? '并行删除中...' : `删除选中 ${selectedResourceGroups.length} 个`}
 				</button>
 				<button
 					class="btn-danger"
 					onclick={() => void deleteResourceGroups(visibleResourceGroupNames)}
 					disabled={deletingGroups || visibleResourceGroupNames.length === 0}
 				>
-					一键删除当前列表资源组
+					一键并行删除当前列表资源组
 				</button>
 			</div>
 		</div>
@@ -734,11 +734,11 @@
 			<div>
 				<h2 class="text-lg font-medium">资源组删除进度</h2>
 				<p class="mt-1 text-sm text-muted">
-					正在通过 Azure 官方 API 删除完整资源组，资源组内 VM、IP、NSG、VNet 等资源会一并清理。
+					删除请求已并发提交给 Azure，后续进度是在检查 Azure 后台清理是否完成，不会重复提交删除。
 				</p>
 			</div>
 			<span class="badge {deletingGroups ? 'bg-yellow-900/50 text-yellow-300' : 'bg-green-900/50 text-green-300'}">
-				{deletingGroups ? '删除中' : '已结束'}
+				{deletingGroups ? '并行删除中' : '已结束'}
 			</span>
 		</div>
 
