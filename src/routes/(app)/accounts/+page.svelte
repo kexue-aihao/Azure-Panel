@@ -48,7 +48,13 @@
 		clientSecret: string;
 		tenantId: string;
 	};
-	type AccountAddResult = Account & { pool_count?: number };
+	type AccountAddResult = Account & {
+		pool_count?: number;
+		telegram_notified?: boolean;
+		telegram_sent?: number;
+		telegram_failed?: number;
+		telegram_error?: string;
+	};
 	type AccountPoolCheckResult = {
 		pool_count: number;
 		notified: boolean;
@@ -319,7 +325,14 @@
 				method: 'POST',
 				body: JSON.stringify(payload)
 			});
-			toast = `账号已加入 Azure 号池，当前剩余 ${result.pool_count ?? accounts.length + 1} 个账号`;
+			const notifyStatus = result.telegram_notified
+				? `；已通知 ${result.telegram_sent ?? 0} 个 Telegram 目标${
+						result.telegram_failed ? `，失败 ${result.telegram_failed} 个` : ''
+					}`
+				: result.telegram_error
+					? `；Telegram 未通知：${result.telegram_error}`
+					: '';
+			toast = `账号已加入 Azure 号池，当前剩余 ${result.pool_count ?? accounts.length + 1} 个账号${notifyStatus}`;
 			resetForm();
 			quickParsed = null;
 			await load();

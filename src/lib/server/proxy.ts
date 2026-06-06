@@ -695,7 +695,9 @@ async function requestThroughProxy(proxy: ProxyRuntimeConfig, timeoutMs: number)
 			})
 		})
 	);
-	if (response.status >= 200 && response.status < 400) return;
+	// The real credential check runs immediately after this probe. For proxy validation,
+	// any Azure-side 4xx response still proves the proxy can complete TLS and reach ARM.
+	if (response.status >= 200 && response.status < 500 && response.status !== 407) return;
 	throw new Error(`Azure API connectivity check returned HTTP ${response.status}`);
 }
 

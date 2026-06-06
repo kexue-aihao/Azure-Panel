@@ -123,12 +123,16 @@ export const POST: RequestHandler = async (event) => {
 	const publicProxy = proxyProfile ? publicProxyProfile(proxyProfile) : null;
 	const proxyLabel = publicProxy?.label ?? (proxyUrl ? maskProxyUrl(proxyUrl) : '');
 	const poolCount = (await listAccountsByUser(user.id)).length;
+	let telegramNotified = false;
+	let telegramSent = 0;
+	let telegramFailed = 0;
+	let telegramError = '';
 
 	try {
 		const settings = await findNotificationSettingsByUser(user.id);
 		const credentials = getTelegramCredentials(settings);
 		if (credentials) {
-			await sendTelegramMessageToTargets({
+			const result = await sendTelegramMessageToTargets({
 				token: credentials.token,
 				chatIds: credentials.chatIds,
 				text: buildAccountPoolAddedMessage({
@@ -137,8 +141,15 @@ export const POST: RequestHandler = async (event) => {
 					proxyLabel
 				})
 			});
+			telegramSent = result.sent.length;
+			telegramFailed = result.failed.length;
+			telegramNotified = telegramSent > 0;
+			telegramError = result.failed.map((item) => item.error).join('; ');
+		} else {
+			telegramError = 'Telegram 通知未启用或配置不完整';
 		}
 	} catch (err) {
+		telegramError = err instanceof Error ? err.message : String(err);
 		console.warn('[account] Telegram account pool notification failed:', err);
 	}
 
@@ -153,6 +164,10 @@ export const POST: RequestHandler = async (event) => {
 		proxy_name: publicProxy?.name ?? '',
 		proxy_label: proxyLabel,
 		pool_count: poolCount,
+		telegram_notified: telegramNotified,
+		telegram_sent: telegramSent,
+		telegram_failed: telegramFailed,
+		telegram_error: telegramError,
 		remark: account.remark,
 		created_at: account.createdAt
 	});
