@@ -19,7 +19,7 @@ import {
 import type { ProxyProfile } from '$lib/server/db/schema';
 import type { RequestHandler } from './$types';
 
-type ProxyCheckStatus = 'available' | 'deleted';
+type ProxyCheckStatus = 'available' | 'deleted' | 'failed';
 
 function buildProxyHealthMessage(input: {
 	profile: ProxyProfile;
@@ -36,7 +36,9 @@ function buildProxyHealthMessage(input: {
 		`结果: ${
 			input.status === 'available'
 				? '可用，已保留'
-				: '不可用，已自动删除，并解除绑定该代理的 Azure 账号'
+				: input.status === 'deleted'
+					? '不可用，已自动删除，并解除绑定该代理的 Azure 账号'
+					: '不可用，未自动删除，等待用户确认'
 		}`,
 		input.error ? `错误: ${input.error.slice(0, 800)}` : '',
 		`时间: ${input.checkedAt.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
@@ -88,9 +90,13 @@ async function notifyProxyHealth(input: {
 
 export const POST: RequestHandler = async (event) => {
 	const user = await requireUser(event);
-	const body = (await event.request.json().catch(() => ({}))) as { proxy_id?: unknown };
+	const body = (await event.request.json().catch(() => ({}))) as {
+		proxy_id?: unknown;
+		delete_on_fail?: unknown;
+	};
 	const proxyProfileId = Number(body.proxy_id ?? 0) || 0;
 	if (!proxyProfileId) return fail('缺少 proxy_id');
+	const deleteOnFail = body.delete_on_fail !== false;
 
 	const profile = await findProxyProfileByUser(user.id, proxyProfileId);
 	if (!profile) return fail('代理配置不存在', 404);
@@ -130,6 +136,30 @@ export const POST: RequestHandler = async (event) => {
 		});
 	} catch (err) {
 		const error = err instanceof Error ? err.message : String(err);
+		if (!deleteOnFail) {
+			const notify = await notifyProxyHealth({
+				userId: user.id,
+				profile,
+				publicProfile,
+				status: 'failed',
+				error,
+				checkedAt
+			});
+
+			return ok({
+				proxy_id: proxyProfileId,
+				name: profile.name,
+				status: 'failed',
+				deleted: false,
+				message: `代理不可用，未保存：${profile.name}`,
+				error,
+				proxy: publicProfile,
+				runtime_type: '',
+				checked_at: checkedAt.toISOString(),
+				...notify
+			});
+		}
+
 		await stopManagedProxyForProfile(profile).catch(() => undefined);
 		await deleteProxyProfile(user.id, proxyProfileId);
 		const notify = await notifyProxyHealth({

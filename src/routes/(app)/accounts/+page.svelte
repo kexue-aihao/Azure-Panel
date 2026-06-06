@@ -83,6 +83,21 @@
 		notify_error: string;
 		accounts: AccountCheckResult[];
 	};
+	type ProxyCheckResult = {
+		proxy_id: number;
+		name: string;
+		status: 'available' | 'deleted' | 'failed';
+		deleted: boolean;
+		message: string;
+		error: string;
+		proxy: ProxyProfile | null;
+		runtime_type: string;
+		checked_at: string;
+		telegram_notified: boolean;
+		telegram_sent: number;
+		telegram_failed: number;
+		telegram_error: string;
+	};
 
 	let accounts = $state<Account[]>([]);
 	let proxies = $state<ProxyProfile[]>([]);
@@ -101,6 +116,7 @@
 	let accountProxyDrafts = $state<Record<number, { proxy_mode: ProxyMode; proxy_profile_id: string }>>({});
 	let accountCheckResults = $state<Record<number, AccountCheckResult>>({});
 	let proxySavingAccountId = $state<number | null>(null);
+	let proxySaveMessage = $state('');
 	let checkingPoolCount = $state(false);
 	let checkingNormalSubscriptions = $state(false);
 	let normalCheckProgress = $state({ checked: 0, total: 0 });
@@ -357,6 +373,14 @@
 		};
 
 		try {
+			if (form.proxy_mode === 'profile') {
+				const canSave = await checkProxyBeforeBinding(
+					form.name || form.client_id || '新 Azure 账号',
+					form.proxy_profile_id
+				);
+				if (!canSave) return;
+			}
+
 			const result = await api<AccountAddResult>('/api/user/azure/account/add', {
 				method: 'POST',
 				body: JSON.stringify(payload)
@@ -374,6 +398,8 @@
 			await load();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '添加失败';
+		} finally {
+			proxySaveMessage = '';
 		}
 	}
 
@@ -404,6 +430,49 @@
 		}
 	}
 
+	function updateProxyFromCheckResult(result: ProxyCheckResult) {
+		if (result.deleted) {
+			proxies = proxies.filter((proxy) => proxy.id !== result.proxy_id);
+			return;
+		}
+		if (result.proxy) {
+			proxies = proxies.map((proxy) => (proxy.id === result.proxy?.id ? result.proxy : proxy));
+		}
+	}
+
+	async function checkProxyBeforeBinding(targetName: string, proxyProfileId: string) {
+		proxySaveMessage = '正在测活选中的代理，测活通过后才会保存到账号...';
+		toast = proxySaveMessage;
+		const result = await api<ProxyCheckResult>('/api/user/proxy/check', {
+			method: 'POST',
+			body: JSON.stringify({
+				proxy_id: proxyProfileId,
+				delete_on_fail: false
+			})
+		});
+		updateProxyFromCheckResult(result);
+		if (result.status === 'available') {
+			proxySaveMessage = `代理测活通过，正在保存到 ${targetName}...`;
+			toast = proxySaveMessage;
+			return true;
+		}
+
+		const shouldDelete = confirm(
+			`代理 ${result.name} 测活失败，未保存到账号 ${targetName}。\n\n错误：${
+				result.error || result.message
+			}\n\n是否删除这个不可用代理配置？删除后，已绑定它的 Azure 账号会自动改回不使用代理。`
+		);
+		if (shouldDelete) {
+			proxySaveMessage = `正在删除不可用代理 ${result.name}...`;
+			await api(`/api/user/proxy/delete?proxy_id=${result.proxy_id}`, { method: 'DELETE' });
+			toast = `已删除不可用代理：${result.name}`;
+			await load();
+		} else {
+			toast = `代理 ${result.name} 测活失败，未保存到账号`;
+		}
+		return false;
+	}
+
 	async function saveAccountProxy(account: Account) {
 		const draft = accountProxyDrafts[account.id] ?? defaultAccountProxyDraft(account);
 		if (draft.proxy_mode === 'profile' && !draft.proxy_profile_id) {
@@ -412,7 +481,16 @@
 		}
 
 		proxySavingAccountId = account.id;
+		proxySaveMessage =
+			draft.proxy_mode === 'profile'
+				? '正在测活选中的代理...'
+				: '正在保存此账号的代理出口配置...';
 		try {
+			if (draft.proxy_mode === 'profile') {
+				const canSave = await checkProxyBeforeBinding(account.name, draft.proxy_profile_id);
+				if (!canSave) return;
+			}
+
 			await api('/api/user/azure/account/proxy', {
 				method: 'POST',
 				body: JSON.stringify({
@@ -427,6 +505,7 @@
 			toast = err instanceof Error ? err.message : '代理切换失败';
 		} finally {
 			proxySavingAccountId = null;
+			proxySaveMessage = '';
 		}
 	}
 
@@ -771,7 +850,9 @@
 							<div class="progress-track running mt-3">
 								<div class="progress-fill bg-primary" style="width: 70%"></div>
 							</div>
-							<div class="mt-1 text-xs text-muted">正在保存此账号的代理出口配置...</div>
+							<div class="mt-1 text-xs text-muted">
+								{proxySaveMessage || '正在保存此账号的代理出口配置...'}
+							</div>
 						{/if}
 					</div>
 					<div class="flex shrink-0 flex-col gap-2">

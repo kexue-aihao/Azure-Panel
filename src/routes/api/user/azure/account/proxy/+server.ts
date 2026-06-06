@@ -2,7 +2,7 @@ import { ensureClientIpProxyProfile } from '$lib/server/auto-client-ip-proxy';
 import { getUserAccount } from '$lib/server/accounts';
 import { findProxyProfileByUser, updateAccountProxy } from '$lib/server/db/repo';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
-import { publicProxyProfile } from '$lib/server/proxy';
+import { proxyProfileToAzureReady, publicProxyProfile } from '$lib/server/proxy';
 import type { RequestHandler } from './$types';
 
 export const POST: RequestHandler = async (event) => {
@@ -17,16 +17,36 @@ export const POST: RequestHandler = async (event) => {
 
 	try {
 		let proxyProfile = null;
+		const clientIp = getRequestClientIp(event);
 		if (proxyMode === 'direct') {
 			proxyProfile = null;
 		} else if (proxyMode === 'client_ip') {
-			proxyProfile = await ensureClientIpProxyProfile(user.id, getRequestClientIp(event));
+			proxyProfile = await ensureClientIpProxyProfile(user.id, clientIp);
 		} else if (proxyMode === 'profile') {
 			if (!proxyProfileId) return fail('请先选择一个自定义代理档案');
 			proxyProfile = await findProxyProfileByUser(user.id, proxyProfileId);
 			if (!proxyProfile) return fail('代理配置不存在');
 		} else {
 			return fail('代理选择无效');
+		}
+
+		if (proxyProfile) {
+			try {
+				await proxyProfileToAzureReady(proxyProfile, {
+					clientIp,
+					timeoutMs: 10_000,
+					autoDetectHttpSocks: true,
+					updateProfileType: true
+				});
+			} catch (err) {
+				return fail(
+					`代理测活失败，未保存账号代理: ${err instanceof Error ? err.message : String(err)}`,
+					400
+				);
+			}
+			if (proxyMode === 'profile') {
+				proxyProfile = (await findProxyProfileByUser(user.id, proxyProfile.id)) ?? proxyProfile;
+			}
 		}
 
 		const account = await updateAccountProxy(user.id, accountId, {

@@ -38,6 +38,7 @@ import {
 	maskProxy,
 	proxyProfileToAzureReady,
 	proxySource,
+	validateProxyConnection,
 	type ProxyRuntimeConfig
 } from './proxy';
 import {
@@ -55,6 +56,7 @@ const activeNotificationUsers = new Set<number>();
 type WorkerAccountRuntime = {
 	account: AzureAccount;
 	proxy: ProxyRuntimeConfig | null;
+	proxyLabel: string;
 	clients: ReturnType<typeof createAzureClients>;
 };
 
@@ -238,13 +240,44 @@ async function collectBootProxyPool(policy: WorkflowPolicy): Promise<WorkerBootP
 	return pool;
 }
 
-function pickBootProxy(pool: WorkerBootProxyRuntime[]) {
-	if (pool.length === 0) return null;
-	return pool[Math.floor(Math.random() * pool.length)] ?? null;
-}
-
 function bootProxyLabel(proxy: WorkerBootProxyRuntime | null) {
 	return proxy ? `${proxy.name} (${maskProxy(proxy.proxy)})` : '';
+}
+
+async function pickValidatedBootProxy(
+	policyId: number,
+	pool: WorkerBootProxyRuntime[],
+	reason: string
+) {
+	if (pool.length === 0) return null;
+
+	for (const candidate of shuffle(pool)) {
+		try {
+			const proxy = await validateProxyConnection(candidate.proxy, { timeoutMs: 10_000 });
+			await insertWorkflowLog(
+				policyId,
+				'proxy_pool',
+				'success',
+				`${reason} 已切换到可用随机代理: ${candidate.name} (${maskProxy(proxy)})`
+			);
+			return { ...candidate, proxy };
+		} catch (err) {
+			await insertWorkflowLog(
+				policyId,
+				'proxy_pool',
+				'failed',
+				`${reason} 随机代理 ${candidate.name} 测活失败，继续切换下一个: ${errorMessage(err)}`
+			);
+		}
+	}
+
+	await insertWorkflowLog(
+		policyId,
+		'proxy_pool',
+		'warning',
+		`${reason} 没有找到可用随机代理，将回退到账号默认出口或直连`
+	);
+	return null;
 }
 
 async function resolveWorkerProxyForAccount(
@@ -288,7 +321,11 @@ async function resolveWorkerProxyForAccount(
 		}
 	}
 
-	const bootProxy = pickBootProxy(options.bootProxyPool ?? []);
+	const bootProxy = await pickValidatedBootProxy(
+		policyId,
+		options.bootProxyPool ?? [],
+		`账号 ${account.name} 备用出口`
+	);
 	if (bootProxy) {
 		return {
 			proxy: bootProxy.proxy,
@@ -311,9 +348,9 @@ async function createRuntimeForAccount(
 	return {
 		account,
 		proxy: runtimeProxy,
+		proxyLabel: label,
 		clients: createAzureClients(account, runtimeProxy)
 	};
-
 }
 
 async function collectAccountPoolRuntimes(
@@ -604,10 +641,17 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 						const prefix = policyResourcePrefix(policy);
 						const resourceGroup = randomAzureResourceName(`${prefix}-rg`, 64);
 						const vmName = randomAzureResourceName(prefix, 48);
-						const bootProxy = pickBootProxy(bootProxyPool);
+						const bootProxy = await pickValidatedBootProxy(
+							policy.id,
+							bootProxyPool,
+							`创建补机 ${vmName}`
+						);
 						const createClients = bootProxy
 							? createAzureClients(replenishRuntime.account, bootProxy.proxy)
 							: replenishRuntime.clients;
+						const createProxyLabel = bootProxy
+							? `补机代理池 ${bootProxyLabel(bootProxy)}`
+							: replenishRuntime.proxyLabel;
 						try {
 							const result = await createVmSimple(createClients, {
 								resourceGroup,
@@ -627,7 +671,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 								policy.id,
 								'auto_create',
 								'success',
-								`已使用账号 ${replenishRuntime.account.name} 创建 VM: ${vmName} 规格 ${replenishmentVmSize} 代理=${bootProxy?.name || '账号默认/直连'} 资源组=${resourceGroup} IPv4=${result.publicIPv4 || '-'} IPv6=${
+								`已使用账号 ${replenishRuntime.account.name} 创建 VM: ${vmName} 规格 ${replenishmentVmSize} 代理=${createProxyLabel} 资源组=${resourceGroup} IPv4=${result.publicIPv4 || '-'} IPv6=${
 									result.publicIPv6 || '-'
 								} 刷 IP 次数=${result.ipBrushAttempts}`
 							);
