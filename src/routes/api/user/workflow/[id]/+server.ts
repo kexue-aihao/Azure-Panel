@@ -29,7 +29,12 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.ip_brush_max_attempts !== undefined)
 		updates.ipBrushMaxAttempts = Number(body.ip_brush_max_attempts);
 	if (body.check_interval_seconds !== undefined)
-		updates.checkIntervalSeconds = Number(body.check_interval_seconds);
+		updates.checkIntervalSeconds = Math.max(1, Number(body.check_interval_seconds) || 120);
+	if (body.status_check_enabled !== undefined)
+		updates.statusCheckEnabled = Boolean(body.status_check_enabled);
+	if (body.status_trigger_states !== undefined)
+		updates.statusTriggerStates = String(body.status_trigger_states);
+	if (body.dns_binding_id !== undefined) updates.dnsBindingId = Number(body.dns_binding_id) || 0;
 	if (body.enabled !== undefined) updates.enabled = Boolean(body.enabled);
 	if (body.admin_password) updates.adminPasswordEncrypted = encryptSecret(String(body.admin_password));
 

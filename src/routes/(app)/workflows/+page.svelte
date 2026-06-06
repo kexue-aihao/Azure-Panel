@@ -3,6 +3,15 @@
 	import { api } from '$lib/api';
 
 	type Account = { id: number; name: string };
+	type DnsBinding = { id: number; name: string; fqdn: string; enabled: boolean };
+	type AccountStatus = {
+		state: string;
+		abnormal: boolean;
+		should_run_workflow: boolean;
+		subscription_id: string;
+		display_name: string;
+		checked_at: string;
+	};
 	type Workflow = {
 		id: number;
 		name: string;
@@ -16,9 +25,15 @@
 		ip_brush_max_attempts: number;
 		userdata_configured: boolean;
 		check_interval_seconds: number;
+		status_check_enabled: boolean;
+		status_trigger_states: string;
+		dns_binding_id: number;
+		last_account_status: string;
+		last_status_checked_at: string | null;
 	};
 
 	let accounts = $state<Account[]>([]);
+	let dnsBindings = $state<DnsBinding[]>([]);
 	let workflows = $state<Workflow[]>([]);
 	let form = $state({
 		account_id: '',
@@ -38,12 +53,18 @@
 		enable_ipv6: true,
 		ip_prefix: '',
 		ip_brush_max_attempts: 30,
-		check_interval_seconds: 120
+		check_interval_seconds: '',
+		status_check_enabled: true,
+		status_trigger_states: 'banned,warning,warned',
+		dns_binding_id: ''
 	});
 	let toast = $state('');
+	let checkingStatus = $state(false);
+	let statusResult = $state<AccountStatus | null>(null);
 
 	async function load() {
 		accounts = await api<Account[]>('/api/user/azure/account/list');
+		dnsBindings = await api<DnsBinding[]>('/api/user/dns/binding/list');
 		workflows = await api<Workflow[]>('/api/user/workflow/list');
 	}
 
@@ -63,13 +84,40 @@
 					vm_names,
 					min_running_count: Number(form.min_running_count),
 					ip_brush_max_attempts: Number(form.ip_brush_max_attempts),
-					check_interval_seconds: Number(form.check_interval_seconds)
+					check_interval_seconds: Number(form.check_interval_seconds),
+					dns_binding_id: Number(form.dns_binding_id || 0),
+					status_check_enabled: form.status_check_enabled,
+					status_trigger_states: form.status_trigger_states
 				})
 			});
 			toast = '补机策略已创建';
+			statusResult = null;
 			await load();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '创建失败';
+		}
+	}
+
+	async function checkAccountStatus() {
+		if (!form.account_id) {
+			toast = '请先选择 Azure 账号';
+			return;
+		}
+		checkingStatus = true;
+		statusResult = null;
+		try {
+			const params = new URLSearchParams({
+				account_id: String(form.account_id),
+				trigger_states: form.status_trigger_states
+			});
+			statusResult = await api<AccountStatus>(`/api/user/azure/account/status?${params.toString()}`);
+			toast = statusResult.should_run_workflow
+				? `账号状态 ${statusResult.state}，会触发自动补机`
+				: `账号状态 ${statusResult.state}，不会触发自动补机`;
+		} catch (err) {
+			toast = err instanceof Error ? err.message : '检测账号状态失败';
+		} finally {
+			checkingStatus = false;
 		}
 	}
 
@@ -133,6 +181,31 @@
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={form.auto_create} /> 数量不足时自动创建新 VM
 		</label>
+		<label class="flex items-center gap-2 text-sm">
+			<input type="checkbox" bind:checked={form.status_check_enabled} /> 自动定时检测账号/订阅状态
+		</label>
+		<div class="grid gap-3 sm:grid-cols-[1fr_auto]">
+			<input
+				class="input"
+				bind:value={form.status_trigger_states}
+				placeholder="触发补机状态，例如 banned,warning,warned"
+			/>
+			<button class="btn-secondary" type="button" disabled={checkingStatus} onclick={() => void checkAccountStatus()}>
+				{checkingStatus ? '检测中...' : '检测账号状态'}
+			</button>
+		</div>
+		{#if statusResult}
+			<div
+				class={`rounded-lg border px-3 py-2 text-xs ${
+					statusResult.should_run_workflow
+						? 'border-amber-500/40 bg-amber-500/10 text-amber-100'
+						: 'border-green-500/40 bg-green-500/10 text-green-100'
+				}`}
+			>
+				订阅 {statusResult.display_name || statusResult.subscription_id} 当前状态：{statusResult.state}。
+				{statusResult.should_run_workflow ? '命中触发条件，会执行补机流程。' : '未命中触发条件，不会执行补机。'}
+			</div>
+		{/if}
 		<input class="input" bind:value={form.vm_size} placeholder="VM 规格" />
 		<input
 			class="input"
@@ -170,12 +243,20 @@
 			bind:value={form.userdata}
 			placeholder={`#cloud-config\nruncmd:\n  - curl -fsSL https://example.com/install.sh | bash`}
 		></textarea>
+		<select class="input" bind:value={form.dns_binding_id}>
+			<option value="">补机完成后 DNS 解析绑定（可选）</option>
+			{#each dnsBindings as binding}
+				<option value={binding.id} disabled={!binding.enabled}>
+					{binding.name} · {binding.fqdn}{binding.enabled ? '' : '（已停用）'}
+				</option>
+			{/each}
+		</select>
 		<input
 			class="input"
 			type="number"
 			bind:value={form.check_interval_seconds}
-			min="30"
-			placeholder="检查间隔（秒）"
+			min="1"
+			placeholder="定时检测间隔（秒，留空默认 120）"
 		/>
 		<button class="btn-primary" type="submit">创建策略</button>
 	</form>
@@ -208,6 +289,15 @@
 							自动开机: {workflow.auto_start ? '是' : '否'} · 自动补机: {workflow.auto_create
 								? '是'
 								: '否'} · 间隔 {workflow.check_interval_seconds}s
+						</p>
+						<p class="text-xs text-muted">
+							状态检测: {workflow.status_check_enabled ? '开启' : '关闭'} · 触发状态: {workflow.status_trigger_states || '-'} ·
+							上次状态: {workflow.last_account_status || '-'}
+						</p>
+						<p class="text-xs text-muted">
+							DNS 绑定: {workflow.dns_binding_id
+								? dnsBindings.find((binding) => binding.id === workflow.dns_binding_id)?.fqdn || workflow.dns_binding_id
+								: '-'}
 						</p>
 						<p class="text-xs text-muted">
 							IPv6: {workflow.enable_ipv6 ? '是' : '否'} · IPv4 前缀: {workflow.ip_prefix || '-'} · UserData: {workflow.userdata_configured

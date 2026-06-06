@@ -10,6 +10,7 @@ export const POST: RequestHandler = async (event) => {
 	const accountId = Number(body.account_id);
 	if (!accountId) return fail('请选择 Azure 账号');
 	await getUserAccount(user.id, accountId);
+	const checkIntervalSeconds = Number(body.check_interval_seconds);
 
 	const policy = await insertWorkflow({
 		userId: user.id,
@@ -31,7 +32,11 @@ export const POST: RequestHandler = async (event) => {
 		enableIpv6: Boolean(body.enable_ipv6),
 		ipPrefix: String(body.ip_prefix ?? ''),
 		ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 30),
-		checkIntervalSeconds: Number(body.check_interval_seconds ?? 120)
+		checkIntervalSeconds:
+			Number.isFinite(checkIntervalSeconds) && checkIntervalSeconds > 0 ? checkIntervalSeconds : 120,
+		statusCheckEnabled: body.status_check_enabled !== false,
+		statusTriggerStates: String(body.status_trigger_states ?? 'banned,warning,warned'),
+		dnsBindingId: Number(body.dns_binding_id ?? 0) || 0
 	});
 
 	return ok({
@@ -54,6 +59,11 @@ export const POST: RequestHandler = async (event) => {
 		ip_prefix: policy.ipPrefix,
 		ip_brush_max_attempts: policy.ipBrushMaxAttempts,
 		check_interval_seconds: policy.checkIntervalSeconds,
+		status_check_enabled: policy.statusCheckEnabled,
+		status_trigger_states: policy.statusTriggerStates,
+		dns_binding_id: policy.dnsBindingId,
+		last_account_status: policy.lastAccountStatus,
+		last_status_checked_at: policy.lastStatusCheckedAt,
 		last_run_at: policy.lastRunAt,
 		created_at: policy.createdAt
 	});

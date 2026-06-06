@@ -627,6 +627,31 @@ export async function updateWorkflowLastRun(policyId: number): Promise<void> {
 		.run();
 }
 
+export async function updateWorkflowStatusCheck(
+	policyId: number,
+	values: { lastAccountStatus: string; lastStatusCheckedAt?: Date }
+): Promise<void> {
+	const updateValues = {
+		lastAccountStatus: values.lastAccountStatus,
+		lastStatusCheckedAt: values.lastStatusCheckedAt ?? new Date()
+	};
+
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.update(mysqlWorkflowPolicies)
+			.set(updateValues)
+			.where(eq(mysqlWorkflowPolicies.id, policyId));
+		return;
+	}
+
+	getSqliteDb()
+		.update(sqliteWorkflowPolicies)
+		.set(updateValues)
+		.where(eq(sqliteWorkflowPolicies.id, policyId))
+		.run();
+}
+
 export async function insertWorkflowLog(
 	policyId: number,
 	action: string,

@@ -102,6 +102,13 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	ipPrefix: varchar('ip_prefix', { length: 32 }).notNull().default(''),
 	ipBrushMaxAttempts: int('ip_brush_max_attempts').notNull().default(30),
 	checkIntervalSeconds: int('check_interval_seconds').notNull().default(120),
+	statusCheckEnabled: boolean('status_check_enabled').notNull().default(true),
+	statusTriggerStates: varchar('status_trigger_states', { length: 120 })
+		.notNull()
+		.default('banned,warning,warned'),
+	dnsBindingId: int('dns_binding_id').notNull().default(0),
+	lastAccountStatus: varchar('last_account_status', { length: 64 }).notNull().default(''),
+	lastStatusCheckedAt: timestamp('last_status_checked_at'),
 	lastRunAt: timestamp('last_run_at'),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });

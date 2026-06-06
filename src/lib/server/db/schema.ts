@@ -121,6 +121,11 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	ipPrefix: text('ip_prefix').notNull().default(''),
 	ipBrushMaxAttempts: integer('ip_brush_max_attempts').notNull().default(30),
 	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(120),
+	statusCheckEnabled: integer('status_check_enabled', { mode: 'boolean' }).notNull().default(true),
+	statusTriggerStates: text('status_trigger_states').notNull().default('banned,warning,warned'),
+	dnsBindingId: integer('dns_binding_id').notNull().default(0),
+	lastAccountStatus: text('last_account_status').notNull().default(''),
+	lastStatusCheckedAt: integer('last_status_checked_at', { mode: 'timestamp' }),
 	lastRunAt: integer('last_run_at', { mode: 'timestamp' }),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()

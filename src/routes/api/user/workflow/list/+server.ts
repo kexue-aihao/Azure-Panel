@@ -26,6 +26,11 @@ export const GET: RequestHandler = async (event) => {
 			ip_prefix: p.ipPrefix,
 			ip_brush_max_attempts: p.ipBrushMaxAttempts,
 			check_interval_seconds: p.checkIntervalSeconds,
+			status_check_enabled: p.statusCheckEnabled,
+			status_trigger_states: p.statusTriggerStates,
+			dns_binding_id: p.dnsBindingId,
+			last_account_status: p.lastAccountStatus,
+			last_status_checked_at: p.lastStatusCheckedAt,
 			last_run_at: p.lastRunAt,
 			created_at: p.createdAt
 		}))

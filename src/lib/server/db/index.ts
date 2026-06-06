@@ -118,6 +118,11 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		ip_prefix varchar(32) NOT NULL DEFAULT '',
 		ip_brush_max_attempts int NOT NULL DEFAULT 30,
 		check_interval_seconds int NOT NULL DEFAULT 120,
+		status_check_enabled tinyint(1) NOT NULL DEFAULT 1,
+		status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned',
+		dns_binding_id int NOT NULL DEFAULT 0,
+		last_account_status varchar(64) NOT NULL DEFAULT '',
+		last_status_checked_at timestamp NULL DEFAULT NULL,
 		last_run_at timestamp NULL DEFAULT NULL,
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
@@ -236,6 +241,33 @@ async function ensureMysqlSchema(pool: Pool) {
 		.query(
 			'ALTER TABLE workflow_policies ADD COLUMN ip_brush_max_attempts int NOT NULL DEFAULT 30'
 		)
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
+		.query('ALTER TABLE workflow_policies ADD COLUMN status_check_enabled tinyint(1) NOT NULL DEFAULT 1')
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
+		.query(
+			"ALTER TABLE workflow_policies ADD COLUMN status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned'"
+		)
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
+		.query('ALTER TABLE workflow_policies ADD COLUMN dns_binding_id int NOT NULL DEFAULT 0')
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
+		.query("ALTER TABLE workflow_policies ADD COLUMN last_account_status varchar(64) NOT NULL DEFAULT ''")
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool
+		.query('ALTER TABLE workflow_policies ADD COLUMN last_status_checked_at timestamp NULL DEFAULT NULL')
 		.catch((err) => {
 			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
 		});
@@ -363,6 +395,11 @@ export async function initDatabase() {
 			ip_prefix TEXT NOT NULL DEFAULT '',
 			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30,
 			check_interval_seconds INTEGER NOT NULL DEFAULT 120,
+			status_check_enabled INTEGER NOT NULL DEFAULT 1,
+			status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned',
+			dns_binding_id INTEGER NOT NULL DEFAULT 0,
+			last_account_status TEXT NOT NULL DEFAULT '',
+			last_status_checked_at INTEGER,
 			last_run_at INTEGER,
 			created_at INTEGER NOT NULL
 		);
@@ -428,6 +465,25 @@ export async function initDatabase() {
 		sqlite.exec(
 			'ALTER TABLE workflow_policies ADD COLUMN ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30'
 		);
+	}
+	if (!workflowColumns.some((column) => column.name === 'status_check_enabled')) {
+		sqlite.exec(
+			'ALTER TABLE workflow_policies ADD COLUMN status_check_enabled INTEGER NOT NULL DEFAULT 1'
+		);
+	}
+	if (!workflowColumns.some((column) => column.name === 'status_trigger_states')) {
+		sqlite.exec(
+			"ALTER TABLE workflow_policies ADD COLUMN status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned'"
+		);
+	}
+	if (!workflowColumns.some((column) => column.name === 'dns_binding_id')) {
+		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN dns_binding_id INTEGER NOT NULL DEFAULT 0');
+	}
+	if (!workflowColumns.some((column) => column.name === 'last_account_status')) {
+		sqlite.exec("ALTER TABLE workflow_policies ADD COLUMN last_account_status TEXT NOT NULL DEFAULT ''");
+	}
+	if (!workflowColumns.some((column) => column.name === 'last_status_checked_at')) {
+		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN last_status_checked_at INTEGER');
 	}
 	sqlite.exec(`
 		CREATE INDEX IF NOT EXISTS proxy_profiles_user_id_idx ON proxy_profiles(user_id);

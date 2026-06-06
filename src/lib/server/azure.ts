@@ -217,6 +217,14 @@ export type AzureSubscription = {
 	state?: string;
 };
 
+export type AzureAccountSubscriptionStatus = {
+	subscriptionId: string;
+	displayName: string;
+	state: string;
+	abnormal: boolean;
+	isDefault: boolean;
+};
+
 export type AzureResourceGroupInfo = {
 	id: string;
 	name: string;
@@ -837,6 +845,52 @@ export async function listAccountSubscriptions(
 			b.displayName ?? b.subscriptionId ?? ''
 		);
 	});
+}
+
+function normalizeSubscriptionState(state: string) {
+	const normalized = state.trim().toLowerCase();
+	if (normalized === 'warned') return 'warning';
+	return normalized;
+}
+
+export function normalizeSubscriptionTriggerStates(value?: string | null) {
+	const raw = value?.trim() || 'banned,warning,warned';
+	const states = raw
+		.split(/[,\s，]+/)
+		.map(normalizeSubscriptionState)
+		.filter(Boolean);
+	return states.length ? [...new Set(states)] : ['banned', 'warning'];
+}
+
+export function isAzureSubscriptionAbnormal(state?: string | null) {
+	const normalized = normalizeSubscriptionState(String(state ?? ''));
+	return Boolean(normalized && normalized !== 'enabled');
+}
+
+export function isAzureSubscriptionTriggerState(state?: string | null, triggerStates?: string | null) {
+	const normalized = normalizeSubscriptionState(String(state ?? ''));
+	if (!normalized) return false;
+	return normalizeSubscriptionTriggerStates(triggerStates).includes(normalized);
+}
+
+export async function getAccountSubscriptionStatus(
+	account: AzureAccount,
+	proxy?: ProxyRuntimeConfig | null
+): Promise<AzureAccountSubscriptionStatus> {
+	const subscriptions = await listAccountSubscriptions(account, proxy);
+	const selected =
+		subscriptions.find((subscription) => subscription.subscriptionId === account.subscriptionId) ??
+		subscriptions[0];
+	const subscriptionId = selected?.subscriptionId ?? account.subscriptionId;
+	const state = selected?.state || 'Unknown';
+
+	return {
+		subscriptionId,
+		displayName: selected?.displayName ?? '',
+		state,
+		abnormal: isAzureSubscriptionAbnormal(state),
+		isDefault: subscriptionId === account.subscriptionId
+	};
 }
 
 function parseResourceGroup(resourceId: string): string {
