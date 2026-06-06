@@ -8,7 +8,7 @@
 
 	const nav = [
 		{ href: '/vms', label: 'VM 管理' },
-		{ href: '/accounts', label: 'Azure 账号' },
+		{ href: '/accounts', label: 'Azure 号池' },
 		{ href: '/resources', label: '资源浏览' },
 		{ href: '/proxies', label: '代理配置' },
 		{ href: '/dns', label: 'DNS 管理' },

@@ -244,6 +244,10 @@
 
 	async function submit(e: Event) {
 		e.preventDefault();
+		if (accounts.length === 0) {
+			toast = 'Azure 号池为空，请先添加账号入池';
+			return;
+		}
 		const vm_names = form.vm_names
 			.split(',')
 			.map((s) => s.trim())
@@ -274,7 +278,7 @@
 
 	async function checkAccountStatus() {
 		if (!form.account_id) {
-			toast = '请先选择 Azure 账号';
+			toast = '请先从 Azure 号池选择触发检测账号';
 			return;
 		}
 		checkingStatus = true;
@@ -310,7 +314,7 @@
 
 	async function runNow() {
 		await api('/api/user/workflow/run', { method: 'POST' });
-		toast = '已触发当前账号下的补机检查，请到执行日志查看结果';
+		toast = '已触发 Azure 号池补机检查，请到执行日志查看结果';
 	}
 
 	onMount(() => {
@@ -327,12 +331,27 @@
 <div class="grid gap-6 xl:grid-cols-2">
 	<form class="card space-y-3 p-5" onsubmit={submit}>
 		<h2 class="text-lg font-medium">创建补机策略</h2>
-		<select class="input" bind:value={form.account_id} onchange={() => void changeAccount()} required>
-			<option value="">选择 Azure 账号</option>
-			{#each accounts as account}
-				<option value={account.id}>{account.name}</option>
-			{/each}
-		</select>
+		<div>
+			<div class="mb-1 flex items-center justify-between gap-3">
+				<label class="block text-xs text-muted" for="workflow-account-pool">Azure 号池</label>
+				<span class="badge bg-primary/10 text-primary">剩余 {accounts.length} 个</span>
+			</div>
+			<select
+				id="workflow-account-pool"
+				class="input"
+				bind:value={form.account_id}
+				onchange={() => void changeAccount()}
+				required
+			>
+				<option value="">从 Azure 号池选择触发检测账号</option>
+				{#each accounts as account}
+					<option value={account.id}>{account.name}</option>
+				{/each}
+			</select>
+			<p class="mt-1 text-xs text-muted">
+				这里选择的账号只用于状态触发检测和加载区域/规格/系统；真正自动补机时会从 Azure 号池随机抽取状态正常的账号创建 VM。
+			</p>
+		</div>
 		<input class="input" bind:value={form.name} placeholder="策略名称" required />
 		<input class="input" bind:value={form.resource_group} placeholder="资源组" required />
 		<div>
@@ -348,7 +367,7 @@
 				{#if regionLoading}
 					<option value={form.location}>正在从官方 API 查询可开区域...</option>
 				{:else if regions.length === 0}
-					<option value={form.location}>{regionError || '请先选择 Azure 账号加载可开区域'}</option>
+					<option value={form.location}>{regionError || '请先从 Azure 号池选择账号加载可开区域'}</option>
 				{:else}
 					{#each regions as region}
 						<option value={region.name}>{regionLabel(region)}</option>
@@ -372,7 +391,7 @@
 			placeholder="异常时目标补机数量"
 		/>
 		<p class="text-xs text-muted">
-			只有当前选择账号的订阅状态为 banned、warning 或 warned 时才会执行自动补机；正常账号不会触发。
+			只有当前触发检测账号的订阅状态为 banned、warning 或 warned 时才会执行自动补机；补机账号会从 Azure 号池随机抽取正常订阅账号。
 		</p>
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={form.auto_start} /> 自动启动已停止的 VM
@@ -384,7 +403,7 @@
 			<input type="checkbox" bind:checked={form.status_check_enabled} /> 自动定时检测账号/订阅状态
 		</label>
 		<button class="btn-secondary" type="button" disabled={checkingStatus} onclick={() => void checkAccountStatus()}>
-			{checkingStatus ? '检测中...' : '检测账号状态'}
+			{checkingStatus ? '检测中...' : '检测触发账号状态'}
 		</button>
 		{#if statusResult}
 			<div
@@ -395,7 +414,9 @@
 				}`}
 			>
 				订阅 {statusResult.display_name || statusResult.subscription_id} 当前状态：{statusResult.state}。
-				{statusResult.should_run_workflow ? '命中触发条件，会执行补机流程。' : '未命中触发条件，不会执行补机。'}
+				{statusResult.should_run_workflow
+					? '命中触发条件，会从 Azure 号池随机抽取正常账号补机。'
+					: '未命中触发条件，不会执行补机。'}
 			</div>
 		{/if}
 		<div>

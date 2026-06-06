@@ -48,6 +48,7 @@
 		clientSecret: string;
 		tenantId: string;
 	};
+	type AccountAddResult = Account & { pool_count?: number };
 
 	let accounts = $state<Account[]>([]);
 	let proxies = $state<ProxyProfile[]>([]);
@@ -243,11 +244,11 @@
 		};
 
 		try {
-			await api('/api/user/azure/account/add', {
+			const result = await api<AccountAddResult>('/api/user/azure/account/add', {
 				method: 'POST',
 				body: JSON.stringify(payload)
 			});
-			toast = '账号添加成功';
+			toast = `账号已加入 Azure 号池，当前剩余 ${result.pool_count ?? accounts.length + 1} 个账号`;
 			resetForm();
 			quickParsed = null;
 			await load();
@@ -315,7 +316,7 @@
 	});
 </script>
 
-<h1 class="mb-4 text-2xl font-semibold">Azure 账号</h1>
+<h1 class="mb-4 text-2xl font-semibold">Azure 号池</h1>
 
 {#if toast}
 	<div class="mb-4 rounded-lg border border-border bg-card px-3 py-2 text-sm">{toast}</div>
@@ -324,10 +325,10 @@
 <div class="grid gap-6 lg:grid-cols-2">
 	<div class="space-y-4">
 	<form class="card space-y-3 p-5" onsubmit={submit}>
-		<h2 class="text-lg font-medium">添加 Service Principal</h2>
+		<h2 class="text-lg font-medium">添加账号进入号池</h2>
 		<p class="text-sm text-muted">
 			默认由部署本网站的服务器直接请求 Azure API，Azure 侧看到的是服务器源站出站 IP。
-			选择代理配置后，此账号的验证、VM 查询、开关机和自动补机会走代理出口 IP。
+			选择代理配置后，此账号的验证、VM 查询、开关机和自动补机会走代理出口 IP。保存成功后会向 Telegram 个人和群组播报账号池剩余数量。
 		</p>
 		<input class="input" bind:value={form.name} placeholder="账号名称，可留空自动生成" />
 		<input class="input" bind:value={form.tenant_id} placeholder="Tenant ID" required />
@@ -385,7 +386,7 @@
 		<p class="text-xs text-muted">
 			这里只需要填写 Azure 登录凭据三项。选择代理档案后，此账号的验证、VM 查询、开关机和自动补机会走该代理出口。
 		</p>
-		<button class="btn-primary" type="submit">保存账号</button>
+		<button class="btn-primary" type="submit">保存入池</button>
 	</form>
 
 	<section class="card space-y-4 p-5">
@@ -405,7 +406,7 @@
 				识别并填充上方三项
 			</button>
 			<button class="btn-primary" type="button" onclick={() => void identifyAndSaveQuickInput()}>
-				识别并保存账号
+				识别并保存入池
 			</button>
 			<button
 				class="btn-secondary"
@@ -437,9 +438,12 @@
 	</div>
 
 	<div class="card space-y-3 p-5">
-		<h2 class="text-lg font-medium">已添加账号</h2>
+		<div class="flex items-center justify-between gap-3">
+			<h2 class="text-lg font-medium">Azure 账号池</h2>
+			<span class="badge bg-primary/10 text-primary">剩余 {accounts.length} 个</span>
+		</div>
 		{#if accounts.length === 0}
-			<p class="text-sm text-muted">还没有账号</p>
+			<p class="text-sm text-muted">号池里还没有账号</p>
 		{:else}
 			{#each accounts as account}
 				<div class="grid gap-3 rounded-lg border border-border p-3 md:grid-cols-[1fr_auto]">

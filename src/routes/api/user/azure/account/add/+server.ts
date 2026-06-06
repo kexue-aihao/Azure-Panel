@@ -1,7 +1,13 @@
 import { maskProxyUrl, validateAzureCredentials, validateProxyUrl } from '$lib/server/azure';
 import { ensureClientIpProxyProfile } from '$lib/server/auto-client-ip-proxy';
 import { encryptSecret } from '$lib/server/crypto';
-import { findProxyProfileByUser, insertAccount, updateProxyProfileType } from '$lib/server/db/repo';
+import {
+	findNotificationSettingsByUser,
+	findProxyProfileByUser,
+	insertAccount,
+	listAccountsByUser,
+	updateProxyProfileType
+} from '$lib/server/db/repo';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import {
 	parseProxyUrl,
@@ -10,6 +16,11 @@ import {
 	type ProxyRuntimeConfig,
 	validateProxyConnection
 } from '$lib/server/proxy';
+import {
+	buildAccountPoolAddedMessage,
+	getTelegramCredentials,
+	sendTelegramMessageToTargets
+} from '$lib/server/telegram';
 import type { RequestHandler } from './$types';
 
 async function validateSavedProxyWithFallback(
@@ -110,6 +121,26 @@ export const POST: RequestHandler = async (event) => {
 	});
 
 	const publicProxy = proxyProfile ? publicProxyProfile(proxyProfile) : null;
+	const proxyLabel = publicProxy?.label ?? (proxyUrl ? maskProxyUrl(proxyUrl) : '');
+	const poolCount = (await listAccountsByUser(user.id)).length;
+
+	try {
+		const settings = await findNotificationSettingsByUser(user.id);
+		const credentials = getTelegramCredentials(settings);
+		if (credentials) {
+			await sendTelegramMessageToTargets({
+				token: credentials.token,
+				chatIds: credentials.chatIds,
+				text: buildAccountPoolAddedMessage({
+					account,
+					poolCount,
+					proxyLabel
+				})
+			});
+		}
+	} catch (err) {
+		console.warn('[account] Telegram account pool notification failed:', err);
+	}
 
 	return ok({
 		id: account.id,
@@ -120,7 +151,8 @@ export const POST: RequestHandler = async (event) => {
 		proxy_profile_id: account.proxyProfileId,
 		proxy_enabled: Boolean(publicProxy || proxyUrl),
 		proxy_name: publicProxy?.name ?? '',
-		proxy_label: publicProxy?.label ?? (proxyUrl ? maskProxyUrl(proxyUrl) : ''),
+		proxy_label: proxyLabel,
+		pool_count: poolCount,
 		remark: account.remark,
 		created_at: account.createdAt
 	});

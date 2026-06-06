@@ -301,3 +301,21 @@ export function buildReplenishmentMessage(input: {
 		`时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
 	].join('\n');
 }
+
+export function buildAccountPoolAddedMessage(input: {
+	account: AzureAccount;
+	poolCount: number;
+	proxyLabel?: string;
+	addedAt?: Date;
+}) {
+	return [
+		'Azure Panel 账号池补充通知',
+		`账号: ${maskAccountName(input.account.name)}`,
+		`租户: ${maskMiddle(input.account.tenantId, 6, 6)}`,
+		`Client ID: ${maskMiddle(input.account.clientId, 6, 6)}`,
+		`订阅: ${maskSubscriptionId(input.account.subscriptionId)}`,
+		`出站: ${input.proxyLabel || '服务器源站 IP'}`,
+		`账号池剩余: ${Math.max(0, Math.floor(input.poolCount))} 个`,
+		`时间: ${(input.addedAt ?? new Date()).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
+	].join('\n');
+}

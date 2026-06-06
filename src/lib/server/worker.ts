@@ -259,6 +259,12 @@ async function createRuntimeForAccount(
 async function collectAccountPoolRuntimes(policy: WorkflowPolicy, primaryAccount: AzureAccount) {
 	const accounts = await listAccountsByUser(policy.userId);
 	const runtimes: WorkerAccountRuntime[] = [];
+	await insertWorkflowLog(
+		policy.id,
+		'account_pool',
+		accounts.length > 0 ? 'success' : 'warning',
+		`Azure 号池当前共有 ${accounts.length} 个账号，自动补机会随机抽取正常订阅账号`
+	);
 	for (const account of accounts) {
 		try {
 			const runtime = await createRuntimeForAccount(policy.id, account);
@@ -286,6 +292,12 @@ async function pickReplenishmentRuntime(
 	excludedAccountId: number
 ): Promise<WorkerAccountRuntime | null> {
 	const candidates = shuffle(runtimes.filter((runtime) => runtime.account.id !== excludedAccountId));
+	await insertWorkflowLog(
+		policy.id,
+		'account_pool',
+		candidates.length > 0 ? 'success' : 'warning',
+		`本轮可随机抽取的候选补机账号 ${candidates.length} 个`
+	);
 	for (const runtime of candidates) {
 		try {
 			const status = await getAccountSubscriptionStatus(runtime.account, runtime.proxy);

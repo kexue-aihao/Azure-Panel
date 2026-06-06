@@ -9,7 +9,7 @@ export const POST: RequestHandler = async (event) => {
 	const user = await requireUser(event);
 	const body = await event.request.json();
 	const accountId = Number(body.account_id);
-	if (!accountId) return fail('请选择 Azure 账号');
+	if (!accountId) return fail('请从 Azure 号池选择触发检测账号');
 	await getUserAccount(user.id, accountId);
 	const checkIntervalSeconds = Number(body.check_interval_seconds);
 	const minRunningCount = Math.max(0, Number(body.min_running_count ?? 1) || 0);
