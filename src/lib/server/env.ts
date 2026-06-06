@@ -22,5 +22,5 @@ export function getHost(): string {
 }
 
 export function isEmbeddedWorkerEnabled(): boolean {
-	return readEnv('ENABLE_EMBEDDED_WORKER') !== 'false';
+	return readEnv('ENABLE_EMBEDDED_WORKER') === 'true';
 }

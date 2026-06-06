@@ -685,6 +685,16 @@ export async function stopManagedProxyFromShareLink(shareLink: string, core: Man
 	}
 }
 
+export function stopAllManagedProxyProcesses(signal: NodeJS.Signals = 'SIGTERM') {
+	for (const managed of managedProcesses.values()) {
+		if (managed.process.exitCode === null && !managed.process.killed) {
+			managed.process.kill(signal);
+		}
+	}
+	managedProcesses.clear();
+	managedStartPromises.clear();
+}
+
 export async function stopManagedProxyForProfile(profile: ProxyProfile) {
 	const core = normalizeManagedCore(profile.managedCore ?? '');
 	const encrypted = profile.shareLinkEncrypted ?? '';
@@ -711,3 +721,23 @@ export function normalizeManagedCore(value: string): ManagedProxyCore | null {
 	if (normalized === 'sing-box' || normalized === 'xray') return normalized;
 	return null;
 }
+
+let shutdownHooksInstalled = false;
+
+function installManagedProxyShutdownHooks() {
+	if (shutdownHooksInstalled) return;
+	shutdownHooksInstalled = true;
+
+	process.once('exit', () => {
+		stopAllManagedProxyProcesses('SIGTERM');
+	});
+
+	for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+		process.once(signal, () => {
+			stopAllManagedProxyProcesses('SIGTERM');
+			process.exit(signal === 'SIGINT' ? 130 : 143);
+		});
+	}
+}
+
+installManagedProxyShutdownHooks();

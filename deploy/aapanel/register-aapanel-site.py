@@ -10,6 +10,7 @@ from __future__ import print_function
 
 import json
 import os
+import signal
 import sys
 import time
 
@@ -179,10 +180,44 @@ def stop_node_project(mod_module, project_name):
         pass
 
 
-def restart_node_project(mod_module, project_name, port=None):
+def cleanup_project_processes(app_dir, entry_file):
+    if not app_dir or not entry_file or not os.path.isdir("/proc"):
+        return
+    target = os.path.join(app_dir, entry_file)
+    pids = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        cmdline = os.path.join("/proc", name, "cmdline")
+        try:
+            with open(cmdline, "rb") as fh:
+                cmd = fh.read().replace(b"\x00", b" ").decode("utf-8", "ignore")
+        except Exception:
+            continue
+        if target in cmd:
+            pids.append(int(name))
+    if not pids:
+        return
+    print("[aapanel] cleanup old runtime {} -> {}".format(entry_file, pids))
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+    time.sleep(2)
+    for pid in pids:
+        if os.path.exists("/proc/{}".format(pid)):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+
+def restart_node_project(mod_module, project_name, port=None, app_dir=None, entry_file=None):
     import public
 
     stop_node_project(mod_module, project_name)
+    cleanup_project_processes(app_dir, entry_file)
 
     get = public.dict_obj()
     get.project_name = project_name
@@ -205,7 +240,7 @@ def restart_node_project(mod_module, project_name, port=None):
 
 
 def build_web_env(port):
-    return "HOST=127.0.0.1\nPORT={}\nNODE_ENV=production\nNODE_OPTIONS={}".format(
+    return "HOST=127.0.0.1\nPORT={}\nNODE_ENV=production\nENABLE_EMBEDDED_WORKER=false\nNODE_OPTIONS={}".format(
         port, node_options()
     )
 
@@ -217,13 +252,13 @@ def register_nodejs_web(app_dir, domain, port, project_name, node_version):
     existing = find_site_by_name(project_name)
     if existing:
         print("[aapanel] Node 项目已存在，尝试重启: {}".format(project_name))
-        return restart_node_project(nodeMod, project_name, port)
+        return restart_node_project(nodeMod, project_name, port, app_dir, "build/index.js")
 
     domain_site = find_site_by_domain(domain)
     if domain_site and is_node_site(domain_site):
         name = domain_site.get("name")
         print("[aapanel] 域名 {} 已绑定 Node 项目 {}，尝试重启".format(domain, name))
-        return restart_node_project(nodeMod, name, port)
+        return restart_node_project(nodeMod, name, port, app_dir, "build/index.js")
 
     pkg = os.path.join(app_dir, "package.json")
     if not os.path.isfile(pkg):
@@ -259,7 +294,7 @@ def register_nodejs_web(app_dir, domain, port, project_name, node_version):
 
     if find_site_by_name(project_name):
         print("[aapanel] 项目记录已写入，尝试重启修复...")
-        return restart_node_project(nodeMod, project_name, port)
+        return restart_node_project(nodeMod, project_name, port, app_dir, "build/index.js")
 
     return False
 
@@ -275,7 +310,7 @@ def register_general_worker(app_dir, port, worker_name, node_version):
 
     if find_site_by_name(worker_name):
         print("[aapanel] Worker 项目已存在，尝试重启: {}".format(worker_name))
-        return restart_node_project(generalMod, worker_name)
+        return restart_node_project(generalMod, worker_name, app_dir=app_dir, entry_file="build/worker.js")
 
     get = build_get(
         project_type="general",
@@ -305,7 +340,7 @@ def register_general_worker(app_dir, port, worker_name, node_version):
 
     if find_site_by_name(worker_name):
         print("[aapanel] Worker 记录已写入，尝试重启修复...")
-        return restart_node_project(generalMod, worker_name)
+        return restart_node_project(generalMod, worker_name, app_dir=app_dir, entry_file="build/worker.js")
 
     return False
 

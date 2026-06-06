@@ -257,6 +257,16 @@ fix_env_file_permissions() {
 	fi
 }
 
+ensure_runtime_env_defaults() {
+	local env_file="${1:-.env}"
+	[[ -f "$env_file" ]] || return 0
+
+	if ! grep -q '^ENABLE_EMBEDDED_WORKER=' "$env_file" 2>/dev/null; then
+		printf '\n# Runtime memory guard: use the standalone worker process in production.\nENABLE_EMBEDDED_WORKER=false\n' >>"$env_file"
+		log "Added ENABLE_EMBEDDED_WORKER=false to $env_file"
+	fi
+}
+
 read_port_from_env() {
 	local env_file="$1"
 	local default_port="${2:-3000}"
@@ -642,6 +652,90 @@ post_deploy_cleanup() {
 	fi
 }
 
+list_project_runtime_pids() {
+	local app_dir="${1:-$(pwd)}"
+	local pattern="$2"
+	local pid cmd
+	[[ -r /proc ]] || return 0
+	for proc in /proc/[0-9]*; do
+		pid="${proc##*/}"
+		[[ "$pid" == "$$" ]] && continue
+		[[ -r "$proc/cmdline" ]] || continue
+		cmd="$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)"
+		[[ -n "$cmd" ]] || continue
+		[[ "$cmd" == *"${app_dir}/${pattern}"* ]] && echo "$pid"
+	done
+}
+
+terminate_pids() {
+	local reason="$1"
+	shift || true
+	local -a pids=("$@")
+	[[ ${#pids[@]} -gt 0 ]] || return 0
+
+	log "Runtime memory cleanup: stopping ${reason} PID=${pids[*]}"
+	kill -TERM "${pids[@]}" 2>/dev/null || true
+	sleep 2
+
+	local -a alive=()
+	local pid
+	for pid in "${pids[@]}"; do
+		[[ -d "/proc/$pid" ]] && alive+=("$pid")
+	done
+	if [[ ${#alive[@]} -gt 0 ]]; then
+		warn "${reason} still alive, force killing PID=${alive[*]}"
+		kill -KILL "${alive[@]}" 2>/dev/null || true
+	fi
+}
+
+cleanup_project_node_runtimes() {
+	local app_dir="${1:-$(pwd)}"
+	local -a pids=()
+	mapfile -t pids < <(
+		{
+			list_project_runtime_pids "$app_dir" "build/index.js"
+			list_project_runtime_pids "$app_dir" "build/worker.js"
+		} | sort -n -u
+	)
+	terminate_pids "old Web/Worker Node" "${pids[@]}"
+}
+
+cleanup_managed_proxy_runtimes() {
+	local app_dir="${1:-$(pwd)}"
+	local managed_dir="${MANAGED_PROXY_DIR:-${app_dir}/data/managed-proxies}"
+	local pid cmd
+	local -a pids=()
+	[[ -r /proc ]] || return 0
+
+	for proc in /proc/[0-9]*; do
+		pid="${proc##*/}"
+		[[ "$pid" == "$$" ]] && continue
+		[[ -r "$proc/cmdline" ]] || continue
+		cmd="$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)"
+		[[ -n "$cmd" ]] || continue
+		if [[ "$cmd" == *"${app_dir}/bin/sing-box"* && "$cmd" == *" ${managed_dir}/"* ]]; then
+			pids+=("$pid")
+		elif [[ "$cmd" == *"${app_dir}/bin/xray"* && "$cmd" == *" ${managed_dir}/"* ]]; then
+			pids+=("$pid")
+		fi
+	done
+
+	if [[ ${#pids[@]} -gt 0 ]]; then
+		mapfile -t pids < <(printf '%s\n' "${pids[@]}" | sort -n -u)
+		terminate_pids "old managed proxy core" "${pids[@]}"
+	fi
+}
+
+runtime_memory_cleanup_before_restart() {
+	local app_dir="${1:-$(pwd)}"
+	if [[ "${SKIP_RUNTIME_CLEANUP:-0}" == "1" ]]; then
+		warn "Skipped runtime process cleanup (SKIP_RUNTIME_CLEANUP=1)"
+		return 0
+	fi
+	cleanup_managed_proxy_runtimes "$app_dir"
+	cleanup_project_node_runtimes "$app_dir"
+}
+
 npm_build_all() {
 	require_node_tools
 	local npm_bin
@@ -989,7 +1083,7 @@ startretries=3
 stopwaitsecs=10
 stdout_logfile=/www/wwwlogs/${web_program}.log
 stderr_logfile=/www/wwwlogs/${web_program}-error.log
-environment=NODE_ENV=\"production\",NODE_OPTIONS=\"${node_opts}\",HOST=\"127.0.0.1\",PORT=\"${app_port}\""
+environment=NODE_ENV=\"production\",ENABLE_EMBEDDED_WORKER=\"false\",NODE_OPTIONS=\"${node_opts}\",HOST=\"127.0.0.1\",PORT=\"${app_port}\""
 
 	worker_body="; Azure Panel Worker — 由 install.sh 自动生成
 [program:${worker_program}]
@@ -1003,7 +1097,7 @@ startretries=3
 stopwaitsecs=10
 stdout_logfile=/www/wwwlogs/${worker_program}.log
 stderr_logfile=/www/wwwlogs/${worker_program}-error.log
-environment=NODE_ENV=\"production\",NODE_OPTIONS=\"${node_opts}\""
+environment=NODE_ENV=\"production\",ENABLE_EMBEDDED_WORKER=\"false\",NODE_OPTIONS=\"${node_opts}\""
 
 	mkdir -p /www/wwwlogs 2>/dev/null || true
 	mkdir -p "${app_dir}/deploy/aapanel/generated"

@@ -124,6 +124,7 @@ if [[ ! -f .env ]]; then
 	fi
 fi
 
+ensure_runtime_env_defaults ".env"
 HEALTH_PORT="$(read_port_from_env .env "$HEALTH_PORT")"
 fix_env_file_permissions ".env"
 
@@ -136,6 +137,8 @@ ensure_proxy_cores
 npm_build_all
 
 # ---------- 重启 Supervisor / aaPanel Node 项目 ----------
+runtime_memory_cleanup_before_restart "$APP_DIR" || true
+
 if [[ "${SKIP_SUPERVISOR:-0}" != "1" ]]; then
 	if restart_aapanel_node_projects "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}" "$WORKER_PROGRAM" 2>/dev/null; then
 		log "已通过 aaPanel 重启 Node 项目"
