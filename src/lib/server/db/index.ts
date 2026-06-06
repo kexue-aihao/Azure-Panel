@@ -96,6 +96,35 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		KEY dns_record_bindings_user_id_idx (user_id),
 		KEY dns_record_bindings_config_id_idx (config_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS notification_settings (
+		id int NOT NULL AUTO_INCREMENT,
+		user_id int NOT NULL,
+		telegram_bot_token_encrypted text NOT NULL,
+		telegram_chat_id varchar(64) NOT NULL DEFAULT '',
+		enabled tinyint(1) NOT NULL DEFAULT 0,
+		subscription_check_interval_hours int NOT NULL DEFAULT 6,
+		last_subscription_checked_at timestamp NULL DEFAULT NULL,
+		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (id),
+		UNIQUE KEY notification_settings_user_id_unique (user_id),
+		KEY notification_settings_enabled_idx (enabled)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS subscription_notification_states (
+		id int NOT NULL AUTO_INCREMENT,
+		user_id int NOT NULL,
+		account_id int NOT NULL,
+		subscription_id varchar(64) NOT NULL DEFAULT '',
+		display_name varchar(255) NOT NULL DEFAULT '',
+		last_state varchar(64) NOT NULL DEFAULT '',
+		last_notified_state varchar(64) NOT NULL DEFAULT '',
+		last_checked_at timestamp NULL DEFAULT NULL,
+		last_notified_at timestamp NULL DEFAULT NULL,
+		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (id),
+		UNIQUE KEY subscription_notification_states_account_unique (user_id, account_id),
+		KEY subscription_notification_states_user_id_idx (user_id),
+		KEY subscription_notification_states_account_id_idx (account_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS workflow_policies (
 		id int NOT NULL AUTO_INCREMENT,
 		user_id int NOT NULL,
@@ -388,6 +417,28 @@ export async function initDatabase() {
 			last_synced_at INTEGER,
 			created_at INTEGER NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS notification_settings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			telegram_bot_token_encrypted TEXT NOT NULL DEFAULT '',
+			telegram_chat_id TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 0,
+			subscription_check_interval_hours INTEGER NOT NULL DEFAULT 6,
+			last_subscription_checked_at INTEGER,
+			created_at INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS subscription_notification_states (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			account_id INTEGER NOT NULL REFERENCES azure_accounts(id) ON DELETE CASCADE,
+			subscription_id TEXT NOT NULL DEFAULT '',
+			display_name TEXT NOT NULL DEFAULT '',
+			last_state TEXT NOT NULL DEFAULT '',
+			last_notified_state TEXT NOT NULL DEFAULT '',
+			last_checked_at INTEGER,
+			last_notified_at INTEGER,
+			created_at INTEGER NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS workflow_policies (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -515,6 +566,11 @@ export async function initDatabase() {
 		CREATE INDEX IF NOT EXISTS dns_configs_user_id_idx ON dns_configs(user_id);
 		CREATE INDEX IF NOT EXISTS dns_record_bindings_user_id_idx ON dns_record_bindings(user_id);
 		CREATE INDEX IF NOT EXISTS dns_record_bindings_config_id_idx ON dns_record_bindings(config_id);
+		CREATE UNIQUE INDEX IF NOT EXISTS notification_settings_user_id_unique ON notification_settings(user_id);
+		CREATE INDEX IF NOT EXISTS notification_settings_enabled_idx ON notification_settings(enabled);
+		CREATE UNIQUE INDEX IF NOT EXISTS subscription_notification_states_account_unique ON subscription_notification_states(user_id, account_id);
+		CREATE INDEX IF NOT EXISTS subscription_notification_states_user_id_idx ON subscription_notification_states(user_id);
+		CREATE INDEX IF NOT EXISTS subscription_notification_states_account_id_idx ON subscription_notification_states(account_id);
 		CREATE INDEX IF NOT EXISTS execution_logs_user_id_idx ON execution_logs(user_id);
 		CREATE INDEX IF NOT EXISTS execution_logs_account_id_idx ON execution_logs(account_id);
 	`);

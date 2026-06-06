@@ -93,6 +93,42 @@ export const dnsRecordBindings = sqliteTable('dns_record_bindings', {
 		.$defaultFn(() => new Date())
 });
 
+export const notificationSettings = sqliteTable('notification_settings', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	userId: integer('user_id')
+		.notNull()
+		.references(() => users.id, { onDelete: 'cascade' }),
+	telegramBotTokenEncrypted: text('telegram_bot_token_encrypted').notNull().default(''),
+	telegramChatId: text('telegram_chat_id').notNull().default(''),
+	enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
+	subscriptionCheckIntervalHours: integer('subscription_check_interval_hours')
+		.notNull()
+		.default(6),
+	lastSubscriptionCheckedAt: integer('last_subscription_checked_at', { mode: 'timestamp' }),
+	createdAt: integer('created_at', { mode: 'timestamp' })
+		.notNull()
+		.$defaultFn(() => new Date())
+});
+
+export const subscriptionNotificationStates = sqliteTable('subscription_notification_states', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	userId: integer('user_id')
+		.notNull()
+		.references(() => users.id, { onDelete: 'cascade' }),
+	accountId: integer('account_id')
+		.notNull()
+		.references(() => azureAccounts.id, { onDelete: 'cascade' }),
+	subscriptionId: text('subscription_id').notNull().default(''),
+	displayName: text('display_name').notNull().default(''),
+	lastState: text('last_state').notNull().default(''),
+	lastNotifiedState: text('last_notified_state').notNull().default(''),
+	lastCheckedAt: integer('last_checked_at', { mode: 'timestamp' }),
+	lastNotifiedAt: integer('last_notified_at', { mode: 'timestamp' }),
+	createdAt: integer('created_at', { mode: 'timestamp' })
+		.notNull()
+		.$defaultFn(() => new Date())
+});
+
 export const workflowPolicies = sqliteTable('workflow_policies', {
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	userId: integer('user_id')
@@ -168,6 +204,8 @@ export type ProxyProfile = typeof proxyProfiles.$inferSelect;
 export type AzureAccount = typeof azureAccounts.$inferSelect;
 export type DnsConfig = typeof dnsConfigs.$inferSelect;
 export type DnsRecordBinding = typeof dnsRecordBindings.$inferSelect;
+export type NotificationSettings = typeof notificationSettings.$inferSelect;
+export type SubscriptionNotificationState = typeof subscriptionNotificationStates.$inferSelect;
 export type WorkflowPolicy = typeof workflowPolicies.$inferSelect;
 export type WorkflowLog = typeof workflowLogs.$inferSelect;
 export type ExecutionLog = typeof executionLogs.$inferSelect;

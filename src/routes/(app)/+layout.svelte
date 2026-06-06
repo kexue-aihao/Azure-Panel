@@ -13,6 +13,7 @@
 		{ href: '/proxies', label: '代理配置' },
 		{ href: '/dns', label: 'DNS 管理' },
 		{ href: '/workflows', label: '自动补机' },
+		{ href: '/notifications', label: '通知设置' },
 		{ href: '/logs', label: '执行日志' }
 	];
 

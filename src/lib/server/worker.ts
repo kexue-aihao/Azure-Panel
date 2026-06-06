@@ -4,13 +4,18 @@ import {
 	findAccountById,
 	findDnsBindingByUser,
 	findDnsConfigByUser,
+	findNotificationSettingsByUser,
+	findSubscriptionNotificationState,
 	findProxyProfileByUser,
 	insertWorkflowLog,
 	listAccountsByUser,
 	listEnabledWorkflows,
 	listEnabledWorkflowsByUser,
+	listEnabledNotificationSettings,
 	listProxyProfilesByUser,
 	updateDnsBindingSyncState,
+	updateNotificationLastSubscriptionChecked,
+	upsertSubscriptionNotificationState,
 	updateWorkflowLastRun,
 	updateWorkflowStatusCheck
 } from './db/repo';
@@ -30,9 +35,17 @@ import {
 import type { AzureAccount, ProxyProfile, WorkflowPolicy } from './db/schema';
 import { createRainbowDnsClient, syncDnsBindingToIp } from './dns';
 import { proxyProfileToRuntimeReady, proxySource, type ProxyRuntimeConfig } from './proxy';
+import {
+	buildReplenishmentMessage,
+	buildSubscriptionAlertMessage,
+	getTelegramCredentials,
+	normalizeSubscriptionCheckIntervalHours,
+	sendTelegramMessage
+} from './telegram';
 
 let timer: NodeJS.Timeout | null = null;
 const activePolicies = new Set<number>();
+const activeNotificationUsers = new Set<number>();
 
 type WorkerAccountRuntime = {
 	account: AzureAccount;
@@ -58,6 +71,11 @@ function errorMessage(err: unknown) {
 	return err instanceof Error ? err.message : String(err);
 }
 
+function normalizedNotificationState(state?: string | null) {
+	const normalized = String(state ?? '').trim().toLowerCase();
+	return normalized === 'warned' ? 'warning' : normalized;
+}
+
 function shuffle<T>(items: T[]) {
 	const result = [...items];
 	for (let i = result.length - 1; i > 0; i -= 1) {
@@ -74,6 +92,15 @@ function safeIntervalSeconds(value: number) {
 function shouldRun(policy: { lastRunAt: Date | null; checkIntervalSeconds: number }, force: boolean) {
 	if (force || !policy.lastRunAt) return true;
 	return Date.now() - policy.lastRunAt.getTime() >= safeIntervalSeconds(policy.checkIntervalSeconds) * 1000;
+}
+
+function shouldRunNotificationCheck(settings: {
+	lastSubscriptionCheckedAt: Date | null;
+	subscriptionCheckIntervalHours: number;
+}) {
+	if (!settings.lastSubscriptionCheckedAt) return true;
+	const intervalHours = normalizeSubscriptionCheckIntervalHours(settings.subscriptionCheckIntervalHours);
+	return Date.now() - settings.lastSubscriptionCheckedAt.getTime() >= intervalHours * 60 * 60 * 1000;
 }
 
 function parseVmNames(value: string) {
@@ -210,12 +237,14 @@ async function createRuntimeForAccount(
 		? await findProxyProfileByUser(account.userId, account.proxyProfileId)
 		: null;
 	if (proxyProfile && proxySource(proxyProfile) === 'client_ip') {
-		await insertWorkflowLog(
-			policyId,
-			'account_pool',
-			'skipped',
-			`账号 ${account.name} 使用当前访问 IP 代理，后台定时任务无法使用，已跳过`
-		);
+		if (policyId > 0) {
+			await insertWorkflowLog(
+				policyId,
+				'account_pool',
+				'skipped',
+				`账号 ${account.name} 使用当前访问 IP 代理，后台定时任务无法使用，已跳过`
+			);
+		}
 		return null;
 	}
 
@@ -286,6 +315,40 @@ async function pickReplenishmentRuntime(
 
 async function logCreateProgress(policyId: number, event: CreateVmProgressEvent) {
 	await insertWorkflowLog(policyId, `create:${event.step}`, event.status, event.message);
+}
+
+async function notifyReplenishmentSuccess(options: {
+	policy: WorkflowPolicy;
+	account: AzureAccount;
+	result: CreateVmResult;
+	vmSize: string;
+}) {
+	try {
+		const settings = await findNotificationSettingsByUser(options.policy.userId);
+		const credentials = getTelegramCredentials(settings);
+		if (!credentials) return;
+		await sendTelegramMessage({
+			...credentials,
+			text: buildReplenishmentMessage({
+				policyName: options.policy.name,
+				account: options.account,
+				vmName: options.result.name,
+				resourceGroup: options.result.resourceGroup,
+				vmSize: options.vmSize,
+				location: options.policy.location,
+				publicIPv4: options.result.publicIPv4,
+				publicIPv6: options.result.publicIPv6
+			})
+		});
+		await insertWorkflowLog(options.policy.id, 'telegram_notify', 'success', '补机成功通知已发送到 Telegram');
+	} catch (err) {
+		await insertWorkflowLog(
+			options.policy.id,
+			'telegram_notify',
+			'failed',
+			`Telegram 补机通知发送失败: ${errorMessage(err)}`
+		);
+	}
 }
 
 async function syncWorkflowDns(options: {
@@ -375,6 +438,13 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 				status.state,
 				DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES
 			);
+			await notifySubscriptionStateIfNeeded({
+				settingsUserId: policy.userId,
+				account,
+				status
+			}).catch((err) => {
+				console.warn('[worker] failed to send subscription status notification:', err);
+			});
 			await insertWorkflowLog(
 				policy.id,
 				'status_check',
@@ -484,6 +554,12 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 									result.publicIPv6 || '-'
 								} 刷 IP 次数=${result.ipBrushAttempts}`
 							);
+							await notifyReplenishmentSuccess({
+								policy,
+								account: replenishRuntime.account,
+								result,
+								vmSize: replenishmentVmSize
+							});
 							await syncWorkflowDns({ policy, result });
 						} catch (err) {
 							await insertWorkflowLog(
@@ -507,12 +583,110 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 	}
 }
 
+async function notifySubscriptionStateIfNeeded(options: {
+	settingsUserId: number;
+	account: AzureAccount;
+	status: Awaited<ReturnType<typeof getAccountSubscriptionStatus>>;
+}) {
+	const now = new Date();
+	const trigger = isAzureSubscriptionTriggerState(
+		options.status.state,
+		DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES
+	);
+	const existing = await findSubscriptionNotificationState(
+		options.settingsUserId,
+		options.account.id
+	);
+	const normalizedState = normalizedNotificationState(options.status.state) || 'unknown';
+	const baseState = {
+		subscriptionId: options.status.subscriptionId || options.account.subscriptionId,
+		displayName: options.status.displayName || '',
+		lastState: normalizedState,
+		lastCheckedAt: now
+	};
+
+	if (!trigger) {
+		await upsertSubscriptionNotificationState(options.settingsUserId, options.account.id, {
+			...baseState,
+			lastNotifiedState: ''
+		});
+		return;
+	}
+
+	const shouldNotify = existing?.lastNotifiedState !== normalizedState;
+	if (!shouldNotify) {
+		await upsertSubscriptionNotificationState(options.settingsUserId, options.account.id, baseState);
+		return;
+	}
+
+	const settings = await findNotificationSettingsByUser(options.settingsUserId);
+	const credentials = getTelegramCredentials(settings);
+	if (!credentials) {
+		await upsertSubscriptionNotificationState(options.settingsUserId, options.account.id, baseState);
+		return;
+	}
+
+	await sendTelegramMessage({
+		...credentials,
+		text: buildSubscriptionAlertMessage({
+			account: options.account,
+			subscriptionId: options.status.subscriptionId,
+			displayName: options.status.displayName,
+			state: options.status.state,
+			checkedAt: now
+		})
+	});
+
+	await upsertSubscriptionNotificationState(options.settingsUserId, options.account.id, {
+		...baseState,
+		lastNotifiedState: normalizedState,
+		lastNotifiedAt: now
+	});
+}
+
+async function runSubscriptionNotificationChecks(force = false) {
+	const settingsRows = await listEnabledNotificationSettings();
+
+	for (const settings of settingsRows) {
+		if (!force && !shouldRunNotificationCheck(settings)) continue;
+		if (activeNotificationUsers.has(settings.userId)) continue;
+
+		activeNotificationUsers.add(settings.userId);
+		try {
+			const accounts = await listAccountsByUser(settings.userId);
+			for (const account of accounts) {
+				try {
+					const runtime = await createRuntimeForAccount(0, account);
+					if (!runtime) continue;
+					const status = await getAccountSubscriptionStatus(account, runtime.proxy);
+					await notifySubscriptionStateIfNeeded({
+						settingsUserId: settings.userId,
+						account,
+						status
+					});
+				} catch (err) {
+					console.warn(
+						`[worker] Telegram subscription check failed for account ${account.id}:`,
+						err
+					);
+				}
+			}
+			await updateNotificationLastSubscriptionChecked(settings.userId);
+		} finally {
+			activeNotificationUsers.delete(settings.userId);
+		}
+	}
+}
+
 export async function runWorkflowOnce() {
-	await runPolicies(await listEnabledWorkflows(), false);
+	await Promise.all([runPolicies(await listEnabledWorkflows(), false), runSubscriptionNotificationChecks()]);
 }
 
 export async function runWorkflowOnceForUser(userId: number, options: { force?: boolean } = {}) {
-	await runPolicies(await listEnabledWorkflowsByUser(userId), options.force === true);
+	await Promise.all([
+		runPolicies(await listEnabledWorkflowsByUser(userId), options.force === true),
+		runSubscriptionNotificationChecks(options.force === true)
+	]);
 }
 
 export function startWorker() {

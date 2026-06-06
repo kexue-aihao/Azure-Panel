@@ -87,6 +87,37 @@ CREATE TABLE IF NOT EXISTS `dns_record_bindings` (
   KEY `dns_record_bindings_config_id_idx` (`config_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `notification_settings` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `telegram_bot_token_encrypted` text NOT NULL,
+  `telegram_chat_id` varchar(64) NOT NULL DEFAULT '',
+  `enabled` tinyint(1) NOT NULL DEFAULT 0,
+  `subscription_check_interval_hours` int NOT NULL DEFAULT 6,
+  `last_subscription_checked_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `notification_settings_user_id_unique` (`user_id`),
+  KEY `notification_settings_enabled_idx` (`enabled`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `subscription_notification_states` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `account_id` int NOT NULL,
+  `subscription_id` varchar(64) NOT NULL DEFAULT '',
+  `display_name` varchar(255) NOT NULL DEFAULT '',
+  `last_state` varchar(64) NOT NULL DEFAULT '',
+  `last_notified_state` varchar(64) NOT NULL DEFAULT '',
+  `last_checked_at` timestamp NULL DEFAULT NULL,
+  `last_notified_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `subscription_notification_states_account_unique` (`user_id`, `account_id`),
+  KEY `subscription_notification_states_user_id_idx` (`user_id`),
+  KEY `subscription_notification_states_account_id_idx` (`account_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `workflow_policies` (
   `id` int NOT NULL AUTO_INCREMENT,
   `user_id` int NOT NULL,

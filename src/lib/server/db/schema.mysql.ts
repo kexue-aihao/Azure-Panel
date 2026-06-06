@@ -78,6 +78,30 @@ export const dnsRecordBindings = mysqlTable('dns_record_bindings', {
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });
 
+export const notificationSettings = mysqlTable('notification_settings', {
+	id: int('id').primaryKey().autoincrement(),
+	userId: int('user_id').notNull(),
+	telegramBotTokenEncrypted: text('telegram_bot_token_encrypted').notNull(),
+	telegramChatId: varchar('telegram_chat_id', { length: 64 }).notNull().default(''),
+	enabled: boolean('enabled').notNull().default(false),
+	subscriptionCheckIntervalHours: int('subscription_check_interval_hours').notNull().default(6),
+	lastSubscriptionCheckedAt: timestamp('last_subscription_checked_at'),
+	createdAt: timestamp('created_at').notNull().defaultNow()
+});
+
+export const subscriptionNotificationStates = mysqlTable('subscription_notification_states', {
+	id: int('id').primaryKey().autoincrement(),
+	userId: int('user_id').notNull(),
+	accountId: int('account_id').notNull(),
+	subscriptionId: varchar('subscription_id', { length: 64 }).notNull().default(''),
+	displayName: varchar('display_name', { length: 255 }).notNull().default(''),
+	lastState: varchar('last_state', { length: 64 }).notNull().default(''),
+	lastNotifiedState: varchar('last_notified_state', { length: 64 }).notNull().default(''),
+	lastCheckedAt: timestamp('last_checked_at'),
+	lastNotifiedAt: timestamp('last_notified_at'),
+	createdAt: timestamp('created_at').notNull().defaultNow()
+});
+
 export const workflowPolicies = mysqlTable('workflow_policies', {
 	id: int('id').primaryKey().autoincrement(),
 	userId: int('user_id').notNull(),
@@ -141,6 +165,8 @@ export type ProxyProfile = typeof proxyProfiles.$inferSelect;
 export type AzureAccount = typeof azureAccounts.$inferSelect;
 export type DnsConfig = typeof dnsConfigs.$inferSelect;
 export type DnsRecordBinding = typeof dnsRecordBindings.$inferSelect;
+export type NotificationSettings = typeof notificationSettings.$inferSelect;
+export type SubscriptionNotificationState = typeof subscriptionNotificationStates.$inferSelect;
 export type WorkflowPolicy = typeof workflowPolicies.$inferSelect;
 export type WorkflowLog = typeof workflowLogs.$inferSelect;
 export type ExecutionLog = typeof executionLogs.$inferSelect;

@@ -5,7 +5,9 @@ import type {
 	DnsConfig,
 	DnsRecordBinding,
 	ExecutionLog,
+	NotificationSettings,
 	ProxyProfile,
+	SubscriptionNotificationState,
 	User,
 	WorkflowLog,
 	WorkflowPolicy
@@ -15,7 +17,9 @@ import {
 	dnsConfigs as sqliteDnsConfigs,
 	dnsRecordBindings as sqliteDnsRecordBindings,
 	executionLogs as sqliteExecutionLogs,
+	notificationSettings as sqliteNotificationSettings,
 	proxyProfiles as sqliteProxyProfiles,
+	subscriptionNotificationStates as sqliteSubscriptionNotificationStates,
 	users as sqliteUsers,
 	workflowLogs as sqliteWorkflowLogs,
 	workflowPolicies as sqliteWorkflowPolicies
@@ -25,7 +29,9 @@ import {
 	dnsConfigs as mysqlDnsConfigs,
 	dnsRecordBindings as mysqlDnsRecordBindings,
 	executionLogs as mysqlExecutionLogs,
+	notificationSettings as mysqlNotificationSettings,
 	proxyProfiles as mysqlProxyProfiles,
+	subscriptionNotificationStates as mysqlSubscriptionNotificationStates,
 	users as mysqlUsers,
 	workflowLogs as mysqlWorkflowLogs,
 	workflowPolicies as mysqlWorkflowPolicies
@@ -480,6 +486,201 @@ export async function updateDnsBindingSyncState(
 	}
 ): Promise<void> {
 	await updateDnsBinding(userId, bindingId, values);
+}
+
+export async function findNotificationSettingsByUser(
+	userId: number
+): Promise<NotificationSettings | null> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const rows = await db
+			.select()
+			.from(mysqlNotificationSettings)
+			.where(eq(mysqlNotificationSettings.userId, userId));
+		return (rows[0] as NotificationSettings) ?? null;
+	}
+
+	return (
+		getSqliteDb()
+			.select()
+			.from(sqliteNotificationSettings)
+			.where(eq(sqliteNotificationSettings.userId, userId))
+			.get() ?? null
+	);
+}
+
+export async function listEnabledNotificationSettings(): Promise<NotificationSettings[]> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const rows = await db
+			.select()
+			.from(mysqlNotificationSettings)
+			.where(eq(mysqlNotificationSettings.enabled, true));
+		return rows as NotificationSettings[];
+	}
+
+	return getSqliteDb()
+		.select()
+		.from(sqliteNotificationSettings)
+		.where(eq(sqliteNotificationSettings.enabled, true))
+		.all();
+}
+
+export async function upsertNotificationSettings(
+	userId: number,
+	values: Partial<Omit<NotificationSettings, 'id' | 'userId' | 'createdAt'>>
+): Promise<NotificationSettings> {
+	const existing = await findNotificationSettingsByUser(userId);
+	if (existing) {
+		if (getDriver() === 'mysql') {
+			const { db } = getMysqlDb();
+			await db
+				.update(mysqlNotificationSettings)
+				.set(values as never)
+				.where(eq(mysqlNotificationSettings.userId, userId));
+			return (await findNotificationSettingsByUser(userId))!;
+		}
+
+		return getSqliteDb()
+			.update(sqliteNotificationSettings)
+			.set(values as never)
+			.where(eq(sqliteNotificationSettings.userId, userId))
+			.returning()
+			.get()!;
+	}
+
+	const insertValues = {
+		userId,
+		telegramBotTokenEncrypted: '',
+		telegramChatId: '',
+		enabled: false,
+		subscriptionCheckIntervalHours: 6,
+		...values
+	};
+
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const result = await db
+			.insert(mysqlNotificationSettings)
+			.values(insertValues as never)
+			.$returningId();
+		const id = Number(result[0]?.id);
+		if (!id) throw new Error('Failed to create notification settings');
+		const rows = await db.select().from(mysqlNotificationSettings).where(eq(mysqlNotificationSettings.id, id));
+		return rows[0] as NotificationSettings;
+	}
+
+	return getSqliteDb()
+		.insert(sqliteNotificationSettings)
+		.values(insertValues as never)
+		.returning()
+		.get()!;
+}
+
+export async function updateNotificationLastSubscriptionChecked(
+	userId: number,
+	checkedAt = new Date()
+): Promise<void> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.update(mysqlNotificationSettings)
+			.set({ lastSubscriptionCheckedAt: checkedAt })
+			.where(eq(mysqlNotificationSettings.userId, userId));
+		return;
+	}
+
+	getSqliteDb()
+		.update(sqliteNotificationSettings)
+		.set({ lastSubscriptionCheckedAt: checkedAt })
+		.where(eq(sqliteNotificationSettings.userId, userId))
+		.run();
+}
+
+export async function findSubscriptionNotificationState(
+	userId: number,
+	accountId: number
+): Promise<SubscriptionNotificationState | null> {
+	const condition =
+		getDriver() === 'mysql'
+			? and(eq(mysqlSubscriptionNotificationStates.userId, userId), eq(mysqlSubscriptionNotificationStates.accountId, accountId))
+			: and(eq(sqliteSubscriptionNotificationStates.userId, userId), eq(sqliteSubscriptionNotificationStates.accountId, accountId));
+
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const rows = await db.select().from(mysqlSubscriptionNotificationStates).where(condition);
+		return (rows[0] as SubscriptionNotificationState) ?? null;
+	}
+
+	return getSqliteDb().select().from(sqliteSubscriptionNotificationStates).where(condition).get() ?? null;
+}
+
+export async function upsertSubscriptionNotificationState(
+	userId: number,
+	accountId: number,
+	values: Partial<
+		Omit<SubscriptionNotificationState, 'id' | 'userId' | 'accountId' | 'createdAt'>
+	>
+): Promise<SubscriptionNotificationState> {
+	const existing = await findSubscriptionNotificationState(userId, accountId);
+	if (existing) {
+		if (getDriver() === 'mysql') {
+			const { db } = getMysqlDb();
+			await db
+				.update(mysqlSubscriptionNotificationStates)
+				.set(values as never)
+				.where(
+					and(
+						eq(mysqlSubscriptionNotificationStates.userId, userId),
+						eq(mysqlSubscriptionNotificationStates.accountId, accountId)
+					)
+				);
+			return (await findSubscriptionNotificationState(userId, accountId))!;
+		}
+
+		return getSqliteDb()
+			.update(sqliteSubscriptionNotificationStates)
+			.set(values as never)
+			.where(
+				and(
+					eq(sqliteSubscriptionNotificationStates.userId, userId),
+					eq(sqliteSubscriptionNotificationStates.accountId, accountId)
+				)
+			)
+			.returning()
+			.get()!;
+	}
+
+	const insertValues = {
+		userId,
+		accountId,
+		subscriptionId: '',
+		displayName: '',
+		lastState: '',
+		lastNotifiedState: '',
+		...values
+	};
+
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const result = await db
+			.insert(mysqlSubscriptionNotificationStates)
+			.values(insertValues as never)
+			.$returningId();
+		const id = Number(result[0]?.id);
+		if (!id) throw new Error('Failed to create subscription notification state');
+		const rows = await db
+			.select()
+			.from(mysqlSubscriptionNotificationStates)
+			.where(eq(mysqlSubscriptionNotificationStates.id, id));
+		return rows[0] as SubscriptionNotificationState;
+	}
+
+	return getSqliteDb()
+		.insert(sqliteSubscriptionNotificationStates)
+		.values(insertValues as never)
+		.returning()
+		.get()!;
 }
 
 export async function listWorkflowsByUser(userId: number): Promise<WorkflowPolicy[]> {
