@@ -115,6 +115,7 @@
 					ip_brush_matched: boolean;
 				};
 		  }
+		| { type: 'heartbeat'; timestamp: string }
 		| { type: 'error'; message: string };
 
 	let accounts = $state<Account[]>([]);
@@ -544,6 +545,8 @@
 					mergeCreateProgress(message.event);
 				} else if (message.type === 'result') {
 					result = message.result;
+				} else if (message.type === 'heartbeat') {
+					continue;
 				} else if (message.type === 'error') {
 					throw new Error(message.message);
 				}
