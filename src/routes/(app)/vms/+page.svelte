@@ -270,6 +270,28 @@
 		};
 	}
 
+	function clearAccountScopedData() {
+		vms = [];
+		regions = [];
+		quotas = [];
+		vmSizes = [];
+		vmImages = [];
+		regionError = '';
+		sizeError = '';
+		imageError = '';
+		createProgress = [];
+		deleteProgress = [];
+		firewallVm = null;
+		firewallRules = [];
+		firewallNsg = '';
+		firewallNsgResourceGroup = '';
+		loading = false;
+		regionLoading = false;
+		quotaLoading = false;
+		sizeLoading = false;
+		imageLoading = false;
+	}
+
 	function mergeCreateProgress(event: CreateProgressEvent) {
 		const index = createProgress.findIndex((item) => item.step === event.step);
 		if (index === -1) {
@@ -436,7 +458,6 @@
 		proxies = proxyList;
 		dnsBindings = bindingList.filter((binding) => binding.enabled);
 		syncProxySelection();
-		if (!accountId && accounts.length) accountId = accounts[0].id;
 	}
 
 	async function loadVms() {
@@ -604,6 +625,10 @@
 		refreshAdminPassword();
 		refreshCreateNames();
 		syncProxySelection();
+		if (!accountId) {
+			clearAccountScopedData();
+			return;
+		}
 		await Promise.all([loadVms(), loadRegions()]);
 	}
 
@@ -911,9 +936,6 @@
 		refreshAdminPassword();
 		refreshCreateNames();
 		await loadAccounts();
-		if (accountId) {
-			await Promise.all([loadVms(), loadRegions()]);
-		}
 	});
 </script>
 
@@ -931,10 +953,14 @@
 				<select
 					id={accountSelectId}
 					class="input mt-1 min-w-[220px]"
-					bind:value={accountId}
-					onchange={() => void changeAccount()}
+					value={accountId ?? ''}
+					onchange={(event) => {
+						const value = (event.currentTarget as HTMLSelectElement).value;
+						accountId = value ? Number(value) : null;
+						void changeAccount();
+					}}
 				>
-					<option value={null}>选择账号</option>
+					<option value="">请选择 Azure 账号</option>
 					{#each accounts as account}
 						<option value={account.id}>{account.name}</option>
 					{/each}
