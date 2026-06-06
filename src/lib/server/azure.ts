@@ -39,6 +39,8 @@ import { readEnv } from './runtime-env';
 export const DIRECT_PROXY = Symbol('DIRECT_PROXY');
 export type AzureProxySelection = ProxyRuntimeConfig | typeof DIRECT_PROXY | null;
 
+const DEFAULT_CREATE_IP_PREFIX = '85.211';
+
 export type VmInfo = {
 	name: string;
 	resourceGroup: string;
@@ -2086,6 +2088,10 @@ function normalizeIpPrefix(prefix?: string) {
 	return value;
 }
 
+function normalizeCreateIpPrefix(prefix?: string) {
+	return normalizeIpPrefix(prefix) || DEFAULT_CREATE_IP_PREFIX;
+}
+
 function normalizeAttempts(value?: number, fallback = 30) {
 	const parsed = Math.floor(Number(value ?? fallback));
 	if (!Number.isFinite(parsed) || parsed < 1) return fallback;
@@ -2503,7 +2509,7 @@ async function createNetworkForVm(
 		resourceGroup: options.resourceGroup,
 		location: options.location,
 		vmName: options.vmName,
-		targetPrefix: options.ipPrefix,
+		targetPrefix: normalizeCreateIpPrefix(options.ipPrefix),
 		maxAttempts: options.ipBrushMaxAttempts,
 		ddosProtectionPlanId: ddosPlan?.id,
 		progress: options.progress

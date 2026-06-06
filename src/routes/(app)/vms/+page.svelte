@@ -838,7 +838,7 @@
 			<input
 				class="input"
 				bind:value={createForm.ip_prefix}
-				placeholder="目标 IPv4 前缀，可选，例如 85.211"
+				placeholder="目标 IPv4 前缀，留空默认 85.211"
 			/>
 			<input
 				class="input"
