@@ -6,6 +6,7 @@ import {
 	findDnsConfigByUser,
 	findProxyProfileByUser,
 	insertWorkflowLog,
+	listAccountsByUser,
 	listEnabledWorkflows,
 	listEnabledWorkflowsByUser,
 	updateDnsBindingSyncState,
@@ -25,12 +26,40 @@ import {
 	type CreateVmProgressEvent,
 	type CreateVmResult
 } from './azure';
-import type { WorkflowPolicy } from './db/schema';
+import type { AzureAccount, WorkflowPolicy } from './db/schema';
 import { createRainbowDnsClient, syncDnsBindingToIp } from './dns';
-import { proxyProfileToRuntimeReady, proxySource } from './proxy';
+import { proxyProfileToRuntimeReady, proxySource, type ProxyRuntimeConfig } from './proxy';
 
 let timer: NodeJS.Timeout | null = null;
 const activePolicies = new Set<number>();
+
+type WorkerAccountRuntime = {
+	account: AzureAccount;
+	proxy: ProxyRuntimeConfig | null;
+	clients: ReturnType<typeof createAzureClients>;
+};
+
+type TrackedVm = {
+	name: string;
+	resourceGroup: string;
+	vmSize: string;
+	accountId: number;
+	accountName: string;
+	clients: ReturnType<typeof createAzureClients>;
+};
+
+function errorMessage(err: unknown) {
+	return err instanceof Error ? err.message : String(err);
+}
+
+function shuffle<T>(items: T[]) {
+	const result = [...items];
+	for (let i = result.length - 1; i > 0; i -= 1) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[result[i], result[j]] = [result[j], result[i]];
+	}
+	return result;
+}
 
 function safeIntervalSeconds(value: number) {
 	return Number.isFinite(value) && value > 0 ? value : 120;
@@ -67,26 +96,136 @@ function policyResourcePrefix(policy: WorkflowPolicy) {
 
 async function collectTrackedVms(
 	policy: WorkflowPolicy,
-	clients: ReturnType<typeof createAzureClients>
+	runtimes: WorkerAccountRuntime[]
 ) {
 	const configuredNames = parseVmNames(policy.vmNamesJson);
 	const configuredNameSet = new Set(configuredNames.map((name) => name.toLowerCase()));
 	const prefix = policyResourcePrefix(policy);
-	const tracked: Array<{ name: string; resourceGroup: string }> = [];
+	const tracked: TrackedVm[] = [];
 
-	for await (const vm of clients.compute.virtualMachines.listAll()) {
-		if (!vm.name) continue;
-		const resourceGroup = resourceGroupFromId(vm.id);
-		if (!resourceGroup) continue;
-		const lowerName = vm.name.toLowerCase();
-		const isConfigured = configuredNameSet.size > 0 && configuredNameSet.has(lowerName);
-		const isPolicyCreated = lowerName.startsWith(`${prefix}-`);
-		if (isConfigured || isPolicyCreated) {
-			tracked.push({ name: vm.name, resourceGroup });
+	for (const runtime of runtimes) {
+		try {
+			for await (const vm of runtime.clients.compute.virtualMachines.listAll()) {
+				if (!vm.name) continue;
+				const resourceGroup = resourceGroupFromId(vm.id);
+				if (!resourceGroup) continue;
+				const lowerName = vm.name.toLowerCase();
+				const isConfigured = configuredNameSet.size > 0 && configuredNameSet.has(lowerName);
+				const isPolicyCreated = lowerName.startsWith(`${prefix}-`);
+				if (isConfigured || isPolicyCreated) {
+					tracked.push({
+						name: vm.name,
+						resourceGroup,
+						vmSize: vm.hardwareProfile?.vmSize ?? '',
+						accountId: runtime.account.id,
+						accountName: runtime.account.name,
+						clients: runtime.clients
+					});
+				}
+			}
+		} catch (err) {
+			await insertWorkflowLog(
+				policy.id,
+				'inspect',
+				'failed',
+				`账号 ${runtime.account.name} VM 列表读取失败: ${errorMessage(err)}`
+			);
 		}
 	}
 
 	return tracked;
+}
+
+function selectVmSizeForReplenishment(runningVms: TrackedVm[], fallbackVmSize: string) {
+	const counts = new Map<string, number>();
+	for (const vm of runningVms) {
+		if (!vm.vmSize) continue;
+		counts.set(vm.vmSize, (counts.get(vm.vmSize) ?? 0) + 1);
+	}
+	const selected = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+	return selected || fallbackVmSize;
+}
+
+async function createRuntimeForAccount(
+	policyId: number,
+	account: AzureAccount
+): Promise<WorkerAccountRuntime | null> {
+	const proxyProfile = account.proxyProfileId
+		? await findProxyProfileByUser(account.userId, account.proxyProfileId)
+		: null;
+	if (proxyProfile && proxySource(proxyProfile) === 'client_ip') {
+		await insertWorkflowLog(
+			policyId,
+			'account_pool',
+			'skipped',
+			`账号 ${account.name} 使用当前访问 IP 代理，后台定时任务无法使用，已跳过`
+		);
+		return null;
+	}
+
+	const proxy = proxyProfile ? await proxyProfileToRuntimeReady(proxyProfile) : null;
+	return {
+		account,
+		proxy,
+		clients: createAzureClients(account, proxy)
+	};
+}
+
+async function collectAccountPoolRuntimes(policy: WorkflowPolicy, primaryAccount: AzureAccount) {
+	const accounts = await listAccountsByUser(policy.userId);
+	const runtimes: WorkerAccountRuntime[] = [];
+	for (const account of accounts) {
+		try {
+			const runtime = await createRuntimeForAccount(policy.id, account);
+			if (runtime) runtimes.push(runtime);
+		} catch (err) {
+			await insertWorkflowLog(
+				policy.id,
+				'account_pool',
+				'failed',
+				`账号 ${account.name} 代理初始化失败: ${errorMessage(err)}`
+			);
+		}
+	}
+
+	if (!runtimes.some((runtime) => runtime.account.id === primaryAccount.id)) {
+		const primaryRuntime = await createRuntimeForAccount(policy.id, primaryAccount);
+		if (primaryRuntime) runtimes.push(primaryRuntime);
+	}
+	return runtimes;
+}
+
+async function pickReplenishmentRuntime(
+	policy: WorkflowPolicy,
+	runtimes: WorkerAccountRuntime[],
+	excludedAccountId: number
+): Promise<WorkerAccountRuntime | null> {
+	const candidates = shuffle(runtimes.filter((runtime) => runtime.account.id !== excludedAccountId));
+	for (const runtime of candidates) {
+		try {
+			const status = await getAccountSubscriptionStatus(runtime.account, runtime.proxy);
+			const abnormal = isAzureSubscriptionTriggerState(
+				status.state,
+				DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES
+			);
+			const usable = !status.abnormal && !abnormal;
+			await insertWorkflowLog(
+				policy.id,
+				'account_pool',
+				usable ? 'success' : 'warning',
+				`随机候选补机账号 ${runtime.account.name} 订阅状态 ${status.state}${usable ? '，已选用' : '，跳过'}`
+			);
+			if (usable) return runtime;
+		} catch (err) {
+			await insertWorkflowLog(
+				policy.id,
+				'account_pool',
+				'failed',
+				`随机候选补机账号 ${runtime.account.name} 状态检测失败: ${errorMessage(err)}`
+			);
+		}
+	}
+	return null;
 }
 
 async function logCreateProgress(policyId: number, event: CreateVmProgressEvent) {
@@ -167,21 +306,10 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 				continue;
 			}
 
-			const proxyProfile = account.proxyProfileId
-				? await findProxyProfileByUser(account.userId, account.proxyProfileId)
-				: null;
-			if (proxyProfile && proxySource(proxyProfile) === 'client_ip') {
-				await insertWorkflowLog(
-					policy.id,
-					'policy_error',
-					'failed',
-					'此账号绑定了当前访问网站 IP 代理，后台定时任务无法获取访问者 IP，请改用固定代理'
-				);
-				continue;
-			}
+			const primaryRuntime = await createRuntimeForAccount(policy.id, account);
+			if (!primaryRuntime) continue;
 
-			const proxy = proxyProfile ? await proxyProfileToRuntimeReady(proxyProfile) : null;
-			const status = await getAccountSubscriptionStatus(account, proxy);
+			const status = await getAccountSubscriptionStatus(account, primaryRuntime.proxy);
 			await updateWorkflowStatusCheck(policy.id, {
 				lastAccountStatus: status.state,
 				lastStatusCheckedAt: new Date()
@@ -200,37 +328,48 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 			if (!shouldReplenish) continue;
 
 			const targetCount = safeReplenishTargetCount(policy);
-			const clients = createAzureClients(account, proxy);
-			const tracked = await collectTrackedVms(policy, clients);
+			const accountPoolRuntimes = await collectAccountPoolRuntimes(policy, account);
+			const tracked = await collectTrackedVms(policy, accountPoolRuntimes);
 			let running = 0;
-			const stopped: Array<{ name: string; resourceGroup: string }> = [];
+			const runningVms: TrackedVm[] = [];
+			const stopped: TrackedVm[] = [];
 
 			for (const vm of tracked) {
-				const state = await getPowerState(clients, vm.resourceGroup, vm.name);
-				if (isRunning(state)) running += 1;
-				else stopped.push(vm);
+				const state = await getPowerState(vm.clients, vm.resourceGroup, vm.name);
+				if (isRunning(state)) {
+					running += 1;
+					runningVms.push(vm);
+				} else {
+					stopped.push(vm);
+				}
 			}
+			const replenishmentVmSize = selectVmSizeForReplenishment(runningVms, policy.vmSize);
 
 			await insertWorkflowLog(
 				policy.id,
 				'inspect',
 				'success',
-				`已跟踪本策略补机 VM ${tracked.length} 台，运行中 ${running} 台，停止 ${stopped.length} 台，目标 ${targetCount} 台`
+				`已跟踪本策略补机 VM ${tracked.length} 台，运行中 ${running} 台，停止 ${stopped.length} 台，目标 ${targetCount} 台，补机规格 ${replenishmentVmSize}`
 			);
 
 			if (policy.autoStart) {
 				for (const vm of stopped) {
 					if (running >= targetCount) break;
 					try {
-						await startVm(clients, vm.resourceGroup, vm.name);
-						await insertWorkflowLog(policy.id, 'auto_start', 'success', `已触发开机 ${vm.name}`);
+						await startVm(vm.clients, vm.resourceGroup, vm.name);
+						await insertWorkflowLog(
+							policy.id,
+							'auto_start',
+							'success',
+							`已触发开机 ${vm.name}（账号 ${vm.accountName}）`
+						);
 						running += 1;
 					} catch (err) {
 						await insertWorkflowLog(
 							policy.id,
 							'auto_start',
 							'failed',
-							`开机失败 ${vm.name}: ${err instanceof Error ? err.message : String(err)}`
+							`开机失败 ${vm.name}: ${errorMessage(err)}`
 						);
 					}
 				}
@@ -244,15 +383,29 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 					await insertWorkflowLog(policy.id, 'auto_create', 'failed', '未配置管理员密码，无法自动补机');
 				} else {
 					for (let i = 0; i < deficit; i++) {
+						const replenishRuntime = await pickReplenishmentRuntime(
+							policy,
+							accountPoolRuntimes,
+							account.id
+						);
+						if (!replenishRuntime) {
+							await insertWorkflowLog(
+								policy.id,
+								'auto_create',
+								'failed',
+								'账号池中没有可用于补机的正常订阅账号'
+							);
+							break;
+						}
 						const prefix = policyResourcePrefix(policy);
 						const resourceGroup = randomAzureResourceName(`${prefix}-rg`, 64);
 						const vmName = randomAzureResourceName(prefix, 48);
 						try {
-							const result = await createVmSimple(clients, {
+							const result = await createVmSimple(replenishRuntime.clients, {
 								resourceGroup,
 								location: policy.location,
 								vmName,
-								vmSize: policy.vmSize,
+								vmSize: replenishmentVmSize,
 								imageReference: policy.imageReference,
 								adminUsername: policy.adminUsername,
 								adminPassword: password,
@@ -266,7 +419,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 								policy.id,
 								'auto_create',
 								'success',
-								`已创建 VM: ${vmName} 资源组=${resourceGroup} IPv4=${result.publicIPv4 || '-'} IPv6=${
+								`已使用账号 ${replenishRuntime.account.name} 创建 VM: ${vmName} 规格 ${replenishmentVmSize} 资源组=${resourceGroup} IPv4=${result.publicIPv4 || '-'} IPv6=${
 									result.publicIPv6 || '-'
 								} 刷 IP 次数=${result.ipBrushAttempts}`
 							);
@@ -276,14 +429,14 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 								policy.id,
 								'auto_create',
 								'failed',
-								`补机失败 ${vmName}: ${err instanceof Error ? err.message : String(err)}`
+								`补机失败 ${vmName}: ${errorMessage(err)}`
 							);
 						}
 					}
 				}
 			}
 		} catch (err) {
-			await insertWorkflowLog(policy.id, 'policy_error', 'failed', err instanceof Error ? err.message : String(err));
+			await insertWorkflowLog(policy.id, 'policy_error', 'failed', errorMessage(err));
 		} finally {
 			await updateWorkflowLastRun(policy.id).catch((err) => {
 				console.warn('[worker] failed to update workflow last_run_at:', err);
