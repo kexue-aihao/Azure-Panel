@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { api } from '$lib/api';
 
 	type Account = {
@@ -142,6 +142,7 @@
 	let sizeError = $state('');
 	let imageError = $state('');
 	let createProgress = $state<CreateProgressEvent[]>([]);
+	let createProgressDialogOpen = $state(false);
 	let deleteProgress = $state<CreateProgressEvent[]>([]);
 	let deletingVmName = $state('');
 	let operationProgress = $state<CreateProgressEvent[]>([]);
@@ -287,6 +288,7 @@
 		sizeError = '';
 		imageError = '';
 		createProgress = [];
+		createProgressDialogOpen = false;
 		deleteProgress = [];
 		operationProgress = [];
 		operationTitle = '';
@@ -311,6 +313,29 @@
 		createProgress = createProgress.map((item, itemIndex) =>
 			itemIndex === index ? { ...item, ...event } : item
 		);
+	}
+
+	function beginCreateProgressDialog() {
+		createProgressDialogOpen = true;
+		createProgress = [
+			{
+				step: 'prepare',
+				status: 'running',
+				message: '正在准备创建 VM 请求，页面会持续显示实时进度',
+				detail: {
+					resource_group: createForm.resource_group,
+					vm_name: createForm.vm_name,
+					location: createForm.location,
+					size: createForm.vm_size
+				},
+				timestamp: new Date().toISOString()
+			}
+		];
+	}
+
+	function closeCreateProgressDialog() {
+		if (createLoading) return;
+		createProgressDialogOpen = false;
 	}
 
 	function mergeDeleteProgress(event: CreateProgressEvent) {
@@ -345,14 +370,23 @@
 		return Math.min(95, Math.max(8, Math.round((complete / Math.max(progress.length, 1)) * 100)));
 	}
 
+	function progressFinished(progress: CreateProgressEvent[]) {
+		return (
+			progress.some((item) => item.status === 'error') ||
+			progress.some((item) => item.step.endsWith('complete') && item.status === 'success') ||
+			progress.some((item) => item.step === 'operation-complete' && item.status === 'success') ||
+			(progress.length > 0 && progress.every((item) => item.status !== 'running'))
+		);
+	}
+
 	function progressTone(progress: CreateProgressEvent[]) {
 		if (progress.some((item) => item.status === 'error')) return 'bg-red-500';
-		if (progress.length > 0 && progress.every((item) => item.status !== 'running')) return 'bg-green-500';
+		if (progressFinished(progress)) return 'bg-green-500';
 		return 'bg-primary';
 	}
 
 	function progressAnimation(progress: CreateProgressEvent[]) {
-		return progress.some((item) => item.status === 'running') ? 'running' : '';
+		return !progressFinished(progress) && progress.some((item) => item.status === 'running') ? 'running' : '';
 	}
 
 	function beginOperationProgress(title: string, target: string) {
@@ -784,16 +818,23 @@
 			toast = '请先从 Azure 官方 API 返回的安装系统下拉列表中选择系统';
 			return;
 		}
+		refreshCreateNames();
 		createLoading = true;
-		createProgress = [];
+		beginCreateProgressDialog();
+		await tick();
 		try {
-			refreshCreateNames();
 			const result = await createVmWithProgress({
 				...createForm,
 				account_id: accountId,
 				...proxyPayload(),
 				dns_binding_id: createForm.dns_binding_id ? Number(createForm.dns_binding_id) : 0,
 				ip_brush_max_attempts: Number(createForm.ip_brush_max_attempts)
+			});
+			mergeCreateProgress({
+				step: 'prepare',
+				status: 'success',
+				message: '创建请求已完成',
+				timestamp: new Date().toISOString()
 			});
 			toast = `VM ${result.name} 创建完成，IPv4=${result.public_ipv4 || '-'} IPv6=${result.public_ipv6 || '-'}，刷IP次数=${result.ip_brush_attempts}`;
 			resourceGroup = result.resource_group;
@@ -1455,6 +1496,93 @@
 		{/if}
 	</form>
 </div>
+
+{#if createProgressDialogOpen}
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="create-progress-title"
+	>
+		<div class="w-full max-w-2xl overflow-hidden rounded-2xl border border-primary/40 bg-card shadow-2xl shadow-primary/20">
+			<div class="relative overflow-hidden border-b border-border bg-gradient-to-r from-primary/20 via-blue-500/10 to-cyan-400/10 p-5">
+				<div class="progress-dialog-orb"></div>
+				<div class="relative flex flex-wrap items-start justify-between gap-3">
+					<div>
+						<div class="text-xs font-medium uppercase tracking-[0.28em] text-primary">
+							Azure VM Progress
+						</div>
+						<h2 id="create-progress-title" class="mt-2 text-xl font-semibold">
+							{createLoading ? '正在创建 VM' : '创建 VM 流程已结束'}
+						</h2>
+						<p class="mt-1 text-sm text-muted">
+							{createLoading
+								? '请保持当前页面打开，窗口会实时刷新 Azure 官方 API 返回的创建步骤。'
+								: '可以查看最后的创建结果和每一步状态。'}
+						</p>
+					</div>
+					<button
+						class="btn-secondary"
+						type="button"
+						onclick={closeCreateProgressDialog}
+						disabled={createLoading}
+					>
+						{createLoading ? '创建中...' : '关闭窗口'}
+					</button>
+				</div>
+				<div class={`progress-track mt-5 h-3 ${progressAnimation(createProgress) || (createLoading ? 'running' : '')}`}>
+					<div
+						class={`progress-fill ${progressTone(createProgress)}`}
+						style={`width: ${progressPercent(createProgress)}%`}
+					></div>
+				</div>
+				<div class="relative mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+					<span>进度：{progressPercent(createProgress)}%</span>
+					<span>{createProgress.length} 个步骤</span>
+				</div>
+			</div>
+
+			<div class="space-y-4 p-5">
+				<div class="grid gap-3 text-sm sm:grid-cols-2">
+					<div class="rounded-xl border border-border bg-background/80 p-3">
+						<div class="text-xs text-muted">资源组</div>
+						<div class="mt-1 break-all font-mono">{createForm.resource_group || '-'}</div>
+					</div>
+					<div class="rounded-xl border border-border bg-background/80 p-3">
+						<div class="text-xs text-muted">VM 名称</div>
+						<div class="mt-1 break-all font-mono">{createForm.vm_name || '-'}</div>
+					</div>
+					<div class="rounded-xl border border-border bg-background/80 p-3">
+						<div class="text-xs text-muted">区域</div>
+						<div class="mt-1 font-mono">{createForm.location || '-'}</div>
+					</div>
+					<div class="rounded-xl border border-border bg-background/80 p-3">
+						<div class="text-xs text-muted">规格</div>
+						<div class="mt-1 font-mono">{createForm.vm_size || '-'}</div>
+					</div>
+				</div>
+
+				<div class="max-h-80 space-y-2 overflow-y-auto pr-1">
+					{#each createProgress as item}
+						<div class="rounded-xl border border-border/70 bg-background/70 p-3">
+							<div class="flex flex-wrap items-center gap-2">
+								<span class={`badge ${progressBadge(item.status)}`}>{progressText(item.status)}</span>
+								<span class="font-mono text-xs text-muted">{item.step}</span>
+								<span class="text-sm">{item.message}</span>
+							</div>
+							{#if progressDetail(item.detail)}
+								<div class="mt-1 break-all text-xs text-muted">{progressDetail(item.detail)}</div>
+							{/if}
+							<div class="mt-1 text-[11px] text-muted">
+								{new Date(item.timestamp).toLocaleString()}
+							</div>
+						</div>
+					{/each}
+				</div>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <div class="mb-4 flex flex-wrap items-end gap-3 rounded-xl border border-border bg-card p-4">
 	<div>

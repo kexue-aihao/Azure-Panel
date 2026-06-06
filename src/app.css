@@ -70,6 +70,10 @@
 	.progress-track.running .progress-fill {
 		opacity: 0.45;
 	}
+	.progress-dialog-orb {
+		@apply pointer-events-none absolute -right-12 -top-16 h-40 w-40 rounded-full bg-primary/25 blur-3xl;
+		animation: progress-dialog-orb 3.4s ease-in-out infinite alternate;
+	}
 }
 
 @keyframes progress-track-flow {
@@ -87,5 +91,16 @@
 	}
 	100% {
 		left: 100%;
+	}
+}
+
+@keyframes progress-dialog-orb {
+	from {
+		transform: translate3d(-0.5rem, 0, 0) scale(0.92);
+		opacity: 0.55;
+	}
+	to {
+		transform: translate3d(-3rem, 1.5rem, 0) scale(1.18);
+		opacity: 0.9;
 	}
 }
