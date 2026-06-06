@@ -15,6 +15,7 @@ export const GET: RequestHandler = async (event) => {
 			location: p.location,
 			vm_names: JSON.parse(p.vmNamesJson || '[]'),
 			min_running_count: p.minRunningCount,
+			replenish_target_count: p.replenishTargetCount,
 			auto_start: p.autoStart,
 			auto_create: p.autoCreate,
 			vm_size: p.vmSize,

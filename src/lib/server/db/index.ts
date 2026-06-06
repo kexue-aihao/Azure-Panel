@@ -106,6 +106,7 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		location varchar(64) NOT NULL DEFAULT 'eastus',
 		vm_names_json text NOT NULL,
 		min_running_count int NOT NULL DEFAULT 1,
+		replenish_target_count int NOT NULL DEFAULT 1,
 		auto_start tinyint(1) NOT NULL DEFAULT 1,
 		auto_create tinyint(1) NOT NULL DEFAULT 0,
 		vm_size varchar(64) NOT NULL DEFAULT 'Standard_B1s',
@@ -244,6 +245,20 @@ async function ensureMysqlSchema(pool: Pool) {
 		.catch((err) => {
 			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
 		});
+	let addedReplenishTargetCount = false;
+	await pool
+		.query('ALTER TABLE workflow_policies ADD COLUMN replenish_target_count int NOT NULL DEFAULT 1')
+		.then(() => {
+			addedReplenishTargetCount = true;
+		})
+		.catch((err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+		});
+	await pool.query(
+		addedReplenishTargetCount
+			? 'UPDATE workflow_policies SET replenish_target_count = GREATEST(min_running_count, 1)'
+			: 'UPDATE workflow_policies SET replenish_target_count = 1 WHERE replenish_target_count IS NULL OR replenish_target_count < 1'
+	);
 	await pool
 		.query('ALTER TABLE workflow_policies ADD COLUMN status_check_enabled tinyint(1) NOT NULL DEFAULT 1')
 		.catch((err) => {
@@ -383,6 +398,7 @@ export async function initDatabase() {
 			location TEXT NOT NULL DEFAULT 'eastus',
 			vm_names_json TEXT NOT NULL DEFAULT '[]',
 			min_running_count INTEGER NOT NULL DEFAULT 1,
+			replenish_target_count INTEGER NOT NULL DEFAULT 1,
 			auto_start INTEGER NOT NULL DEFAULT 1,
 			auto_create INTEGER NOT NULL DEFAULT 0,
 			vm_size TEXT NOT NULL DEFAULT 'Standard_B1s',
@@ -464,6 +480,14 @@ export async function initDatabase() {
 	if (!workflowColumns.some((column) => column.name === 'ip_brush_max_attempts')) {
 		sqlite.exec(
 			'ALTER TABLE workflow_policies ADD COLUMN ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30'
+		);
+	}
+	if (!workflowColumns.some((column) => column.name === 'replenish_target_count')) {
+		sqlite.exec(
+			'ALTER TABLE workflow_policies ADD COLUMN replenish_target_count INTEGER NOT NULL DEFAULT 1'
+		);
+		sqlite.exec(
+			'UPDATE workflow_policies SET replenish_target_count = max(min_running_count, 1)'
 		);
 	}
 	if (!workflowColumns.some((column) => column.name === 'status_check_enabled')) {

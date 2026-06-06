@@ -107,6 +107,7 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	location: text('location').notNull().default('eastus'),
 	vmNamesJson: text('vm_names_json').notNull().default('[]'),
 	minRunningCount: integer('min_running_count').notNull().default(1),
+	replenishTargetCount: integer('replenish_target_count').notNull().default(1),
 	autoStart: integer('auto_start', { mode: 'boolean' }).notNull().default(true),
 	autoCreate: integer('auto_create', { mode: 'boolean' }).notNull().default(false),
 	vmSize: text('vm_size').notNull().default('Standard_B1s'),

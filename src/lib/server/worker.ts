@@ -13,6 +13,7 @@ import {
 	updateWorkflowStatusCheck
 } from './db/repo';
 import {
+	DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES,
 	createAzureClients,
 	createVmSimple,
 	getAccountSubscriptionStatus,
@@ -49,6 +50,11 @@ function parseVmNames(value: string) {
 	}
 }
 
+function safeReplenishTargetCount(policy: WorkflowPolicy) {
+	const count = Number(policy.replenishTargetCount ?? policy.minRunningCount ?? 1);
+	return Number.isFinite(count) && count > 0 ? Math.floor(count) : 1;
+}
+
 function resourceGroupFromId(resourceId?: string | null) {
 	const match = String(resourceId ?? '').match(/resourceGroups\/([^/]+)/i);
 	return match ? decodeURIComponent(match[1]) : '';
@@ -74,11 +80,8 @@ async function collectTrackedVms(
 		if (!resourceGroup) continue;
 		const lowerName = vm.name.toLowerCase();
 		const isConfigured = configuredNameSet.size > 0 && configuredNameSet.has(lowerName);
-		const isPolicyCreated = configuredNameSet.size === 0 && lowerName.startsWith(`${prefix}-`);
-		const isFixedResourceGroup =
-			configuredNameSet.size === 0 &&
-			resourceGroup.toLowerCase() === policy.resourceGroup.toLowerCase();
-		if (isConfigured || isPolicyCreated || isFixedResourceGroup) {
+		const isPolicyCreated = lowerName.startsWith(`${prefix}-`);
+		if (isConfigured || isPolicyCreated) {
 			tracked.push({ name: vm.name, resourceGroup });
 		}
 	}
@@ -186,7 +189,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 
 			const shouldReplenish = isAzureSubscriptionTriggerState(
 				status.state,
-				policy.statusTriggerStates
+				DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES
 			);
 			await insertWorkflowLog(
 				policy.id,
@@ -196,6 +199,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 			);
 			if (!shouldReplenish) continue;
 
+			const targetCount = safeReplenishTargetCount(policy);
 			const clients = createAzureClients(account, proxy);
 			const tracked = await collectTrackedVms(policy, clients);
 			let running = 0;
@@ -211,11 +215,12 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 				policy.id,
 				'inspect',
 				'success',
-				`已跟踪 VM ${tracked.length} 台，运行中 ${running} 台，停止 ${stopped.length} 台`
+				`已跟踪本策略补机 VM ${tracked.length} 台，运行中 ${running} 台，停止 ${stopped.length} 台，目标 ${targetCount} 台`
 			);
 
 			if (policy.autoStart) {
 				for (const vm of stopped) {
+					if (running >= targetCount) break;
 					try {
 						await startVm(clients, vm.resourceGroup, vm.name);
 						await insertWorkflowLog(policy.id, 'auto_start', 'success', `已触发开机 ${vm.name}`);
@@ -231,7 +236,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 				}
 			}
 
-			const deficit = Math.max(policy.minRunningCount - running, 0);
+			const deficit = Math.max(targetCount - running, 0);
 			if (deficit > 0 && policy.autoCreate) {
 				const password = decryptSecret(policy.adminPasswordEncrypted);
 				const userdata = decryptSecret(policy.userdataEncrypted ?? '');

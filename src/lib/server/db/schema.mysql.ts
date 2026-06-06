@@ -88,6 +88,7 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	location: varchar('location', { length: 64 }).notNull().default('eastus'),
 	vmNamesJson: text('vm_names_json').notNull(),
 	minRunningCount: int('min_running_count').notNull().default(1),
+	replenishTargetCount: int('replenish_target_count').notNull().default(1),
 	autoStart: boolean('auto_start').notNull().default(true),
 	autoCreate: boolean('auto_create').notNull().default(false),
 	vmSize: varchar('vm_size', { length: 64 }).notNull().default('Standard_B1s'),

@@ -40,6 +40,7 @@
 		enabled: boolean;
 		resource_group: string;
 		min_running_count: number;
+		replenish_target_count: number;
 		auto_start: boolean;
 		auto_create: boolean;
 		enable_ipv6: boolean;
@@ -67,6 +68,7 @@
 		location: 'eastus',
 		vm_names: '',
 		min_running_count: 1,
+		replenish_target_count: 1,
 		auto_start: true,
 		auto_create: false,
 		vm_size: 'Standard_B1s',
@@ -254,12 +256,12 @@
 					...form,
 					account_id: Number(form.account_id),
 					vm_names,
-					min_running_count: Number(form.min_running_count),
+					min_running_count: Number(form.replenish_target_count),
+					replenish_target_count: Number(form.replenish_target_count),
 					ip_brush_max_attempts: Number(form.ip_brush_max_attempts),
 					check_interval_seconds: Number(form.check_interval_seconds),
 					dns_binding_id: Number(form.dns_binding_id || 0),
-					status_check_enabled: form.status_check_enabled,
-					status_trigger_states: form.status_trigger_states
+					status_check_enabled: form.status_check_enabled
 				})
 			});
 			toast = '补机策略已创建';
@@ -279,8 +281,7 @@
 		statusResult = null;
 		try {
 			const params = new URLSearchParams({
-				account_id: String(form.account_id),
-				trigger_states: form.status_trigger_states
+				account_id: String(form.account_id)
 			});
 			statusResult = await api<AccountStatus>(`/api/user/azure/account/status?${params.toString()}`);
 			toast = statusResult.should_run_workflow
@@ -361,15 +362,18 @@
 		<input
 			class="input"
 			bind:value={form.vm_names}
-			placeholder="监控 VM（逗号分隔，留空表示全部）"
+			placeholder="绑定已有补机 VM（逗号分隔，可留空）"
 		/>
 		<input
 			class="input"
 			type="number"
-			bind:value={form.min_running_count}
-			min="0"
-			placeholder="最少运行数量"
+			bind:value={form.replenish_target_count}
+			min="1"
+			placeholder="异常时目标补机数量"
 		/>
+		<p class="text-xs text-muted">
+			只有当前选择账号的订阅状态为 banned、warning 或 warned 时才会执行自动补机；正常账号不会触发。
+		</p>
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={form.auto_start} /> 自动启动已停止的 VM
 		</label>
@@ -379,16 +383,9 @@
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={form.status_check_enabled} /> 自动定时检测账号/订阅状态
 		</label>
-		<div class="grid gap-3 sm:grid-cols-[1fr_auto]">
-			<input
-				class="input"
-				bind:value={form.status_trigger_states}
-				placeholder="触发补机状态，例如 banned,warning,warned"
-			/>
-			<button class="btn-secondary" type="button" disabled={checkingStatus} onclick={() => void checkAccountStatus()}>
-				{checkingStatus ? '检测中...' : '检测账号状态'}
-			</button>
-		</div>
+		<button class="btn-secondary" type="button" disabled={checkingStatus} onclick={() => void checkAccountStatus()}>
+			{checkingStatus ? '检测中...' : '检测账号状态'}
+		</button>
 		{#if statusResult}
 			<div
 				class={`rounded-lg border px-3 py-2 text-xs ${
@@ -519,7 +516,7 @@
 							</span>
 						</div>
 						<p class="mt-2 text-sm text-muted">
-							资源组 {workflow.resource_group} · 最少运行 {workflow.min_running_count}
+							资源组 {workflow.resource_group} · 目标补机 {workflow.replenish_target_count || workflow.min_running_count}
 						</p>
 						<p class="text-xs text-muted">
 							自动开机: {workflow.auto_start ? '是' : '否'} · 自动补机: {workflow.auto_create
@@ -527,7 +524,7 @@
 								: '否'} · 间隔 {workflow.check_interval_seconds}s
 						</p>
 						<p class="text-xs text-muted">
-							状态检测: {workflow.status_check_enabled ? '开启' : '关闭'} · 触发状态: {workflow.status_trigger_states || '-'} ·
+							状态检测: {workflow.status_check_enabled ? '开启' : '关闭'} · 触发状态: banned / warning / warned ·
 							上次状态: {workflow.last_account_status || '-'}
 						</p>
 						<p class="text-xs text-muted">

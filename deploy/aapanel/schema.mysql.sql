@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS `workflow_policies` (
   `location` varchar(64) NOT NULL DEFAULT 'eastus',
   `vm_names_json` text NOT NULL,
   `min_running_count` int NOT NULL DEFAULT 1,
+  `replenish_target_count` int NOT NULL DEFAULT 1,
   `auto_start` tinyint(1) NOT NULL DEFAULT 1,
   `auto_create` tinyint(1) NOT NULL DEFAULT 0,
   `vm_size` varchar(64) NOT NULL DEFAULT 'Standard_B1s',

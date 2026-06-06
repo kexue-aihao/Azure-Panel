@@ -1,5 +1,6 @@
 import { getUserAccountWithProxy } from '$lib/server/accounts';
 import {
+	DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES,
 	getAccountSubscriptionStatus,
 	isAzureSubscriptionTriggerState
 } from '$lib/server/azure';
@@ -9,7 +10,7 @@ import type { RequestHandler } from './$types';
 export const GET: RequestHandler = async (event) => {
 	const user = await requireUser(event);
 	const accountId = Number(event.url.searchParams.get('account_id'));
-	const triggerStates = event.url.searchParams.get('trigger_states') ?? 'banned,warning,warned';
+	const triggerStates = DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES;
 	if (!accountId) return fail('缺少 account_id');
 
 	try {

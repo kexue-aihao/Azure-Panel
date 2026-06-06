@@ -1,4 +1,5 @@
 import { encryptSecret } from '$lib/server/crypto';
+import { DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES } from '$lib/server/azure';
 import { deleteWorkflow, findWorkflowByUser, updateWorkflow } from '$lib/server/db/repo';
 import { fail, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
@@ -16,7 +17,10 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.resource_group !== undefined) updates.resourceGroup = String(body.resource_group);
 	if (body.location !== undefined) updates.location = String(body.location);
 	if (body.vm_names !== undefined) updates.vmNamesJson = JSON.stringify(body.vm_names);
-	if (body.min_running_count !== undefined) updates.minRunningCount = Number(body.min_running_count);
+	if (body.min_running_count !== undefined)
+		updates.minRunningCount = Math.max(0, Number(body.min_running_count) || 0);
+	if (body.replenish_target_count !== undefined)
+		updates.replenishTargetCount = Math.max(1, Number(body.replenish_target_count) || 1);
 	if (body.auto_start !== undefined) updates.autoStart = Boolean(body.auto_start);
 	if (body.auto_create !== undefined) updates.autoCreate = Boolean(body.auto_create);
 	if (body.vm_size !== undefined) updates.vmSize = String(body.vm_size);
@@ -33,7 +37,7 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.status_check_enabled !== undefined)
 		updates.statusCheckEnabled = Boolean(body.status_check_enabled);
 	if (body.status_trigger_states !== undefined)
-		updates.statusTriggerStates = String(body.status_trigger_states);
+		updates.statusTriggerStates = DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES;
 	if (body.dns_binding_id !== undefined) updates.dnsBindingId = Number(body.dns_binding_id) || 0;
 	if (body.enabled !== undefined) updates.enabled = Boolean(body.enabled);
 	if (body.admin_password) updates.adminPasswordEncrypted = encryptSecret(String(body.admin_password));

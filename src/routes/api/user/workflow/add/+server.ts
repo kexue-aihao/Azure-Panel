@@ -1,4 +1,5 @@
 import { getUserAccount } from '$lib/server/accounts';
+import { DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES } from '$lib/server/azure';
 import { encryptSecret } from '$lib/server/crypto';
 import { insertWorkflow } from '$lib/server/db/repo';
 import { fail, ok, requireUser } from '$lib/server/http';
@@ -11,6 +12,11 @@ export const POST: RequestHandler = async (event) => {
 	if (!accountId) return fail('请选择 Azure 账号');
 	await getUserAccount(user.id, accountId);
 	const checkIntervalSeconds = Number(body.check_interval_seconds);
+	const minRunningCount = Math.max(0, Number(body.min_running_count ?? 1) || 0);
+	const replenishTargetCount = Math.max(
+		1,
+		Number(body.replenish_target_count ?? body.min_running_count ?? 1) || 1
+	);
 
 	const policy = await insertWorkflow({
 		userId: user.id,
@@ -20,7 +26,8 @@ export const POST: RequestHandler = async (event) => {
 		resourceGroup: String(body.resource_group ?? ''),
 		location: String(body.location ?? 'eastus'),
 		vmNamesJson: JSON.stringify(body.vm_names ?? []),
-		minRunningCount: Number(body.min_running_count ?? 1),
+		minRunningCount,
+		replenishTargetCount,
 		autoStart: body.auto_start !== false,
 		autoCreate: Boolean(body.auto_create),
 		vmSize: String(body.vm_size ?? 'Standard_B1s'),
@@ -35,7 +42,7 @@ export const POST: RequestHandler = async (event) => {
 		checkIntervalSeconds:
 			Number.isFinite(checkIntervalSeconds) && checkIntervalSeconds > 0 ? checkIntervalSeconds : 120,
 		statusCheckEnabled: body.status_check_enabled !== false,
-		statusTriggerStates: String(body.status_trigger_states ?? 'banned,warning,warned'),
+		statusTriggerStates: DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES,
 		dnsBindingId: Number(body.dns_binding_id ?? 0) || 0
 	});
 
@@ -48,6 +55,7 @@ export const POST: RequestHandler = async (event) => {
 		location: policy.location,
 		vm_names: JSON.parse(policy.vmNamesJson),
 		min_running_count: policy.minRunningCount,
+		replenish_target_count: policy.replenishTargetCount,
 		auto_start: policy.autoStart,
 		auto_create: policy.autoCreate,
 		vm_size: policy.vmSize,
