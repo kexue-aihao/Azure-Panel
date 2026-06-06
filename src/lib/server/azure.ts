@@ -2062,6 +2062,10 @@ export async function restartVm(clients: AzureClients, resourceGroup: string, vm
 	await clients.compute.virtualMachines.beginRestartAndWait(resourceGroup, vmName);
 }
 
+export async function deleteResourceGroup(clients: AzureClients, resourceGroup: string) {
+	await clients.resources.resourceGroups.beginDeleteAndWait(resourceGroup);
+}
+
 function parseImageReference(imageReference: string) {
 	const [publisher, offer, sku, version] = imageReference.split(':');
 	if (!publisher || !offer || !sku || !version) {

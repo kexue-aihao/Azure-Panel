@@ -567,6 +567,38 @@
 		}
 	}
 
+	async function deleteVmResourceGroup(vm: Vm) {
+		if (!accountId) return;
+		const confirmed = confirm(
+			`危险操作：将完整删除资源组 ${vm.resource_group}，包括 VM ${vm.name} 以及该资源组内全部资源。确认继续吗？`
+		);
+		if (!confirmed) return;
+		const typed = prompt(`请输入资源组名称确认删除：${vm.resource_group}`);
+		if (typed !== vm.resource_group) {
+			toast = '资源组名称不匹配，已取消删除';
+			return;
+		}
+		ipActionLoading = `${vm.name}:delete`;
+		try {
+			await api('/api/user/azure/vm/delete', {
+				method: 'POST',
+				body: JSON.stringify({
+					account_id: accountId,
+					...proxyPayload(),
+					resource_group: vm.resource_group,
+					vm_name: vm.name
+				})
+			});
+			toast = `已删除资源组 ${vm.resource_group} 及其中全部资源`;
+			resourceGroup = resourceGroup === vm.resource_group ? '' : resourceGroup;
+			await loadVms();
+		} catch (err) {
+			toast = err instanceof Error ? err.message : '删除资源组失败';
+		} finally {
+			ipActionLoading = '';
+		}
+	}
+
 	async function replaceIp(vm: Vm) {
 		if (!accountId) return;
 		if (!confirm(`确认给 ${vm.name} 更换公网 IPv4 吗？此操作可能造成短暂网络中断。`)) return;
@@ -1143,6 +1175,13 @@
 								disabled={firewallLoading && firewallVm?.name === vm.name}
 							>
 								防火墙
+							</button>
+							<button
+								class="btn-danger"
+								onclick={() => void deleteVmResourceGroup(vm)}
+								disabled={ipActionLoading === `${vm.name}:delete`}
+							>
+								删除资源组
 							</button>
 						</td>
 					</tr>
