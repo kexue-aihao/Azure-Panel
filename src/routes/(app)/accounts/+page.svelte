@@ -39,16 +39,29 @@
 		}[];
 	};
 
+	type QuickAzureCredential = {
+		email: string;
+		password: string;
+		regions: string[];
+		clientId: string;
+		clientName: string;
+		clientSecret: string;
+		tenantId: string;
+	};
+
 	let accounts = $state<Account[]>([]);
 	let proxies = $state<ProxyProfile[]>([]);
 	let clientIpProxy = $state<ClientIpProxyStatus | null>(null);
 	let form = $state({
+		name: '',
 		tenant_id: '',
 		client_id: '',
 		client_secret: '',
 		proxy_mode: 'direct' as ProxyMode,
 		proxy_profile_id: ''
 	});
+	let quickInput = $state('');
+	let quickParsed = $state<QuickAzureCredential | null>(null);
 	let toast = $state('');
 	let accountProxyDrafts = $state<Record<number, { proxy_mode: ProxyMode; proxy_profile_id: string }>>({});
 	let proxySavingAccountId = $state<number | null>(null);
@@ -56,12 +69,70 @@
 
 	function resetForm() {
 		form = {
+			name: '',
 			tenant_id: '',
 			client_id: '',
 			client_secret: '',
 			proxy_mode: 'direct',
 			proxy_profile_id: ''
 		};
+	}
+
+	function parseQuickAzureCredential(value: string): QuickAzureCredential {
+		const raw = value.trim();
+		if (!raw) throw new Error('请先粘贴 API 信息资料');
+
+		const [accountPart, credentialPartRaw] = raw.split('-----');
+		const credentialPart = (credentialPartRaw ?? accountPart).trim();
+		const accountFields = credentialPartRaw
+			? accountPart.split('|').map((item) => item.trim())
+			: [];
+		const credentialFields = credentialPart.split(':').map((item) => item.trim());
+		if (credentialFields.length < 4) {
+			throw new Error('格式识别失败：需要包含 clientId:name:clientSecret:tenantId');
+		}
+
+		const tenantId = credentialFields.at(-1) ?? '';
+		const clientSecret = credentialFields.at(-2) ?? '';
+		const clientId = credentialFields[0] ?? '';
+		const clientName = credentialFields.slice(1, -2).join(':');
+		if (!tenantId || !clientId || !clientSecret) {
+			throw new Error('识别失败：Tenant ID、Client ID 或 Client Secret 为空');
+		}
+
+		return {
+			email: accountFields[0] ?? '',
+			password: accountFields[1] ?? '',
+			regions: (accountFields[2] ?? '')
+				.split(',')
+				.map((item) => item.trim())
+				.filter(Boolean),
+			clientId,
+			clientName,
+			clientSecret,
+			tenantId
+		};
+	}
+
+	function fillQuickToForm(parsed: QuickAzureCredential) {
+		form = {
+			...form,
+			name: parsed.email || parsed.clientName || '',
+			tenant_id: parsed.tenantId,
+			client_id: parsed.clientId,
+			client_secret: parsed.clientSecret
+		};
+	}
+
+	function identifyQuickInput() {
+		try {
+			quickParsed = parseQuickAzureCredential(quickInput);
+			fillQuickToForm(quickParsed);
+			toast = '已识别 API 信息，并填充到上方三项 Azure 凭据';
+		} catch (err) {
+			quickParsed = null;
+			toast = err instanceof Error ? err.message : '快速识别失败';
+		}
 	}
 
 	function syncProxySelection() {
@@ -155,8 +226,7 @@
 		}
 	}
 
-	async function submit(e: Event) {
-		e.preventDefault();
+	async function saveCurrentAccount() {
 		syncProxySelection();
 		if (form.proxy_mode === 'profile' && !form.proxy_profile_id) {
 			toast = '请先选择一个自定义代理档案';
@@ -164,6 +234,7 @@
 		}
 
 		const payload = {
+			name: form.name,
 			tenant_id: form.tenant_id,
 			client_id: form.client_id,
 			client_secret: form.client_secret,
@@ -178,9 +249,26 @@
 			});
 			toast = '账号添加成功';
 			resetForm();
+			quickParsed = null;
 			await load();
 		} catch (err) {
 			toast = err instanceof Error ? err.message : '添加失败';
+		}
+	}
+
+	async function submit(e: Event) {
+		e.preventDefault();
+		await saveCurrentAccount();
+	}
+
+	async function identifyAndSaveQuickInput() {
+		try {
+			quickParsed = parseQuickAzureCredential(quickInput);
+			fillQuickToForm(quickParsed);
+			await saveCurrentAccount();
+		} catch (err) {
+			quickParsed = null;
+			toast = err instanceof Error ? err.message : '快速识别并保存失败';
 		}
 	}
 
@@ -234,12 +322,14 @@
 {/if}
 
 <div class="grid gap-6 lg:grid-cols-2">
+	<div class="space-y-4">
 	<form class="card space-y-3 p-5" onsubmit={submit}>
 		<h2 class="text-lg font-medium">添加 Service Principal</h2>
 		<p class="text-sm text-muted">
 			默认由部署本网站的服务器直接请求 Azure API，Azure 侧看到的是服务器源站出站 IP。
 			选择代理配置后，此账号的验证、VM 查询、开关机和自动补机会走代理出口 IP。
 		</p>
+		<input class="input" bind:value={form.name} placeholder="账号名称，可留空自动生成" />
 		<input class="input" bind:value={form.tenant_id} placeholder="Tenant ID" required />
 		<input class="input" bind:value={form.client_id} placeholder="Client ID" required />
 		<input
@@ -297,6 +387,54 @@
 		</p>
 		<button class="btn-primary" type="submit">保存账号</button>
 	</form>
+
+	<section class="card space-y-4 p-5">
+		<div>
+			<h2 class="text-lg font-medium">快速识别 API 信息资料</h2>
+			<p class="mt-1 text-sm text-muted">
+				粘贴完整资料后会自动识别 Tenant ID、Client ID、Client Secret，并填充到上方三条框。
+			</p>
+		</div>
+		<textarea
+			class="input min-h-36 font-mono text-xs"
+			bind:value={quickInput}
+			placeholder="邮箱|密码|区域-----clientId:azure-cli-name:clientSecret:tenantId"
+		></textarea>
+		<div class="flex flex-wrap gap-2">
+			<button class="btn-secondary" type="button" onclick={identifyQuickInput}>
+				识别并填充上方三项
+			</button>
+			<button class="btn-primary" type="button" onclick={() => void identifyAndSaveQuickInput()}>
+				识别并保存账号
+			</button>
+			<button
+				class="btn-secondary"
+				type="button"
+				onclick={() => {
+					quickInput = '';
+					quickParsed = null;
+				}}
+			>
+				清空
+			</button>
+		</div>
+		{#if quickParsed}
+			<div class="rounded-lg border border-border bg-background p-3 text-xs">
+				<div class="font-medium">识别结果</div>
+				<div class="mt-2 grid gap-1 sm:grid-cols-2">
+					<div>账号: {quickParsed.email || '-'}</div>
+					<div>区域: {quickParsed.regions.length ? quickParsed.regions.join(', ') : '-'}</div>
+					<div class="break-all">Tenant ID: {quickParsed.tenantId}</div>
+					<div class="break-all">Client ID: {quickParsed.clientId}</div>
+					<div class="break-all sm:col-span-2">Client Secret: {quickParsed.clientSecret}</div>
+				</div>
+			</div>
+		{/if}
+		<p class="text-xs text-muted">
+			示例中 `8efbc043...` 会填入 Tenant ID，`5b4d0957...` 会填入 Client ID，`SrW8Q~...` 会填入 Client Secret。
+		</p>
+	</section>
+	</div>
 
 	<div class="card space-y-3 p-5">
 		<h2 class="text-lg font-medium">已添加账号</h2>
