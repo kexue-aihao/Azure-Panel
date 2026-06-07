@@ -1857,6 +1857,105 @@ function publicIpNameMatchesVm(pip: PublicIPAddress, vmName: string) {
 	);
 }
 
+function publicIpIpConfigurationName(pip: PublicIPAddress) {
+	const ipConfigId = publicIpIpConfigurationId(pip);
+	const match = ipConfigId.match(/\/ipConfigurations\/([^/]+)/i);
+	return match ? decodeURIComponent(match[1]) : '';
+}
+
+type NicPublicIpBinding = {
+	publicIpId: string;
+	publicIpName: string;
+	publicIpResourceGroup: string;
+	publicIPv4: string;
+	ipConfigName: string;
+	source: string;
+};
+
+async function findNicIPv4PublicIpBinding(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		vmName: string;
+		nicResourceGroup: string;
+		nicName: string;
+		nic: NetworkInterface;
+		preferredIpConfigName?: string;
+		progress?: CreateVmProgressReporter;
+		step?: string;
+	}
+): Promise<NicPublicIpBinding | null> {
+	const resourceGroups = [
+		...new Set([options.nicResourceGroup, options.resourceGroup].filter(Boolean))
+	];
+	const candidatesByKey = new Map<string, PublicIPAddress>();
+	const rememberCandidate = (candidate: PublicIPAddress) => {
+		const key =
+			normalizeResourceToken(candidate.id ?? '') ||
+			normalizeResourceToken(candidate.name ?? '') ||
+			`anonymous-${candidatesByKey.size + 1}`;
+		const existing = candidatesByKey.get(key);
+		candidatesByKey.set(key, existing ? mergePublicIpModel(existing, candidate) : candidate);
+	};
+
+	for (const resourceGroup of resourceGroups) {
+		for await (const listed of clients.network.publicIPAddresses.list(resourceGroup)) {
+			const pipName = listed.name ?? parseResourceName(listed.id ?? '');
+			const pip =
+				pipName && (!publicIpAddressValue(listed) || !publicIpIpConfigurationId(listed))
+					? await getPublicIpWithRawFallback(clients, resourceGroup, pipName).catch(() => listed)
+					: listed;
+			rememberCandidate(pip);
+		}
+		for (const raw of await listPublicIpsViaArm(clients, resourceGroup).catch(() => [])) {
+			rememberCandidate(raw);
+		}
+	}
+
+	const nics = [{ nicResourceGroup: options.nicResourceGroup, nicName: options.nicName, nic: options.nic }];
+	const matches = [...candidatesByKey.values()]
+		.filter((pip) => !isPublicIpResourceIPv6(pip))
+		.filter((pip) => publicIpReferencesNic(pip, nics))
+		.map((pip) => {
+			const publicIpId = pip.id ?? '';
+			const publicIpName = pip.name ?? parseResourceName(publicIpId);
+			const publicIpResourceGroup = parseResourceGroup(publicIpId) || options.nicResourceGroup;
+			const ipConfigName = publicIpIpConfigurationName(pip);
+			return {
+				publicIpId,
+				publicIpName,
+				publicIpResourceGroup,
+				publicIPv4: publicIpAddressValue(pip),
+				ipConfigName,
+				source: 'public-ip-reverse'
+			};
+		})
+		.filter((binding) => binding.publicIpId && binding.publicIpName && binding.publicIpResourceGroup)
+		.sort((a, b) => {
+			const preferred = normalizeResourceToken(options.preferredIpConfigName ?? '');
+			const aExact = preferred && normalizeResourceToken(a.ipConfigName) === preferred ? 1 : 0;
+			const bExact = preferred && normalizeResourceToken(b.ipConfigName) === preferred ? 1 : 0;
+			return bExact - aExact;
+		});
+
+	const selected = matches[0] ?? null;
+	if (selected) {
+		await reportCreateVmProgress(
+			options.progress,
+			options.step ?? 'replace-ip-prepare',
+			'info',
+			'已通过 Public IP 反向识别当前网卡 IPv4 绑定',
+			{
+				nicName: options.nicName,
+				ipConfigName: selected.ipConfigName || '-',
+				publicIpName: selected.publicIpName,
+				publicIPv4: selected.publicIPv4 || '-'
+			}
+		);
+	}
+	return selected;
+}
+
 async function collectPublicIpsFromResourceGroup(
 	clients: AzureClients,
 	options: {
@@ -3712,8 +3811,6 @@ function cleanNicIpConfigForUpdate(
 	const cleaned: NetworkInterfaceIPConfiguration = {
 		name: config.name,
 		primary: config.primary,
-		privateIPAddress: config.privateIPAddress,
-		privateIPAddressPrefixLength: config.privateIPAddressPrefixLength,
 		privateIPAllocationMethod: config.privateIPAllocationMethod ?? 'Dynamic',
 		privateIPAddressVersion: config.privateIPAddressVersion,
 		subnet: cleanSubResource(config.subnet),
@@ -3732,8 +3829,10 @@ function cleanNicIpConfigForUpdate(
 		virtualNetworkTaps: cleanSubResourceList(config.virtualNetworkTaps),
 		gatewayLoadBalancer: cleanSubResource(config.gatewayLoadBalancer)
 	};
-	if (!cleaned.privateIPAddress) delete cleaned.privateIPAddress;
-	if (!cleaned.privateIPAddressPrefixLength) delete cleaned.privateIPAddressPrefixLength;
+	if (config.privateIPAllocationMethod === 'Static' && config.privateIPAddress) {
+		cleaned.privateIPAddress = config.privateIPAddress;
+	}
+	if (config.privateIPAddressPrefixLength) cleaned.privateIPAddressPrefixLength = config.privateIPAddressPrefixLength;
 	return cleaned;
 }
 
@@ -3748,11 +3847,7 @@ function cleanNicForUpdate(nic: NetworkInterface): NetworkInterface {
 		disableTcpStateTracking: nic.disableTcpStateTracking,
 		enableIPForwarding: nic.enableIPForwarding,
 		workloadType: nic.workloadType,
-		nicType: nic.nicType,
-		privateLinkService: cleanSubResource(nic.privateLinkService),
-		migrationPhase: nic.migrationPhase,
-		auxiliaryMode: nic.auxiliaryMode,
-		auxiliarySku: nic.auxiliarySku
+		nicType: nic.nicType
 	};
 }
 
@@ -3979,6 +4074,49 @@ async function detachPublicIpFromNic(
 		...options,
 		publicIpId: '',
 		actionLabel: '解绑旧公网 IPv4'
+	});
+}
+
+async function resolveCurrentNicIPv4PublicIp(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		vmName: string;
+		nicResourceGroup: string;
+		nicName: string;
+		nic: NetworkInterface;
+		ipConfig: NetworkInterfaceIPConfiguration;
+		progress?: CreateVmProgressReporter;
+		step?: string;
+	}
+): Promise<NicPublicIpBinding | null> {
+	const directPublicIpId = options.ipConfig.publicIPAddress?.id ?? '';
+	if (directPublicIpId) {
+		const publicIpName = parseResourceName(directPublicIpId);
+		const publicIpResourceGroup = parseResourceGroup(directPublicIpId);
+		const pip =
+			publicIpName && publicIpResourceGroup
+				? await getPublicIpWithRawFallback(clients, publicIpResourceGroup, publicIpName).catch(() => null)
+				: null;
+		return {
+			publicIpId: directPublicIpId,
+			publicIpName,
+			publicIpResourceGroup,
+			publicIPv4: pip ? publicIpAddressValue(pip) : '',
+			ipConfigName: options.ipConfig.name ?? '',
+			source: 'nic-ip-config'
+		};
+	}
+
+	return findNicIPv4PublicIpBinding(clients, {
+		resourceGroup: options.resourceGroup,
+		vmName: options.vmName,
+		nicResourceGroup: options.nicResourceGroup,
+		nicName: options.nicName,
+		nic: options.nic,
+		preferredIpConfigName: options.ipConfig.name,
+		progress: options.progress,
+		step: options.step
 	});
 }
 
@@ -4927,18 +5065,30 @@ export async function replaceVmPublicIPv4(
 		progress,
 		{ step: 'replace-ip-prepare', allowCreateIPv4Config: true }
 	);
-	const oldPublicIpId = ipConfig.publicIPAddress?.id;
-	const oldPublicIpName = oldPublicIpId ? parseResourceName(oldPublicIpId) : '';
-	const oldPublicIpResourceGroup = oldPublicIpId ? parseResourceGroup(oldPublicIpId) : '';
-	const oldPublicIp = oldPublicIpName
-		? await getPublicIpWithRawFallback(clients, oldPublicIpResourceGroup, oldPublicIpName)
-				.catch(() => null)
-		: null;
-	const oldPublicIPv4 = oldPublicIp ? publicIpAddressValue(oldPublicIp) : '';
+	const oldBinding = await resolveCurrentNicIPv4PublicIp(clients, {
+		resourceGroup,
+		vmName,
+		nicResourceGroup,
+		nicName,
+		nic,
+		ipConfig,
+		progress,
+		step: 'replace-ip-prepare'
+	});
+	const oldPublicIpId = oldBinding?.publicIpId ?? '';
+	const oldPublicIpName = oldBinding?.publicIpName ?? '';
+	const oldPublicIPv4 = oldBinding?.publicIPv4 ?? '';
+	const targetIpConfig =
+		oldBinding?.ipConfigName && oldBinding.ipConfigName !== ipConfig.name
+			? ({ ...ipConfig, name: oldBinding.ipConfigName } as NetworkInterfaceIPConfiguration)
+			: ipConfig;
 	await reportCreateVmProgress(progress, 'replace-ip-create', 'running', '创建新的 IPv4 公网 IP', {
 		resourceGroup: nicResourceGroup,
 		vmName,
-		oldPublicIPv4
+		oldPublicIPv4,
+		oldPublicIpName,
+		ipConfigName: targetIpConfig.name ?? '',
+		oldPublicIpSource: oldBinding?.source ?? 'none'
 	});
 	const created = await createMatchingIPv4PublicIp(clients, {
 		resourceGroup: nicResourceGroup,
@@ -4960,7 +5110,7 @@ export async function replaceVmPublicIPv4(
 				nicResourceGroup,
 				nicName,
 				nic,
-				ipConfig,
+				ipConfig: targetIpConfig,
 				progress,
 				step: 'replace-ip-detach'
 			});
@@ -4979,7 +5129,7 @@ export async function replaceVmPublicIPv4(
 			nicResourceGroup,
 			nicName,
 			nic,
-			ipConfig,
+			ipConfig: targetIpConfig,
 			publicIpId: created.pip.id,
 			progress,
 			step: 'replace-ip-attach'
@@ -4999,7 +5149,7 @@ export async function replaceVmPublicIPv4(
 	const fresh = await waitForNicAttachedPublicIPv4(clients, {
 		nicResourceGroup,
 		nicName,
-		ipConfigName: ipConfig.name,
+		ipConfigName: targetIpConfig.name,
 		fallbackPublicIpId: created.pip.id,
 		progress,
 		step: 'replace-ip-complete'
@@ -5043,14 +5193,23 @@ export async function brushVmPublicIPv4Prefix(
 		options.progress,
 		{ step: 'brush-ip-prepare', allowCreateIPv4Config: true }
 	);
-	const oldPublicIpId = ipConfig.publicIPAddress?.id;
-	const oldPublicIpName = oldPublicIpId ? parseResourceName(oldPublicIpId) : '';
-	const oldPublicIpResourceGroup = oldPublicIpId ? parseResourceGroup(oldPublicIpId) : '';
-	const oldPublicIp = oldPublicIpName
-		? await getPublicIpWithRawFallback(clients, oldPublicIpResourceGroup, oldPublicIpName)
-				.catch(() => null)
-		: null;
-	const oldPublicIPv4 = oldPublicIp ? publicIpAddressValue(oldPublicIp) : '';
+	const oldBinding = await resolveCurrentNicIPv4PublicIp(clients, {
+		resourceGroup: options.resourceGroup,
+		vmName: options.vmName,
+		nicResourceGroup,
+		nicName,
+		nic,
+		ipConfig,
+		progress: options.progress,
+		step: 'brush-ip-prepare'
+	});
+	const oldPublicIpId = oldBinding?.publicIpId ?? '';
+	const oldPublicIpName = oldBinding?.publicIpName ?? '';
+	const oldPublicIPv4 = oldBinding?.publicIPv4 ?? '';
+	const targetIpConfig =
+		oldBinding?.ipConfigName && oldBinding.ipConfigName !== ipConfig.name
+			? ({ ...ipConfig, name: oldBinding.ipConfigName } as NetworkInterfaceIPConfiguration)
+			: ipConfig;
 	const created = await createMatchingIPv4PublicIp(clients, {
 		resourceGroup: nicResourceGroup,
 		location: vmLocation,
@@ -5074,7 +5233,7 @@ export async function brushVmPublicIPv4Prefix(
 				nicResourceGroup,
 				nicName,
 				nic,
-				ipConfig,
+				ipConfig: targetIpConfig,
 				progress: options.progress,
 				step: 'brush-ip-detach'
 			});
@@ -5101,7 +5260,7 @@ export async function brushVmPublicIPv4Prefix(
 			nicResourceGroup,
 			nicName,
 			nic,
-			ipConfig,
+			ipConfig: targetIpConfig,
 			publicIpId: created.pip.id,
 			progress: options.progress,
 			step: 'brush-ip-attach'
@@ -5121,7 +5280,7 @@ export async function brushVmPublicIPv4Prefix(
 	const fresh = await waitForNicAttachedPublicIPv4(clients, {
 		nicResourceGroup,
 		nicName,
-		ipConfigName: ipConfig.name,
+		ipConfigName: targetIpConfig.name,
 		fallbackPublicIpId: created.pip.id,
 		progress: options.progress,
 		step: 'brush-ip-complete'
