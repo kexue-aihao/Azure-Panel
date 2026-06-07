@@ -3853,18 +3853,18 @@ function cleanNicIpConfigForUpdate(
 	config: NetworkInterfaceIPConfiguration,
 	publicIpId?: string
 ): NetworkInterfaceIPConfiguration {
+	const publicIPAddress =
+		publicIpId !== undefined
+			? publicIpId
+				? ({ id: publicIpId } as PublicIPAddress)
+				: undefined
+			: cleanSubResource(config.publicIPAddress);
 	const cleaned: NetworkInterfaceIPConfiguration = {
 		name: config.name,
 		primary: config.primary,
 		privateIPAllocationMethod: config.privateIPAllocationMethod ?? 'Dynamic',
 		privateIPAddressVersion: config.privateIPAddressVersion,
 		subnet: cleanSubResource(config.subnet),
-		publicIPAddress:
-			publicIpId !== undefined
-				? publicIpId
-					? ({ id: publicIpId } as PublicIPAddress)
-					: (null as unknown as PublicIPAddress)
-				: cleanSubResource(config.publicIPAddress),
 		applicationSecurityGroups: cleanSubResourceList(config.applicationSecurityGroups),
 		loadBalancerBackendAddressPools: cleanSubResourceList(config.loadBalancerBackendAddressPools),
 		loadBalancerInboundNatRules: cleanSubResourceList(config.loadBalancerInboundNatRules),
@@ -3874,6 +3874,7 @@ function cleanNicIpConfigForUpdate(
 		virtualNetworkTaps: cleanSubResourceList(config.virtualNetworkTaps),
 		gatewayLoadBalancer: cleanSubResource(config.gatewayLoadBalancer)
 	};
+	if (publicIPAddress) cleaned.publicIPAddress = publicIPAddress;
 	if (config.privateIPAllocationMethod === 'Static' && config.privateIPAddress) {
 		cleaned.privateIPAddress = config.privateIPAddress;
 	}
@@ -4031,6 +4032,7 @@ async function updateNicIPv4PublicIp(
 	const step = options.step ?? 'brush-ip-attach';
 	const actionLabel = options.actionLabel ?? (options.publicIpId ? '绑定公网 IPv4' : '解绑公网 IPv4');
 	const targetPublicIpId = options.publicIpId ?? '';
+	const targetIpConfigName = options.ipConfig.name ?? '';
 	let lastError = '';
 	for (let attempt = 1; attempt <= 8; attempt++) {
 		try {
@@ -4068,6 +4070,29 @@ async function updateNicIPv4PublicIp(
 			return;
 		} catch (err) {
 			lastError = formatAzureError(err);
+			if (
+				await nicPublicIpUpdateReachedTarget(clients, {
+					nicResourceGroup: options.nicResourceGroup,
+					nicName: options.nicName,
+					ipConfigName: targetIpConfigName,
+					publicIpId: targetPublicIpId
+				})
+			) {
+				await reportCreateVmProgress(
+					options.progress,
+					step,
+					'success',
+					`NIC ${actionLabel} already reached target after Azure LRO failure`,
+					{
+						nicName: options.nicName,
+						attempt,
+						ipConfigName: targetIpConfigName,
+						publicIpId: targetPublicIpId || null,
+						lroError: lastError.length > 1000 ? `${lastError.slice(0, 1000)}...` : lastError
+					}
+				);
+				return;
+			}
 			await reportCreateVmProgress(
 				options.progress,
 				step,
@@ -4088,6 +4113,34 @@ async function updateNicIPv4PublicIp(
 		}
 	}
 	throw new Error(`网卡${actionLabel}失败: ${lastError || 'Azure 未返回更新结果'}`);
+}
+
+async function nicPublicIpUpdateReachedTarget(
+	clients: AzureClients,
+	options: {
+		nicResourceGroup: string;
+		nicName: string;
+		ipConfigName: string;
+		publicIpId: string;
+	}
+) {
+	const nic = await clients.network.networkInterfaces
+		.get(options.nicResourceGroup, options.nicName)
+		.catch(() => null);
+	if (!nic) return false;
+	await loadNetworkInterfaceIpConfigurations(
+		clients,
+		options.nicResourceGroup,
+		options.nicName,
+		nic,
+		{ forceList: true }
+	).catch(() => nic.ipConfigurations ?? []);
+	const ipConfig =
+		(nic.ipConfigurations ?? []).find((config) => config.name === options.ipConfigName) ??
+		pickNicIPv4Config(nic, options.ipConfigName);
+	const currentPublicIpId = normalizeResourceToken(ipConfig?.publicIPAddress?.id ?? '');
+	const expectedPublicIpId = normalizeResourceToken(options.publicIpId);
+	return expectedPublicIpId ? currentPublicIpId === expectedPublicIpId : !currentPublicIpId;
 }
 
 async function attachPublicIpToNic(
