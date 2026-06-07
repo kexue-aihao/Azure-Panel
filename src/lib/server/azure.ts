@@ -731,7 +731,10 @@ function collectAzureErrorParts(
 	for (const key of [
 		'code',
 		'message',
+		'cause',
 		'error',
+		'innerError',
+		'innererror',
 		'details',
 		'body',
 		'bodyAsText',
@@ -2380,7 +2383,96 @@ export async function powerVmWithProgress(
 }
 
 export async function deleteResourceGroup(clients: AzureClients, resourceGroup: string) {
-	await clients.resources.resourceGroups.beginDeleteAndWait(resourceGroup);
+	await clients.resources.resourceGroups.beginDeleteAndWait(resourceGroup, {
+		forceDeletionTypes: FORCE_DELETE_RESOURCE_GROUP_TYPES
+	});
+}
+
+const FORCE_DELETE_RESOURCE_GROUP_TYPES =
+	'Microsoft.Compute/virtualMachines,Microsoft.Compute/virtualMachineScaleSets';
+
+function shortAzureError(err: unknown, maxLength = 900) {
+	const message = formatAzureError(err);
+	return message.length > maxLength ? `${message.slice(0, maxLength)}...` : message;
+}
+
+function isAzureResourceGroupMissing(err: unknown) {
+	const message = formatAzureError(err);
+	return /HTTP 404|ResourceGroupNotFound|could not be found|not found/i.test(message);
+}
+
+function summarizeRemainingResources(resources: AzureResourceInfo[], limit = 10) {
+	if (resources.length === 0) return '无剩余资源';
+	const shown = resources
+		.slice(0, limit)
+		.map((resource) => {
+			const state = resource.provisioningState ? `/${resource.provisioningState}` : '';
+			return `${resource.type || '-'}:${resource.name || '-'}${state}`;
+		})
+		.join('；');
+	return resources.length > limit ? `${shown}；另有 ${resources.length - limit} 个资源` : shown;
+}
+
+async function reportResourceGroupDeleteFailure(
+	clients: AzureClients,
+	resourceGroup: string,
+	progress: DeleteResourceGroupProgressReporter | undefined,
+	step: string,
+	err: unknown,
+	polls: number
+) {
+	const message = shortAzureError(err);
+	if (isAzureResourceGroupMissing(err)) {
+		await reportCreateVmProgress(progress, 'delete-resource-group', 'success', '资源组已不存在，视为删除完成', {
+			resourceGroup,
+			polls
+		});
+		return { missing: true, message, remainingSummary: '', remainingCount: 0 };
+	}
+
+	await reportCreateVmProgress(progress, step, 'error', `Azure 资源组删除失败: ${message}`, {
+		resourceGroup,
+		polls,
+		error: message
+	});
+
+	try {
+		const remaining = await listGenericResources(clients, resourceGroup);
+		const remainingSummary = summarizeRemainingResources(remaining);
+		await reportCreateVmProgress(
+			progress,
+			'delete-remaining-resources',
+			remaining.length > 0 ? 'info' : 'success',
+			remaining.length > 0
+				? `删除失败后资源组仍剩余 ${remaining.length} 个资源: ${remainingSummary}`
+				: '删除失败后未发现剩余资源，Azure 后台可能已完成清理',
+			{
+				resourceGroup,
+				remainingCount: remaining.length,
+				remainingSummary: remainingSummary.slice(0, 900)
+			}
+		);
+		return { missing: false, message, remainingSummary, remainingCount: remaining.length };
+	} catch (listErr) {
+		if (isAzureResourceGroupMissing(listErr)) {
+			await reportCreateVmProgress(progress, 'delete-resource-group', 'success', '资源组已不存在，视为删除完成', {
+				resourceGroup,
+				polls
+			});
+			return { missing: true, message, remainingSummary: '', remainingCount: 0 };
+		}
+		const listMessage = shortAzureError(listErr, 500);
+		await reportCreateVmProgress(progress, 'delete-remaining-resources', 'info', `删除失败后查询剩余资源也失败: ${listMessage}`, {
+			resourceGroup,
+			error: listMessage
+		});
+		return {
+			missing: false,
+			message,
+			remainingSummary: `剩余资源查询失败: ${listMessage}`,
+			remainingCount: -1
+		};
+	}
 }
 
 export async function deleteResourceGroupWithProgress(
@@ -2392,12 +2484,31 @@ export async function deleteResourceGroupWithProgress(
 		resourceGroup
 	});
 
-	const poller = await clients.resources.resourceGroups.beginDelete(resourceGroup, {
-		updateIntervalInMs: 3000
-	});
+	let poller;
+	try {
+		poller = await clients.resources.resourceGroups.beginDelete(resourceGroup, {
+			forceDeletionTypes: FORCE_DELETE_RESOURCE_GROUP_TYPES,
+			updateIntervalInMs: 3000
+		});
+	} catch (err) {
+		const failure = await reportResourceGroupDeleteFailure(
+			clients,
+			resourceGroup,
+			progress,
+			'delete-submit-failed',
+			err,
+			0
+		);
+		if (failure.missing) return;
+		throw new Error(
+			`资源组删除请求提交失败 ${resourceGroup}: ${failure.message}` +
+				(failure.remainingSummary ? `；剩余资源: ${failure.remainingSummary}` : '')
+		);
+	}
 	await reportCreateVmProgress(progress, 'delete-submitted', 'success', 'Azure 已接受资源组删除请求', {
 		resourceGroup,
-		status: poller.getOperationState().status
+		status: poller.getOperationState().status,
+		forceDeletionTypes: FORCE_DELETE_RESOURCE_GROUP_TYPES
 	});
 
 	let polls = 0;
@@ -2408,12 +2519,42 @@ export async function deleteResourceGroupWithProgress(
 			status: poller.getOperationState().status,
 			polls
 		});
-		await poller.poll();
+		try {
+			await poller.poll();
+		} catch (err) {
+			const failure = await reportResourceGroupDeleteFailure(
+				clients,
+				resourceGroup,
+				progress,
+				'delete-polling',
+				err,
+				polls
+			);
+			if (failure.missing) return;
+			throw new Error(
+				`资源组删除轮询失败 ${resourceGroup}: ${failure.message}` +
+					(failure.remainingSummary ? `；剩余资源: ${failure.remainingSummary}` : '')
+			);
+		}
 		if (!poller.isDone()) await sleep(3000);
 	}
 
 	const state = poller.getOperationState();
-	if (state.error) throw state.error;
+	if (state.error) {
+		const failure = await reportResourceGroupDeleteFailure(
+			clients,
+			resourceGroup,
+			progress,
+			'delete-resource-group',
+			state.error,
+			polls
+		);
+		if (failure.missing) return;
+		throw new Error(
+			`资源组删除失败 ${resourceGroup}: ${failure.message}` +
+				(failure.remainingSummary ? `；剩余资源: ${failure.remainingSummary}` : '')
+		);
+	}
 	await reportCreateVmProgress(progress, 'delete-resource-group', 'success', 'Azure 资源组删除已完成', {
 		resourceGroup,
 		status: state.status,
@@ -2650,7 +2791,7 @@ async function createPublicIp(
 		ddosProtection: Boolean(options.ddosProtectionPlanId)
 	});
 	try {
-		const pip = await clients.network.publicIPAddresses.beginCreateOrUpdateAndWait(
+		const poller = await clients.network.publicIPAddresses.beginCreateOrUpdate(
 			options.resourceGroup,
 			options.name,
 			{
@@ -2665,16 +2806,47 @@ async function createPublicIp(
 								ddosProtectionPlan: { id: options.ddosProtectionPlanId }
 							}
 						}
-					: {}),
+				: {}),
 				deleteOption: 'Delete'
-			}
+			},
+			{ updateIntervalInMs: 2000 }
 		);
+		let polls = 0;
+		while (!poller.isDone()) {
+			polls += 1;
+			const state = poller.getOperationState();
+			await reportCreateVmProgress(
+				options.progress,
+				`${step}-polling`,
+				'running',
+				`${options.version} 公网 IP 创建中，轮询第 ${polls} 次`,
+				{
+					name: options.name,
+					status: state.status,
+					polls
+				}
+			);
+			await poller.poll();
+			if (!poller.isDone()) await sleep(2000);
+		}
+		const state = poller.getOperationState();
+		if (state.error) {
+			const stateError = formatAzureError(state.error);
+			await reportCreateVmProgress(options.progress, step, 'error', `${options.version} 公网 IP 长任务失败`, {
+				name: options.name,
+				status: state.status,
+				error: stateError.length > 800 ? `${stateError.slice(0, 800)}...` : stateError
+			});
+			throw state.error;
+		}
+		const pip = poller.getResult() ?? (await clients.network.publicIPAddresses.get(options.resourceGroup, options.name));
 		const ready = pip.ipAddress ? pip : await waitForPublicIpAddress(clients, options.resourceGroup, options.name);
 		if (!ready.id) throw new Error(`Azure 未返回 ${options.version} 公网 IP 资源 ID`);
 		await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, {
 			name: options.name,
 			ip: ready.ipAddress ?? '',
-			ddosProtection: Boolean(options.ddosProtectionPlanId)
+			ddosProtection: Boolean(options.ddosProtectionPlanId),
+			polls
 		});
 		return ready;
 	} catch (err) {
@@ -3433,17 +3605,16 @@ async function createNetworkForVm(
 		progress: options.progress
 	});
 
-	const ipv4 = await createMatchingIPv4PublicIp(clients, {
-		resourceGroup: options.resourceGroup,
-		location: options.location,
-		vmName: options.vmName,
-		maxAttempts: 1,
-		ddosProtectionPlanId: ddosPlan?.id,
-		fallbackToLastOnMiss: true,
-		progress: options.progress
-	});
-	const ipv6 = options.enableIpv6
-		? await createPublicIp(clients, {
+	await reportCreateVmProgress(
+		options.progress,
+		'public-ipv4',
+		'info',
+		'创建 VM 前不预创建 IPv4 公网 IP，先使用私网网卡开机，VM 成功后再刷 IPv4 并绑定'
+	);
+	let ipv6: PublicIPAddress | null = null;
+	if (options.enableIpv6) {
+		try {
+			ipv6 = await createPublicIp(clients, {
 				resourceGroup: options.resourceGroup,
 				location: options.location,
 				name: resourceName(options.vmName, 'pip6'),
@@ -3451,8 +3622,20 @@ async function createNetworkForVm(
 				ddosProtectionPlanId: ddosPlan?.id,
 				progress: options.progress,
 				step: 'public-ipv6'
-			})
-		: null;
+			});
+		} catch (err) {
+			await reportCreateVmProgress(
+				options.progress,
+				'public-ipv6',
+				'info',
+				'IPv6 公网 IP 创建失败，已降级为仅私网 IPv4 创建 VM，后续继续创建实例',
+				{
+					error: formatAzureError(err).slice(0, 800)
+				}
+			);
+			ipv6 = null;
+		}
+	}
 	await reportCreateVmProgress(options.progress, 'subnet', 'running', '读取子网信息并准备网卡配置', {
 		vnetName,
 		subnetName
@@ -3483,20 +3666,6 @@ async function createNetworkForVm(
 			{ subnetId }
 		);
 	}
-	if (!ipv4.pip.id) {
-		await reportCreateVmProgress(options.progress, 'public-ipv4', 'error', 'IPv4 公网 IP 创建后未返回资源 ID', {
-			publicIpName: ipv4.pip.name ?? '',
-			ip: ipv4.pip.ipAddress ?? ''
-		});
-		throw new Error(`IPv4 公网 IP 创建后未返回资源 ID: ${ipv4.pip.name ?? '-'}`);
-	}
-	if (options.enableIpv6 && !ipv6?.id) {
-		await reportCreateVmProgress(options.progress, 'public-ipv6', 'error', 'IPv6 公网 IP 创建后未返回资源 ID', {
-			publicIpName: ipv6?.name ?? '',
-			ip: ipv6?.ipAddress ?? ''
-		});
-		throw new Error(`IPv6 公网 IP 创建后未返回资源 ID: ${ipv6?.name ?? '-'}`);
-	}
 	await reportCreateVmProgress(options.progress, 'subnet', 'success', '子网信息已确认', {
 		subnetId
 	});
@@ -3507,8 +3676,7 @@ async function createNetworkForVm(
 			primary: true,
 			subnet: { id: subnetId },
 			privateIPAllocationMethod: 'Dynamic',
-			privateIPAddressVersion: 'IPv4',
-			publicIPAddress: { id: ipv4.pip.id }
+			privateIPAddressVersion: 'IPv4'
 		}
 	];
 	if (ipv6?.id) {
@@ -3522,9 +3690,9 @@ async function createNetworkForVm(
 		});
 	}
 
-	await reportCreateVmProgress(options.progress, 'nic', 'running', '创建网卡并绑定公网 IP', {
+	await reportCreateVmProgress(options.progress, 'nic', 'running', '创建网卡并准备 VM 网络配置', {
 		nicName,
-		ipv4: ipv4.pip.ipAddress ?? '',
+		ipv4: '',
 		ipv6: ipv6?.ipAddress ?? ''
 	});
 	let nic: NetworkInterface;
@@ -3543,7 +3711,7 @@ async function createNetworkForVm(
 		await reportCreateVmProgress(options.progress, 'nic', 'error', '网卡创建失败', {
 			nicName,
 			subnetId,
-			ipv4PublicIpId: ipv4.pip.id,
+			ipv4PublicIpId: '',
 			ipv6PublicIpId: ipv6?.id ?? '',
 			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
 		});
@@ -3558,10 +3726,10 @@ async function createNetworkForVm(
 
 	return {
 		nic,
-		publicIPv4: ipv4.pip.ipAddress ?? '',
+		publicIPv4: '',
 		publicIPv6: ipv6?.ipAddress ?? '',
-		ipBrushAttempts: ipv4.attempts,
-		ipBrushMatched: ipv4.matched
+		ipBrushAttempts: 0,
+		ipBrushMatched: false
 	};
 }
 

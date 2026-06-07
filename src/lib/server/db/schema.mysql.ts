@@ -140,6 +140,13 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	dnsBindingId: int('dns_binding_id').notNull().default(0),
 	lastAccountStatus: varchar('last_account_status', { length: 64 }).notNull().default(''),
 	lastStatusCheckedAt: timestamp('last_status_checked_at'),
+	replenishmentFailureCount: int('replenishment_failure_count').notNull().default(0),
+	replenishmentCooldownUntil: timestamp('replenishment_cooldown_until'),
+	replenishmentPendingResourceGroup: varchar('replenishment_pending_resource_group', {
+		length: 90
+	}).notNull().default(''),
+	replenishmentPendingAccountId: int('replenishment_pending_account_id').notNull().default(0),
+	lastReplenishmentError: varchar('last_replenishment_error', { length: 1024 }).notNull().default(''),
 	lastRunAt: timestamp('last_run_at'),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });

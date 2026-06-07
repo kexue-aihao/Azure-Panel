@@ -175,6 +175,11 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		dns_binding_id int NOT NULL DEFAULT 0,
 		last_account_status varchar(64) NOT NULL DEFAULT '',
 		last_status_checked_at timestamp NULL DEFAULT NULL,
+		replenishment_failure_count int NOT NULL DEFAULT 0,
+		replenishment_cooldown_until timestamp NULL DEFAULT NULL,
+		replenishment_pending_resource_group varchar(90) NOT NULL DEFAULT '',
+		replenishment_pending_account_id int NOT NULL DEFAULT 0,
+		last_replenishment_error varchar(1024) NOT NULL DEFAULT '',
 		last_run_at timestamp NULL DEFAULT NULL,
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
@@ -630,6 +635,11 @@ const MYSQL_SCHEMA_READY_COLUMNS: Record<string, string[]> = {
 		'dns_binding_id',
 		'last_account_status',
 		'last_status_checked_at',
+		'replenishment_failure_count',
+		'replenishment_cooldown_until',
+		'replenishment_pending_resource_group',
+		'replenishment_pending_account_id',
+		'last_replenishment_error',
 		'last_run_at',
 		'created_at'
 	],
@@ -1032,6 +1042,36 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 	);
 	await addMysqlColumnIfMissing(
 		pool,
+		'workflow_policies',
+		'replenishment_failure_count',
+		'replenishment_failure_count int NOT NULL DEFAULT 0'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'replenishment_cooldown_until',
+		'replenishment_cooldown_until timestamp NULL DEFAULT NULL'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'replenishment_pending_resource_group',
+		"replenishment_pending_resource_group varchar(90) NOT NULL DEFAULT ''"
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'replenishment_pending_account_id',
+		'replenishment_pending_account_id int NOT NULL DEFAULT 0'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'last_replenishment_error',
+		"last_replenishment_error varchar(1024) NOT NULL DEFAULT ''"
+	);
+	await addMysqlColumnIfMissing(
+		pool,
 		'notification_settings',
 		'telegram_group_chat_ids',
 		'telegram_group_chat_ids text NULL'
@@ -1210,6 +1250,11 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 			dns_binding_id INTEGER NOT NULL DEFAULT 0,
 			last_account_status TEXT NOT NULL DEFAULT '',
 			last_status_checked_at INTEGER,
+			replenishment_failure_count INTEGER NOT NULL DEFAULT 0,
+			replenishment_cooldown_until INTEGER,
+			replenishment_pending_resource_group TEXT NOT NULL DEFAULT '',
+			replenishment_pending_account_id INTEGER NOT NULL DEFAULT 0,
+			last_replenishment_error TEXT NOT NULL DEFAULT '',
 			last_run_at INTEGER,
 			created_at INTEGER NOT NULL
 		);
@@ -1336,6 +1381,29 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	}
 	if (!workflowColumns.some((column) => column.name === 'last_status_checked_at')) {
 		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN last_status_checked_at INTEGER');
+	}
+	if (!workflowColumns.some((column) => column.name === 'replenishment_failure_count')) {
+		sqlite.exec(
+			'ALTER TABLE workflow_policies ADD COLUMN replenishment_failure_count INTEGER NOT NULL DEFAULT 0'
+		);
+	}
+	if (!workflowColumns.some((column) => column.name === 'replenishment_cooldown_until')) {
+		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN replenishment_cooldown_until INTEGER');
+	}
+	if (!workflowColumns.some((column) => column.name === 'replenishment_pending_resource_group')) {
+		sqlite.exec(
+			"ALTER TABLE workflow_policies ADD COLUMN replenishment_pending_resource_group TEXT NOT NULL DEFAULT ''"
+		);
+	}
+	if (!workflowColumns.some((column) => column.name === 'replenishment_pending_account_id')) {
+		sqlite.exec(
+			'ALTER TABLE workflow_policies ADD COLUMN replenishment_pending_account_id INTEGER NOT NULL DEFAULT 0'
+		);
+	}
+	if (!workflowColumns.some((column) => column.name === 'last_replenishment_error')) {
+		sqlite.exec(
+			"ALTER TABLE workflow_policies ADD COLUMN last_replenishment_error TEXT NOT NULL DEFAULT ''"
+		);
 	}
 	const notificationColumns = sqlite.prepare('PRAGMA table_info(notification_settings)').all() as Array<{
 		name: string;

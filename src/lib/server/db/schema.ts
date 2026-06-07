@@ -169,6 +169,11 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	dnsBindingId: integer('dns_binding_id').notNull().default(0),
 	lastAccountStatus: text('last_account_status').notNull().default(''),
 	lastStatusCheckedAt: integer('last_status_checked_at', { mode: 'timestamp' }),
+	replenishmentFailureCount: integer('replenishment_failure_count').notNull().default(0),
+	replenishmentCooldownUntil: integer('replenishment_cooldown_until', { mode: 'timestamp' }),
+	replenishmentPendingResourceGroup: text('replenishment_pending_resource_group').notNull().default(''),
+	replenishmentPendingAccountId: integer('replenishment_pending_account_id').notNull().default(0),
+	lastReplenishmentError: text('last_replenishment_error').notNull().default(''),
 	lastRunAt: integer('last_run_at', { mode: 'timestamp' }),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()

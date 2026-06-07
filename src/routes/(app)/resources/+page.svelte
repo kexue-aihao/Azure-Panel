@@ -66,12 +66,13 @@
 	};
 	type ResourceGroupDeleteResult = {
 		resource_group: string;
-		status: 'success' | 'error';
+		status: 'success' | 'error' | 'skipped';
 		message: string;
 	};
 	type ResourceGroupDeleteStreamResult = {
 		results: ResourceGroupDeleteResult[];
 		success: number;
+		skipped?: number;
 		failed: number;
 	};
 	type ResourceGroupDeleteStreamMessage =
@@ -666,7 +667,7 @@
 		deletingGroups = true;
 		deleteProgress = [];
 		deleteResults = [];
-		toast = `正在并发提交 ${targets.length} 个资源组删除请求...`;
+		toast = `正在按顺序删除 ${targets.length} 个资源组...`;
 		try {
 			const result = await readResourceGroupDeleteStream(targets);
 			deleteResults = result.results;
@@ -676,7 +677,6 @@
 			if (resourceGroup && result.results.some((item) => item.resource_group === resourceGroup && item.status === 'success')) {
 				resourceGroup = '';
 			}
-			toast = `资源组批量删除完成：成功 ${result.success} 个，失败 ${result.failed} 个`;
 			const deletedGroups = new Set(
 				result.results
 					.filter((item) => item.status === 'success')
@@ -684,6 +684,8 @@
 			);
 			groups = groups.filter((group) => !deletedGroups.has(group.name));
 			resources = resources.filter((resource) => !deletedGroups.has(resource.resource_group));
+			const skipped = result.skipped ?? result.results.filter((item) => item.status === 'skipped').length;
+			toast = `资源组批量删除完成：成功 ${result.success} 个，跳过 ${skipped} 个，失败 ${result.failed} 个`;
 			await loadAiAccounts();
 		} catch (err) {
 			setToastFromError(err, '资源组删除失败');
@@ -810,14 +812,14 @@
 					onclick={() => void deleteResourceGroups(selectedResourceGroups)}
 					disabled={deletingGroups || selectedResourceGroups.length === 0}
 				>
-					{deletingGroups ? '并行删除中...' : `删除选中 ${selectedResourceGroups.length} 个`}
+					{deletingGroups ? '顺序删除中...' : `删除选中 ${selectedResourceGroups.length} 个`}
 				</button>
 				<button
 					class="btn-danger"
 					onclick={() => void deleteResourceGroups(visibleResourceGroupNames)}
 					disabled={deletingGroups || visibleResourceGroupNames.length === 0}
 				>
-					一键并行删除当前列表资源组
+					一键顺序删除当前列表资源组
 				</button>
 			</div>
 		</div>
@@ -956,11 +958,11 @@
 			<div>
 				<h2 class="text-lg font-medium">资源组删除进度</h2>
 				<p class="mt-1 text-sm text-muted">
-					删除请求已并发提交给 Azure，后续进度是在检查 Azure 后台清理是否完成，不会重复提交删除。
+					删除请求会按顺序提交给 Azure，系统资源组会自动跳过，同一个资源组不会重复提交删除。
 				</p>
 			</div>
 			<span class="badge {deletingGroups ? 'bg-yellow-900/50 text-yellow-300' : 'bg-green-900/50 text-green-300'}">
-				{deletingGroups ? '并行删除中' : '已结束'}
+				{deletingGroups ? '顺序删除中' : '已结束'}
 			</span>
 		</div>
 
@@ -985,10 +987,12 @@
 								class={`badge ${
 									result.status === 'success'
 										? 'bg-green-900/50 text-green-300'
+										: result.status === 'skipped'
+											? 'bg-yellow-900/50 text-yellow-300'
 										: 'bg-red-900/50 text-red-300'
 								}`}
 							>
-								{result.status === 'success' ? '成功' : '失败'}
+								{result.status === 'success' ? '成功' : result.status === 'skipped' ? '跳过' : '失败'}
 							</span>
 						</div>
 						<div class="mt-2 break-all text-xs text-muted">{result.message}</div>

@@ -19,9 +19,11 @@ type DeleteProgressEvent = {
 
 type DeleteResult = {
 	resource_group: string;
-	status: 'success' | 'error';
+	status: 'success' | 'error' | 'skipped';
 	message: string;
 };
+
+const activeResourceGroupDeletes = new Set<string>();
 
 function progressEvent(
 	step: string,
@@ -45,6 +47,14 @@ function streamMessage(controller: ReadableStreamDefaultController<Uint8Array>, 
 function normalizeResourceGroups(value: unknown) {
 	const input = Array.isArray(value) ? value : [value];
 	return [...new Set(input.map((item) => String(item ?? '').trim()).filter(Boolean))].slice(0, 50);
+}
+
+function isSystemResourceGroup(resourceGroup: string) {
+	return /^NetworkWatcherRG$/i.test(resourceGroup.trim());
+}
+
+function resourceGroupDeleteKey(accountId: number, subscriptionId: string, resourceGroup: string) {
+	return `${accountId}:${subscriptionId || 'default'}:${resourceGroup.toLowerCase()}`;
 }
 
 function isReadonlyResourceAuthorizationError(err: unknown) {
@@ -147,58 +157,87 @@ export const POST: RequestHandler = async (event) => {
 		);
 
 		await progress?.(
-			progressEvent('batch-submit', 'running', `正在并发提交 ${resourceGroups.length} 个资源组删除请求`, {
-				mode: 'parallel',
+			progressEvent('batch-submit', 'running', `正在按顺序删除 ${resourceGroups.length} 个资源组`, {
+				mode: 'sequential',
 				total: resourceGroups.length
 			})
 		);
 
-		const results = await Promise.all(
-			resourceGroups.map(async (resourceGroup, index): Promise<DeleteResult> => {
-				const report = async (item: DeleteProgressEvent) => {
-					const detail = {
-						...(item.detail ?? {}),
-						resourceGroup,
-						index: index + 1,
-						total: resourceGroups.length
-					};
-					const eventWithGroup = { ...item, detail };
-					await progress?.(eventWithGroup);
-					await writeDeleteLog({
-						userId: user.id,
-						accountId,
-						resourceGroup,
-						event: eventWithGroup
-					});
+		const results: DeleteResult[] = [];
+		for (const [index, resourceGroup] of resourceGroups.entries()) {
+			const deleteKey = resourceGroupDeleteKey(accountId, subscriptionId, resourceGroup);
+			const report = async (item: DeleteProgressEvent) => {
+				const detail = {
+					...(item.detail ?? {}),
+					resourceGroup,
+					index: index + 1,
+					total: resourceGroups.length
 				};
+				const eventWithGroup = { ...item, detail };
+				await progress?.(eventWithGroup);
+				await writeDeleteLog({
+					userId: user.id,
+					accountId,
+					resourceGroup,
+					event: eventWithGroup
+				});
+			};
 
-				try {
-					await report(
-						progressEvent('delete-group-start', 'running', `开始删除资源组 ${resourceGroup}`, {
-							resourceGroup
-						})
-					);
-					await deleteResourceGroupWithProgress(clients, resourceGroup, report);
-					const message = `资源组 ${resourceGroup} 已删除`;
-					await report(progressEvent('delete-group-complete', 'success', message, { resourceGroup }));
-					return { resource_group: resourceGroup, status: 'success', message };
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					await report(
-						progressEvent('delete-group-failed', 'error', `资源组 ${resourceGroup} 删除失败: ${message}`, {
-							resourceGroup
-						})
-					);
-					return { resource_group: resourceGroup, status: 'error', message };
-				}
-			})
-		);
+			if (isSystemResourceGroup(resourceGroup)) {
+				const message = `资源组 ${resourceGroup} 是 Azure 自动维护的系统资源组，已跳过删除`;
+				await report(
+					progressEvent('delete-group-skipped', 'info', message, {
+						resourceGroup,
+						reason: 'system_resource_group'
+					})
+				);
+				results.push({ resource_group: resourceGroup, status: 'skipped', message });
+				continue;
+			}
+
+			if (activeResourceGroupDeletes.has(deleteKey)) {
+				const message = `资源组 ${resourceGroup} 已有删除流程正在执行，已跳过重复请求`;
+				await report(
+					progressEvent('delete-group-skipped', 'info', message, {
+						resourceGroup,
+						reason: 'duplicate_delete_request'
+					})
+				);
+				results.push({ resource_group: resourceGroup, status: 'skipped', message });
+				continue;
+			}
+
+			activeResourceGroupDeletes.add(deleteKey);
+			try {
+				await report(
+					progressEvent('delete-group-start', 'running', `开始删除资源组 ${resourceGroup}`, {
+						resourceGroup
+					})
+				);
+				await deleteResourceGroupWithProgress(clients, resourceGroup, report);
+				const message = `资源组 ${resourceGroup} 已删除`;
+				await report(progressEvent('delete-group-complete', 'success', message, { resourceGroup }));
+				results.push({ resource_group: resourceGroup, status: 'success', message });
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				await report(
+					progressEvent('delete-group-failed', 'error', `资源组 ${resourceGroup} 删除失败: ${message}`, {
+						resourceGroup
+					})
+				);
+				results.push({ resource_group: resourceGroup, status: 'error', message });
+			} finally {
+				activeResourceGroupDeletes.delete(deleteKey);
+			}
+		}
 
 		const success = results.filter((item) => item.status === 'success').length;
-		const failed = results.length - success;
+		const skipped = results.filter((item) => item.status === 'skipped').length;
+		const failed = results.length - success - skipped;
 		await progress?.(
-			progressEvent('batch-complete', failed ? 'info' : 'success', `资源组批量删除完成：成功 ${success} 个，失败 ${failed} 个`, {
+			progressEvent('batch-complete', failed ? 'info' : 'success', `资源组批量删除完成：成功 ${success} 个，跳过 ${skipped} 个，失败 ${failed} 个`, {
 				success,
+				skipped,
 				failed,
 				total: results.length
 			})

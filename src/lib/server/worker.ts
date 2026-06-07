@@ -25,6 +25,7 @@ import {
 	DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES,
 	createAzureClients,
 	createVmSimple,
+	deleteResourceGroupWithProgress,
 	getAccountSubscriptionStatus,
 	isAzureSubscriptionTriggerState,
 	randomAzureResourceName,
@@ -178,20 +179,89 @@ function policyReplenishmentCooldown(policyId: number) {
 	return state;
 }
 
-function recordReplenishmentFailure(policyId: number, message: string) {
-	const previous = replenishmentFailureBackoff.get(policyId);
-	const attempts = Math.min((previous?.attempts ?? 0) + 1, 8);
-	const cooldownMs = Math.min(
-		REPLENISHMENT_FAILURE_BASE_COOLDOWN_MS * 2 ** (attempts - 1),
+function persistedReplenishmentCooldown(policy: WorkflowPolicy) {
+	const cooldownUntil = policy.replenishmentCooldownUntil;
+	if (!cooldownUntil || Date.now() >= cooldownUntil.getTime()) return null;
+	return {
+		attempts: Math.max(1, Number(policy.replenishmentFailureCount ?? 1) || 1),
+		until: cooldownUntil.getTime(),
+		message: policy.lastReplenishmentError || '补机失败后等待清理/冷却',
+		pendingResourceGroup: policy.replenishmentPendingResourceGroup || '',
+		pendingAccountId: Number(policy.replenishmentPendingAccountId ?? 0) || 0
+	};
+}
+
+function activeReplenishmentCooldown(policy: WorkflowPolicy) {
+	const memory = policyReplenishmentCooldown(policy.id);
+	const persisted = persistedReplenishmentCooldown(policy);
+	if (!memory) return persisted;
+	if (!persisted) return memory;
+	return memory.until >= persisted.until ? memory : persisted;
+}
+
+function nextReplenishmentCooldownMs(attempts: number, minimumMs = 0) {
+	const exponential = Math.min(
+		REPLENISHMENT_FAILURE_BASE_COOLDOWN_MS * 2 ** (Math.max(1, attempts) - 1),
 		REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS
 	);
+	return Math.min(Math.max(exponential, minimumMs), REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS);
+}
+
+async function recordReplenishmentFailure(
+	policy: WorkflowPolicy,
+	message: string,
+	options: {
+		resourceGroup?: string;
+		accountId?: number;
+		minCooldownMs?: number;
+	} = {}
+) {
+	const previous = replenishmentFailureBackoff.get(policy.id);
+	const persistedAttempts = Number(policy.replenishmentFailureCount ?? 0) || 0;
+	const attempts = Math.min(Math.max(previous?.attempts ?? 0, persistedAttempts) + 1, 8);
+	const cooldownMs = nextReplenishmentCooldownMs(attempts, options.minCooldownMs ?? 0);
 	const until = Date.now() + cooldownMs;
-	replenishmentFailureBackoff.set(policyId, { attempts, until, message });
+	replenishmentFailureBackoff.set(policy.id, { attempts, until, message });
+	const cooldownUntil = new Date(until);
+	const pendingAccountId = Number(options.accountId ?? policy.replenishmentPendingAccountId ?? 0) || 0;
+	policy.replenishmentFailureCount = attempts;
+	policy.replenishmentCooldownUntil = cooldownUntil;
+	policy.replenishmentPendingResourceGroup = options.resourceGroup ?? policy.replenishmentPendingResourceGroup ?? '';
+	policy.replenishmentPendingAccountId = pendingAccountId;
+	policy.lastReplenishmentError = message.slice(0, 1024);
+	await updateWorkflow(policy.id, {
+		replenishmentFailureCount: attempts,
+		replenishmentCooldownUntil: cooldownUntil,
+		replenishmentPendingResourceGroup: policy.replenishmentPendingResourceGroup,
+		replenishmentPendingAccountId: policy.replenishmentPendingAccountId,
+		lastReplenishmentError: policy.lastReplenishmentError
+	});
 	return { attempts, until, cooldownMs };
 }
 
-function clearReplenishmentFailure(policyId: number) {
-	replenishmentFailureBackoff.delete(policyId);
+async function clearReplenishmentFailure(policy: WorkflowPolicy) {
+	replenishmentFailureBackoff.delete(policy.id);
+	policy.replenishmentFailureCount = 0;
+	policy.replenishmentCooldownUntil = null;
+	policy.replenishmentPendingResourceGroup = '';
+	policy.replenishmentPendingAccountId = 0;
+	policy.lastReplenishmentError = '';
+	await updateWorkflow(policy.id, {
+		replenishmentFailureCount: 0,
+		replenishmentCooldownUntil: null,
+		replenishmentPendingResourceGroup: '',
+		replenishmentPendingAccountId: 0,
+		lastReplenishmentError: ''
+	});
+}
+
+function hasReplenishmentFailureState(policy: WorkflowPolicy) {
+	return Boolean(
+		(policy.replenishmentFailureCount ?? 0) > 0 ||
+			policy.replenishmentCooldownUntil ||
+			policy.replenishmentPendingResourceGroup ||
+			policy.lastReplenishmentError
+	);
 }
 
 function policyResourcePrefix(policy: WorkflowPolicy) {
@@ -426,6 +496,84 @@ async function logCreateProgress(policyId: number, event: CreateVmProgressEvent)
 	await insertWorkflowLog(policyId, `create:${event.step}`, event.status, event.message);
 }
 
+async function cleanupFailedReplenishmentResourceGroup(
+	policyId: number,
+	clients: ReturnType<typeof createAzureClients>,
+	resourceGroup: string
+) {
+	await insertWorkflowLog(
+		policyId,
+		'cleanup_resource_group',
+		'running',
+		`补机失败，开始删除临时资源组 ${resourceGroup}`
+	);
+	await deleteResourceGroupWithProgress(clients, resourceGroup, async (event) => {
+		await insertWorkflowLog(policyId, `cleanup:${event.step}`, event.status, event.message);
+	});
+	await insertWorkflowLog(
+		policyId,
+		'cleanup_resource_group',
+		'success',
+		`补机失败后的临时资源组已删除: ${resourceGroup}`
+	);
+}
+
+async function cleanupPendingReplenishmentResourceGroup(
+	policy: WorkflowPolicy,
+	accounts: AzureAccount[],
+	getBootProxyPool: () => Promise<WorkerBootProxyRuntime[]>
+) {
+	const resourceGroup = policy.replenishmentPendingResourceGroup?.trim();
+	if (!resourceGroup) return true;
+
+	const account =
+		accounts.find((item) => item.id === Number(policy.replenishmentPendingAccountId ?? 0)) ??
+		accounts.find((item) => item.id === policy.accountId) ??
+		accounts[0];
+	if (!account) {
+		const message = `上次补机失败留下待清理资源组 ${resourceGroup}，但当前号池为空，无法清理；暂停创建新资源组`;
+		const cooldown = await recordReplenishmentFailure(policy, message, {
+			resourceGroup,
+			minCooldownMs: REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS
+		});
+		await insertWorkflowLog(
+			policy.id,
+			'cleanup_resource_group',
+			'failed',
+			`${message}，约 ${Math.ceil(cooldown.cooldownMs / 1000)} 秒后重试`
+		);
+		return false;
+	}
+
+	await insertWorkflowLog(
+		policy.id,
+		'cleanup_resource_group',
+		'running',
+		`检测到上次补机失败遗留资源组 ${resourceGroup}，本轮先清理，清理完成前不会创建新的资源组`
+	);
+	try {
+		const runtime = await createRuntimeForAccount(policy.id, account, { getBootProxyPool });
+		if (!runtime) throw new Error(`无法为账号 ${account.name} 创建 Azure 客户端`);
+		await cleanupFailedReplenishmentResourceGroup(policy.id, runtime.clients, resourceGroup);
+		await clearReplenishmentFailure(policy);
+		return true;
+	} catch (err) {
+		const message = `遗留资源组 ${resourceGroup} 清理失败: ${errorMessage(err)}`;
+		const cooldown = await recordReplenishmentFailure(policy, message, {
+			resourceGroup,
+			accountId: account.id,
+			minCooldownMs: REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS
+		});
+		await insertWorkflowLog(
+			policy.id,
+			'cleanup_resource_group',
+			'failed',
+			`${message}；已暂停创建新资源组，约 ${Math.ceil(cooldown.cooldownMs / 1000)} 秒后重试`
+		);
+		return false;
+	}
+}
+
 async function notifyReplenishmentSuccess(options: {
 	policy: WorkflowPolicy;
 	account: AzureAccount;
@@ -654,11 +802,32 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 				`订阅状态: ${status.state}，${shouldReplenish ? '命中补机触发条件' : '未命中补机触发条件，跳过本轮'}`
 			);
 			if (!shouldReplenish) {
-				clearReplenishmentFailure(policy.id);
+				if (policy.replenishmentPendingResourceGroup) {
+					const cleanupCooldown = activeReplenishmentCooldown(policy);
+					if (cleanupCooldown) {
+						const remainingSeconds = Math.max(1, Math.ceil((cleanupCooldown.until - Date.now()) / 1000));
+						await insertWorkflowLog(
+							policy.id,
+							'cleanup_resource_group',
+							'skipped',
+							`遗留资源组 ${policy.replenishmentPendingResourceGroup} 仍在清理冷却中，剩余约 ${remainingSeconds} 秒后再重试`
+						);
+						continue;
+					}
+					const accounts = await listAccountsByUser(policy.userId);
+					let bootProxyPoolPromise: Promise<WorkerBootProxyRuntime[]> | null = null;
+					const getBootProxyPool = () => {
+						bootProxyPoolPromise ??= collectBootProxyPool(policy);
+						return bootProxyPoolPromise;
+					};
+					await cleanupPendingReplenishmentResourceGroup(policy, accounts, getBootProxyPool);
+				} else if (hasReplenishmentFailureState(policy)) {
+					await clearReplenishmentFailure(policy);
+				}
 				continue;
 			}
 
-			const cooldown = policyReplenishmentCooldown(policy.id);
+			const cooldown = activeReplenishmentCooldown(policy);
 			if (cooldown) {
 				const remainingSeconds = Math.max(1, Math.ceil((cooldown.until - Date.now()) / 1000));
 				await insertWorkflowLog(
@@ -718,6 +887,9 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 						bootProxyPoolPromise ??= collectBootProxyPool(policy);
 						return bootProxyPoolPromise;
 					};
+					if (!(await cleanupPendingReplenishmentResourceGroup(policy, accounts, getBootProxyPool))) {
+						continue;
+					}
 					let accountPoolCursor = 0;
 					const excludedAccountIds = new Set([account.id]);
 					for (let i = 0; i < deficit; i++) {
@@ -782,7 +954,7 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 									result.publicIPv6 || '-'
 								} 刷 IP 次数=${result.ipBrushAttempts}`
 							);
-							clearReplenishmentFailure(policy.id);
+							await clearReplenishmentFailure(policy);
 							await saveTrackedVmName(policy, result.name);
 							await notifyReplenishmentSuccess({
 								policy,
@@ -799,13 +971,35 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 							});
 							break;
 						} catch (err) {
+							const createFailureMessage = errorMessage(err);
 							await insertWorkflowLog(
 								policy.id,
 								'auto_create',
 								'failed',
-								`补机失败 ${vmName}: ${errorMessage(err)}`
+								`补机失败 ${vmName}: ${createFailureMessage}`
 							);
-							const cooldown = recordReplenishmentFailure(policy.id, errorMessage(err));
+							let cleanupFailed = false;
+							let cleanupFailureMessage = '';
+							try {
+								await cleanupFailedReplenishmentResourceGroup(policy.id, createClients, resourceGroup);
+							} catch (cleanupErr) {
+								cleanupFailed = true;
+								cleanupFailureMessage = errorMessage(cleanupErr);
+								await insertWorkflowLog(
+									policy.id,
+									'cleanup_resource_group',
+									'failed',
+									`补机失败后的临时资源组 ${resourceGroup} 删除失败: ${cleanupFailureMessage}`
+								);
+							}
+							const cooldownMessage = cleanupFailed
+								? `${createFailureMessage}；临时资源组 ${resourceGroup} 清理失败: ${cleanupFailureMessage}`
+								: createFailureMessage;
+							const cooldown = await recordReplenishmentFailure(policy, cooldownMessage, {
+								resourceGroup: cleanupFailed ? resourceGroup : '',
+								accountId: cleanupFailed ? replenishRuntime.account.id : 0,
+								minCooldownMs: cleanupFailed ? REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS : 0
+							});
 							await insertWorkflowLog(
 								policy.id,
 								'auto_create',
