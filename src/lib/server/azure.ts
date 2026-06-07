@@ -1700,6 +1700,13 @@ function latestImageVersion(versions: { name?: string }[]) {
 		.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }))[0];
 }
 
+function isPublicIpResourceIPv6(pip: PublicIPAddress) {
+	const version = String(pip.publicIPAddressVersion ?? '').toLowerCase();
+	if (version === 'ipv6') return true;
+	if (version === 'ipv4') return false;
+	return Boolean(pip.ipAddress?.includes(':'));
+}
+
 async function collectPublicIps(
 	clients: AzureClients,
 	vm: {
@@ -1710,7 +1717,7 @@ async function collectPublicIps(
 ) {
 	const ips = { publicIPv4: '', publicIPv6: '' };
 	const nicRefs = vm.networkProfile?.networkInterfaces ?? [];
-	const nics: NetworkInterface[] = [];
+	const nics: { nicResourceGroup: string; nicName: string; nic: NetworkInterface }[] = [];
 
 	for (const nicRef of nicRefs) {
 		const nicId = nicRef.id ?? '';
@@ -1718,7 +1725,11 @@ async function collectPublicIps(
 		const nicResourceGroup = parseResourceGroup(nicId);
 		if (!nicName || !nicResourceGroup) continue;
 		try {
-			nics.push(await clients.network.networkInterfaces.get(nicResourceGroup, nicName));
+			nics.push({
+				nicResourceGroup,
+				nicName,
+				nic: await clients.network.networkInterfaces.get(nicResourceGroup, nicName)
+			});
 		} catch {
 			// Keep listing resilient even if one NIC/IP has been removed concurrently.
 		}
@@ -1729,15 +1740,23 @@ async function collectPublicIps(
 		if (vmResourceGroup) {
 			try {
 				const resolved = await findVmNetworkInterface(clients, vmResourceGroup, vm.name);
-				nics.push(resolved.nic);
+				nics.push(resolved);
 			} catch {
 				// Keep listing resilient even if Azure does not expose a NIC for this VM yet.
 			}
 		}
 	}
 
-	for (const nic of nics) {
-		for (const config of nic.ipConfigurations ?? []) {
+	for (const { nicResourceGroup, nicName, nic } of nics) {
+		let configs: NetworkInterfaceIPConfiguration[] = [];
+		try {
+			configs = await loadNetworkInterfaceIpConfigurations(clients, nicResourceGroup, nicName, nic, {
+				forceList: true
+			});
+		} catch {
+			configs = nic.ipConfigurations ?? [];
+		}
+		for (const config of configs) {
 			const pipId = config.publicIPAddress?.id;
 			if (!pipId) continue;
 			const pipName = parseResourceName(pipId);
@@ -1745,7 +1764,7 @@ async function collectPublicIps(
 			if (!pipName || !pipResourceGroup) continue;
 			try {
 				const pip = await clients.network.publicIPAddresses.get(pipResourceGroup, pipName);
-				if (pip.publicIPAddressVersion === 'IPv6') ips.publicIPv6 ||= pip.ipAddress ?? '';
+				if (isPublicIpResourceIPv6(pip)) ips.publicIPv6 ||= pip.ipAddress ?? '';
 				else ips.publicIPv4 ||= pip.ipAddress ?? '';
 			} catch {
 				// Keep listing resilient even if one public IP disappears during refresh.
@@ -1808,7 +1827,15 @@ export async function refreshVmPublicIps(
 
 	let publicIPv4 = '';
 	let publicIPv6 = '';
-	for (const config of nic.ipConfigurations ?? []) {
+	let configs: NetworkInterfaceIPConfiguration[] = [];
+	try {
+		configs = await loadNetworkInterfaceIpConfigurations(clients, nicResourceGroup, nicName, nic, {
+			forceList: true
+		});
+	} catch {
+		configs = nic.ipConfigurations ?? [];
+	}
+	for (const config of configs) {
 		const pipId = config.publicIPAddress?.id;
 		if (!pipId) continue;
 		const pipName = parseResourceName(pipId);
@@ -1819,7 +1846,7 @@ export async function refreshVmPublicIps(
 			publicIpResourceGroup: pipResourceGroup
 		});
 		const pip = await clients.network.publicIPAddresses.get(pipResourceGroup, pipName);
-		if (pip.publicIPAddressVersion === 'IPv6') publicIPv6 ||= pip.ipAddress ?? '';
+		if (isPublicIpResourceIPv6(pip)) publicIPv6 ||= pip.ipAddress ?? '';
 		else publicIPv4 ||= pip.ipAddress ?? '';
 	}
 
@@ -3239,7 +3266,8 @@ async function loadNetworkInterfaceIpConfigurations(
 	clients: AzureClients,
 	nicResourceGroup: string,
 	nicName: string,
-	nic: NetworkInterface
+	nic: NetworkInterface,
+	options: { forceList?: boolean } = {}
 ) {
 	const byName = new Map<string, NetworkInterfaceIPConfiguration>();
 	for (const config of nic.ipConfigurations ?? []) {
@@ -3247,7 +3275,7 @@ async function loadNetworkInterfaceIpConfigurations(
 		byName.set(key, config);
 	}
 
-	if (byName.size === 0 || !pickNicIPv4ConfigFromList([...byName.values()])) {
+	if (options.forceList || byName.size === 0 || !pickNicIPv4ConfigFromList([...byName.values()])) {
 		for await (const config of clients.network.networkInterfaceIPConfigurations.list(nicResourceGroup, nicName)) {
 			const key = config.name || `config-${byName.size + 1}`;
 			byName.set(key, config);

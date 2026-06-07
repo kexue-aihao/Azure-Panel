@@ -104,6 +104,7 @@
 		ip: string;
 		targetPrefix: string;
 		publicIpName: string;
+		pending: boolean;
 		matched: boolean;
 		kept: boolean;
 		deleted: boolean;
@@ -338,29 +339,31 @@
 		const targetPrefix =
 			progressDetailString(event.detail, 'targetPrefix') ||
 			progressDetailString(event.detail, 'target_prefix');
-		if (!ip) return null;
 
 		const attempt = progressDetailNumber(event.detail, 'attempt');
 		const maxAttempts = progressDetailNumber(event.detail, 'maxAttempts') || attempt || 1;
 		const publicIpName =
 			progressDetailString(event.detail, 'publicIpName') ||
 			progressDetailString(event.detail, 'name');
+		if (!ip && !publicIpName) return null;
 		const explicitMatched = event.detail?.matched === true;
 		const explicitMissed = event.detail?.matched === false;
 		const matched =
 			explicitMatched || (!explicitMissed && Boolean(targetPrefix) && ip.startsWith(targetPrefix));
+		const pending = !ip;
 		const kept =
 			event.detail?.kept === true ||
 			(matched && event.status === 'success') ||
 			(explicitMissed && event.detail?.deleted !== true && attempt >= maxAttempts);
 		const deleted = event.detail?.deleted === true;
 		return {
-			key: `${publicIpName || '-'}:${attempt || 0}:${ip}`,
+			key: `${publicIpName || '-'}:${attempt || 0}`,
 			attempt,
 			maxAttempts,
 			ip,
 			targetPrefix,
 			publicIpName,
+			pending,
 			matched,
 			kept,
 			deleted,
@@ -378,6 +381,8 @@
 		if (kept) return `${prefixText}，最终使用 ${kept.ip}，记录 ${records.length} 个公网 IP`;
 		const lastMissed = [...records].reverse().find((item) => !item.matched && item.ip);
 		if (lastMissed) return `${prefixText}，最近未命中 ${lastMissed.ip}，记录 ${records.length} 个公网 IP`;
+		const pending = [...records].reverse().find((item) => item.pending);
+		if (pending) return `${prefixText}，正在创建 ${pending.publicIpName || '公网 IP'}，等待 Azure 分配 IPv4`;
 		return `${prefixText}，已记录 ${records.length} 个公网 IP`;
 	}
 
@@ -387,6 +392,7 @@
 		if (kept?.targetPrefix) return '保留最后 IP';
 		if (kept) return '最终 IP';
 		if (records.some((item) => item.deleted)) return '刷段中';
+		if (records.some((item) => item.pending)) return '等待分配';
 		return '已刷到';
 	}
 
@@ -394,6 +400,7 @@
 		if (item.matched) return '命中';
 		if (item.kept) return item.targetPrefix ? '未命中保留' : '最终使用';
 		if (item.deleted) return '未命中删除';
+		if (item.pending) return '等待分配';
 		if (item.targetPrefix) return '待判定';
 		return '已创建';
 	}
@@ -402,13 +409,16 @@
 		if (item.matched) return 'bg-green-900/50 text-green-300';
 		if (item.kept) return 'bg-amber-900/50 text-amber-200';
 		if (item.deleted) return 'bg-slate-800 text-slate-300';
+		if (item.pending) return 'bg-yellow-900/50 text-yellow-200';
 		return 'bg-blue-900/50 text-blue-200';
 	}
 
 	function upsertBrushedIp(records: BrushedIpRecord[], record: BrushedIpRecord) {
 		const index = records.findIndex((item) => item.key === record.key);
 		if (index === -1) return [...records, record];
-		return records.map((item, itemIndex) => (itemIndex === index ? { ...item, ...record } : item));
+		return records.map((item, itemIndex) =>
+			itemIndex === index ? { ...item, ...record, timestamp: record.timestamp || item.timestamp } : item
+		);
 	}
 
 	function rememberCreateBrushedIp(event: CreateProgressEvent) {
@@ -1794,8 +1804,10 @@
 										{brushedIpBadgeText(item)}
 									</span>
 									<span class="font-mono text-muted">#{item.attempt}/{item.maxAttempts}</span>
-									<span class="text-muted">完整 IPv4</span>
-									<span class="break-all font-mono text-blue-100" title={item.ip}>{item.ip}</span>
+									<span class="text-muted">{item.pending ? '公网 IP 资源' : '完整 IPv4'}</span>
+									<span class="break-all font-mono text-blue-100" title={item.ip || item.publicIpName}>
+										{item.ip || item.publicIpName || '等待 Azure 分配'}
+									</span>
 									{#if item.publicIpName}
 										<span class="break-all text-muted">{item.publicIpName}</span>
 									{/if}
@@ -1925,8 +1937,10 @@
 								{brushedIpBadgeText(item)}
 							</span>
 							<span class="font-mono text-muted">#{item.attempt}/{item.maxAttempts}</span>
-							<span class="text-muted">完整 IPv4</span>
-							<span class="break-all font-mono text-blue-100" title={item.ip}>{item.ip}</span>
+							<span class="text-muted">{item.pending ? '公网 IP 资源' : '完整 IPv4'}</span>
+							<span class="break-all font-mono text-blue-100" title={item.ip || item.publicIpName}>
+								{item.ip || item.publicIpName || '等待 Azure 分配'}
+							</span>
 							{#if item.publicIpName}
 								<span class="break-all text-muted">{item.publicIpName}</span>
 							{/if}
