@@ -330,3 +330,24 @@ export function buildAccountPoolCountMessage(input: { poolCount: number; checked
 		`时间: ${(input.checkedAt ?? new Date()).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
 	].join('\n');
 }
+
+export function buildAbnormalAccountRemovedMessage(input: {
+	removedAccount: AzureAccount;
+	replacementAccount: AzureAccount;
+	state: string;
+	policyName: string;
+	poolCount: number;
+	removedAt?: Date;
+}) {
+	return [
+		'Azure Panel 异常账号已移除',
+		`策略: ${maskMiddle(input.policyName, 2, 2)}`,
+		`异常账号: ${maskAccountName(input.removedAccount.name)}`,
+		`异常订阅: ${maskSubscriptionId(input.removedAccount.subscriptionId)}`,
+		`异常状态: ${input.state || 'Unknown'}`,
+		`新触发账号: ${maskAccountName(input.replacementAccount.name)}`,
+		`新订阅: ${maskSubscriptionId(input.replacementAccount.subscriptionId)}`,
+		`账号池剩余: ${Math.max(0, Math.floor(input.poolCount))} 个`,
+		`时间: ${(input.removedAt ?? new Date()).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
+	].join('\n');
+}

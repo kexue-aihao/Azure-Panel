@@ -1,6 +1,7 @@
 import { decryptSecret } from './crypto';
 import { getWorkerIntervalMs } from './env';
 import {
+	deleteAccount,
 	findAccountById,
 	findDnsBindingByUser,
 	findDnsConfigByUser,
@@ -40,6 +41,7 @@ import {
 	type ProxyRuntimeConfig
 } from './proxy';
 import {
+	buildAbnormalAccountRemovedMessage,
 	buildReplenishmentMessage,
 	buildSubscriptionAlertMessage,
 	getTelegramCredentials,
@@ -468,6 +470,88 @@ async function syncWorkflowDns(options: {
 	}
 }
 
+async function removeAbnormalAccountAfterReplenishment(options: {
+	policy: WorkflowPolicy;
+	abnormalAccount: AzureAccount;
+	replacementAccount: AzureAccount;
+	state: string;
+}) {
+	if (options.abnormalAccount.id === options.replacementAccount.id) {
+		await insertWorkflowLog(
+			options.policy.id,
+			'account_cleanup',
+			'skipped',
+			'异常账号与补机账号相同，跳过自动删除以避免误删当前可用账号'
+		);
+		return;
+	}
+
+	try {
+		await updateWorkflow(options.policy.id, { accountId: options.replacementAccount.id });
+		options.policy.accountId = options.replacementAccount.id;
+		await insertWorkflowLog(
+			options.policy.id,
+			'account_cleanup',
+			'running',
+			`补机已完成，策略触发账号已切换到 ${options.replacementAccount.name}，准备删除异常账号 ${options.abnormalAccount.name}`
+		);
+
+		await deleteAccount(options.abnormalAccount.id);
+		const poolCount = (await listAccountsByUser(options.policy.userId)).length;
+		await insertWorkflowLog(
+			options.policy.id,
+			'account_cleanup',
+			'success',
+			`已删除订阅异常账号 ${options.abnormalAccount.name}，异常状态 ${options.state}，账号池剩余 ${poolCount} 个`
+		);
+
+		try {
+			const settings = await findNotificationSettingsByUser(options.policy.userId);
+			const credentials = getTelegramCredentials(settings);
+			if (!credentials) {
+				await insertWorkflowLog(
+					options.policy.id,
+					'telegram_notify',
+					'skipped',
+					'未配置 Telegram，跳过异常账号删除通知'
+				);
+				return;
+			}
+			await sendTelegramMessageToTargets({
+				token: credentials.token,
+				chatIds: credentials.chatIds,
+				text: buildAbnormalAccountRemovedMessage({
+					removedAccount: options.abnormalAccount,
+					replacementAccount: options.replacementAccount,
+					state: options.state,
+					policyName: options.policy.name,
+					poolCount
+				})
+			});
+			await insertWorkflowLog(
+				options.policy.id,
+				'telegram_notify',
+				'success',
+				'异常账号删除通知已发送到 Telegram'
+			);
+		} catch (err) {
+			await insertWorkflowLog(
+				options.policy.id,
+				'telegram_notify',
+				'failed',
+				`Telegram 异常账号删除通知发送失败: ${errorMessage(err)}`
+			);
+		}
+	} catch (err) {
+		await insertWorkflowLog(
+			options.policy.id,
+			'account_cleanup',
+			'failed',
+			`补机成功后删除异常账号失败: ${errorMessage(err)}`
+		);
+	}
+}
+
 async function runPolicies(policies: WorkflowPolicy[]) {
 	for (const policy of policies) {
 		if (activePolicies.has(policy.id)) continue;
@@ -640,6 +724,13 @@ async function runPolicies(policies: WorkflowPolicy[]) {
 								vmSize: replenishmentVmSize
 							});
 							await syncWorkflowDns({ policy, result });
+							await removeAbnormalAccountAfterReplenishment({
+								policy,
+								abnormalAccount: account,
+								replacementAccount: replenishRuntime.account,
+								state: status.state
+							});
+							break;
 						} catch (err) {
 							await insertWorkflowLog(
 								policy.id,
