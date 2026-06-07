@@ -4127,6 +4127,54 @@ async function detachPublicIpFromNic(
 	});
 }
 
+async function releaseOldIPv4PublicIpForRetry(
+	clients: AzureClients,
+	options: {
+		nicResourceGroup: string;
+		nicName: string;
+		nic: NetworkInterface;
+		ipConfig: NetworkInterfaceIPConfiguration;
+		oldPublicIpId: string;
+		oldPublicIpName: string;
+		oldPublicIPv4: string;
+		progress?: CreateVmProgressReporter;
+		prefix: 'replace-ip' | 'brush-ip';
+		reason: string;
+	}
+) {
+	if (!options.oldPublicIpId) throw new Error(options.reason);
+	await reportCreateVmProgress(
+		options.progress,
+		`${options.prefix}-single-quota-fallback`,
+		'info',
+		'New IPv4 Public IP creation failed; release old IPv4 and retry without VM shutdown',
+		{
+			oldPublicIpName: options.oldPublicIpName,
+			oldPublicIPv4: options.oldPublicIPv4,
+			reason: options.reason.length > 800 ? `${options.reason.slice(0, 800)}...` : options.reason
+		}
+	);
+	await detachPublicIpFromNic(clients, {
+		nicResourceGroup: options.nicResourceGroup,
+		nicName: options.nicName,
+		nic: options.nic,
+		ipConfig: options.ipConfig,
+		progress: options.progress,
+		step: `${options.prefix}-release-old`
+	});
+	await reportCreateVmProgress(
+		options.progress,
+		`${options.prefix}-delete-old`,
+		'running',
+		'Delete old IPv4 Public IP to release quota',
+		{
+			oldPublicIpName: options.oldPublicIpName,
+			oldPublicIPv4: options.oldPublicIPv4
+		}
+	);
+	await deletePublicIpById(clients, options.oldPublicIpId);
+}
+
 async function resolveCurrentNicIPv4PublicIp(
 	clients: AzureClients,
 	options: {
@@ -5289,15 +5337,40 @@ export async function replaceVmPublicIPv4(
 		ipConfigName: targetIpConfig.name ?? '',
 		oldPublicIpSource: oldBinding?.source ?? 'none'
 	});
-	const created = await createPublicIp(clients, {
-		resourceGroup: nicResourceGroup,
-		location: vmLocation,
-		name: newPublicIpName,
-		version: 'IPv4',
-		progress,
-		step: 'replace-ip-create',
-		waitForAddress: true
-	});
+	let created: PublicIPAddress;
+	try {
+		created = await createPublicIp(clients, {
+			resourceGroup: nicResourceGroup,
+			location: vmLocation,
+			name: newPublicIpName,
+			version: 'IPv4',
+			progress,
+			step: 'replace-ip-create',
+			waitForAddress: true
+		});
+	} catch (err) {
+		await releaseOldIPv4PublicIpForRetry(clients, {
+			nicResourceGroup,
+			nicName,
+			nic,
+			ipConfig: targetIpConfig,
+			oldPublicIpId,
+			oldPublicIpName,
+			oldPublicIPv4,
+			progress,
+			prefix: 'replace-ip',
+			reason: formatAzureError(err)
+		});
+		created = await createPublicIp(clients, {
+			resourceGroup: nicResourceGroup,
+			location: vmLocation,
+			name: resourceName(vmName, `pip4-${Date.now()}-retry`),
+			version: 'IPv4',
+			progress,
+			step: 'replace-ip-create-retry',
+			waitForAddress: true
+		});
+	}
 	if (!created.id) throw new Error('新公网 IPv4 创建失败');
 
 	try {
@@ -5413,16 +5486,42 @@ export async function brushVmPublicIPv4Prefix(
 		oldBinding?.ipConfigName && oldBinding.ipConfigName !== ipConfig.name
 			? ({ ...ipConfig, name: oldBinding.ipConfigName } as NetworkInterfaceIPConfiguration)
 			: ipConfig;
-	const created = await createMatchingIPv4PublicIp(clients, {
-		resourceGroup: nicResourceGroup,
-		location: vmLocation,
-		vmName: options.vmName,
-		targetPrefix,
-		maxAttempts: options.maxAttempts,
-		nameSalt: String(Date.now()),
-		fallbackToLastOnMiss: true,
-		progress: options.progress
-	});
+	let created: { pip: PublicIPAddress; attempts: number; matched: boolean };
+	try {
+		created = await createMatchingIPv4PublicIp(clients, {
+			resourceGroup: nicResourceGroup,
+			location: vmLocation,
+			vmName: options.vmName,
+			targetPrefix,
+			maxAttempts: options.maxAttempts,
+			nameSalt: String(Date.now()),
+			fallbackToLastOnMiss: true,
+			progress: options.progress
+		});
+	} catch (err) {
+		await releaseOldIPv4PublicIpForRetry(clients, {
+			nicResourceGroup,
+			nicName,
+			nic,
+			ipConfig: targetIpConfig,
+			oldPublicIpId,
+			oldPublicIpName,
+			oldPublicIPv4,
+			progress: options.progress,
+			prefix: 'brush-ip',
+			reason: formatAzureError(err)
+		});
+		created = await createMatchingIPv4PublicIp(clients, {
+			resourceGroup: nicResourceGroup,
+			location: vmLocation,
+			vmName: options.vmName,
+			targetPrefix,
+			maxAttempts: options.maxAttempts,
+			nameSalt: `${Date.now()}-retry`,
+			fallbackToLastOnMiss: true,
+			progress: options.progress
+		});
+	}
 	if (!created.pip.id) throw new Error('匹配公网 IPv4 创建失败');
 
 	try {
