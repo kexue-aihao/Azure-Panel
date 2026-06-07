@@ -1,4 +1,9 @@
-import { deleteResourceGroupWithProgress, listGenericResources, listResourceGroups } from '$lib/server/azure';
+import {
+	deleteResourceGroupWithProgress,
+	formatAzureError,
+	listGenericResources,
+	listResourceGroups
+} from '$lib/server/azure';
 import { insertExecutionLog } from '$lib/server/db/repo';
 import { fail, ok, requireUser } from '$lib/server/http';
 import { getAzureContext } from '../../_helpers';
@@ -42,6 +47,14 @@ function normalizeResourceGroups(value: unknown) {
 	return [...new Set(input.map((item) => String(item ?? '').trim()).filter(Boolean))].slice(0, 50);
 }
 
+function isReadonlyResourceAuthorizationError(err: unknown) {
+	const message = formatAzureError(err);
+	return (
+		/AuthorizationFailed/i.test(message) &&
+		/Microsoft\.Resources\/subscriptions\/(?:resourcegroups|resources)\/read/i.test(message)
+	);
+}
+
 async function writeDeleteLog(options: {
 	userId: number;
 	accountId: number;
@@ -65,9 +78,12 @@ export const GET: RequestHandler = async (event) => {
 	const accountId = event.url.searchParams.get('account_id');
 	const resourceGroup = String(event.url.searchParams.get('resource_group') ?? '').trim();
 	const resourceType = String(event.url.searchParams.get('resource_type') ?? '').trim();
+	let subscriptionId = '';
 
 	try {
-		const { clients, subscriptionId } = await getAzureContext(event, user.id, accountId);
+		const context = await getAzureContext(event, user.id, accountId);
+		const clients = context.clients;
+		subscriptionId = context.subscriptionId;
 		const [groups, resources] = await Promise.all([
 			listResourceGroups(clients),
 			listGenericResources(clients, resourceGroup || undefined, resourceType || undefined)
@@ -92,6 +108,15 @@ export const GET: RequestHandler = async (event) => {
 			}))
 		});
 	} catch (err) {
+		if (isReadonlyResourceAuthorizationError(err)) {
+			return ok({
+				subscription_id: subscriptionId,
+				groups: [],
+				resources: [],
+				warning:
+					'当前账号没有读取资源组/资源列表的 IAM 权限，已跳过资源浏览。可手动填写资源组和区域继续创建 Foundry / Azure AI 资源。'
+			});
+		}
 		return fail(String(err), 500);
 	}
 };

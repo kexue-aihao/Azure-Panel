@@ -111,6 +111,7 @@
 	let providerProgress = $state<ResourceGroupDeleteProgressEvent[]>([]);
 	let providerProgressResult = $state<ProviderRegisterStreamResult | null>(null);
 	let toast = $state('');
+	let resourceWarning = $state('');
 	let createAiForm = $state({
 		resource_group: '',
 		location: 'eastus',
@@ -161,6 +162,15 @@
 
 	function setToastFromError(err: unknown, fallback: string) {
 		toast = err instanceof Error ? err.message : fallback;
+	}
+
+	function resetResourceBrowser() {
+		groups = [];
+		resources = [];
+		resourceGroup = '';
+		resourceType = '';
+		selectedResourceGroups = [];
+		resourceWarning = '';
 	}
 
 	function uniqueNames(names: string[]) {
@@ -341,17 +351,20 @@
 			const query = params();
 			if (resourceGroup) query.set('resource_group', resourceGroup);
 			if (resourceType) query.set('resource_type', resourceType);
-			const data = await api<{ groups: ResourceGroup[]; resources: Resource[] }>(
+			const data = await api<{ groups: ResourceGroup[]; resources: Resource[]; warning?: string }>(
 				`/api/user/azure/resource/groups?${query}`
 			);
 			groups = data.groups;
 			resources = data.resources;
+			resourceWarning = data.warning ?? '';
+			if (resourceWarning) toast = resourceWarning;
 			selectedResourceGroups = selectedResourceGroups.filter((name) =>
 				data.groups.some((group) => group.name === name)
 			);
-			if (resourceGroup && !groups.some((group) => group.name === resourceGroup)) resourceGroup = '';
+			if (resourceGroup && groups.length > 0 && !groups.some((group) => group.name === resourceGroup)) resourceGroup = '';
 			if (resourceGroup && selectedGroup) createAiForm.location = selectedGroup.location;
 		} catch (err) {
+			resourceWarning = err instanceof Error ? err.message : '资源加载失败';
 			setToastFromError(err, '资源加载失败');
 		} finally {
 			loading = false;
@@ -484,7 +497,7 @@
 				})
 			});
 			toast = 'AI / Foundry 账号创建请求已提交';
-			await Promise.all([loadAiAccounts(), loadResources()]);
+			await loadAiAccounts();
 		} catch (err) {
 			setToastFromError(err, 'AI 账号创建失败');
 		} finally {
@@ -521,15 +534,17 @@
 		selectedAiAccount = null;
 		aiKeys = null;
 		deployments = [];
+		resetResourceBrowser();
 		await loadSubscriptions();
-		await Promise.all([loadResources(), loadProviders(), loadAiAccounts()]);
+		await Promise.all([loadProviders(), loadAiAccounts()]);
 	}
 
 	async function changeSubscription() {
 		selectedAiAccount = null;
 		aiKeys = null;
 		deployments = [];
-		await Promise.all([loadResources(), loadProviders(), loadAiAccounts()]);
+		resetResourceBrowser();
+		await Promise.all([loadProviders(), loadAiAccounts()]);
 	}
 
 	async function copy(value: string) {
@@ -660,7 +675,14 @@
 				resourceGroup = '';
 			}
 			toast = `资源组批量删除完成：成功 ${result.success} 个，失败 ${result.failed} 个`;
-			await Promise.all([loadResources(), loadAiAccounts()]);
+			const deletedGroups = new Set(
+				result.results
+					.filter((item) => item.status === 'success')
+					.map((item) => item.resource_group)
+			);
+			groups = groups.filter((group) => !deletedGroups.has(group.name));
+			resources = resources.filter((resource) => !deletedGroups.has(resource.resource_group));
+			await loadAiAccounts();
 		} catch (err) {
 			setToastFromError(err, '资源组删除失败');
 		} finally {
@@ -678,6 +700,12 @@
 
 {#if toast}
 	<div class="mb-4 rounded-lg border border-border bg-card px-3 py-2 text-sm">{toast}</div>
+{/if}
+
+{#if resourceWarning}
+	<div class="mb-4 rounded-lg border border-yellow-500/50 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200">
+		{resourceWarning}
+	</div>
 {/if}
 
 <div class="mb-4 grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
@@ -717,7 +745,7 @@
 					{/if}
 				</select>
 			</div>
-			<button class="btn-primary" onclick={() => void changeSubscription()} disabled={loading}>
+			<button class="btn-primary" onclick={() => void loadResources()} disabled={loading || !accountId}>
 				刷新资源
 			</button>
 		</div>
