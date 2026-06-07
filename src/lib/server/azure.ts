@@ -684,7 +684,16 @@ function armResponseError(status: number, bodyAsText?: string | null) {
 	let detail = '';
 	try {
 		const parsed = bodyAsText ? JSON.parse(bodyAsText) : null;
-		detail = parsed?.error?.message ?? parsed?.error?.code ?? '';
+		const error = parsed?.error ?? parsed;
+		const details = Array.isArray(error?.details)
+			? error.details
+					.map((item: { code?: string; message?: string; target?: string }) =>
+						[item.code, item.target, item.message].filter(Boolean).join(': ')
+					)
+					.filter(Boolean)
+					.join(' | ')
+			: '';
+		detail = [error?.code, error?.message, details].filter(Boolean).join(' | ');
 	} catch {
 		detail = bodyAsText ?? '';
 	}
@@ -3296,9 +3305,21 @@ async function createPublicIp(
 		step?: string;
 		progressDetail?: CreateVmProgressEvent['detail'];
 		waitForAddress?: boolean;
+		failureProgressStatus?: CreateVmProgressStatus;
 	}
 ): Promise<PublicIPAddress> {
 	const step = options.step ?? `public-ip-${options.version.toLowerCase()}`;
+	const failureProgressStatus = options.failureProgressStatus ?? 'error';
+	const originalProgress = options.progress;
+	if (originalProgress && failureProgressStatus !== 'error') {
+		options.progress = async (event) => {
+			await originalProgress(
+				event.step === step && event.status === 'error'
+					? { ...event, status: failureProgressStatus }
+					: event
+			);
+		};
+	}
 	const contextDetail = options.progressDetail ?? {};
 	const withPublicIpDetail = (detail: CreateVmProgressEvent['detail'] = {}) => ({
 		...contextDetail,
@@ -3406,6 +3427,7 @@ async function createPublicIp(
 		await reportCreateVmProgress(options.progress, step, 'error', `${options.version} 公网 IP 创建失败`, withPublicIpDetail({
 			name: options.name,
 			version: options.version,
+			failureProgressStatus,
 			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
 		}));
 		throw new Error(`${options.version} 公网 IP 创建失败 ${options.name}: ${message}`);
@@ -3484,6 +3506,7 @@ async function createMatchingIPv4PublicIp(
 		nameSalt?: string;
 		ddosProtectionPlanId?: string;
 		fallbackToLastOnMiss?: boolean;
+		failureProgressStatus?: CreateVmProgressStatus;
 		progress?: CreateVmProgressReporter;
 	}
 ): Promise<{ pip: PublicIPAddress; attempts: number; matched: boolean }> {
@@ -3521,6 +3544,7 @@ async function createMatchingIPv4PublicIp(
 				progress: options.progress,
 				step: 'public-ipv4',
 				waitForAddress: Boolean(targetPrefix),
+				failureProgressStatus: options.failureProgressStatus,
 				progressDetail: {
 					attempt,
 					maxAttempts,
@@ -3533,6 +3557,7 @@ async function createMatchingIPv4PublicIp(
 			});
 		} catch (err) {
 			lastCreateError = formatAzureError(err);
+			if (options.failureProgressStatus === 'info') throw err;
 			await reportCreateVmProgress(
 				options.progress,
 				'public-ipv4',
@@ -4108,7 +4133,6 @@ async function updateNicIPv4PublicIp(
 					error: lastError.length > 1000 ? `${lastError.slice(0, 1000)}...` : lastError
 				}
 			);
-			if (!isTransientAzureReadError(err) && attempt >= 2) throw err;
 			await sleep(4000);
 		}
 	}
@@ -4204,7 +4228,7 @@ async function releaseOldIPv4PublicIpForRetry(
 		{
 			oldPublicIpName: options.oldPublicIpName,
 			oldPublicIPv4: options.oldPublicIPv4,
-			reason: options.reason.length > 800 ? `${options.reason.slice(0, 800)}...` : options.reason
+			fallbackReason: 'new-public-ip-create-failed'
 		}
 	);
 	await detachPublicIpFromNic(clients, {
@@ -4214,6 +4238,21 @@ async function releaseOldIPv4PublicIpForRetry(
 		ipConfig: options.ipConfig,
 		progress: options.progress,
 		step: `${options.prefix}-release-old`
+	}).catch(async (err) => {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(
+			options.progress,
+			`${options.prefix}-release-old`,
+			'error',
+			'Release old IPv4 public IP binding failed',
+			{
+				nicName: options.nicName,
+				oldPublicIpName: options.oldPublicIpName,
+				oldPublicIPv4: options.oldPublicIPv4,
+				error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
+			}
+		);
+		throw new Error(`release old IPv4 public IP binding failed (${options.prefix}-release-old): ${message}`);
 	});
 	await reportCreateVmProgress(
 		options.progress,
@@ -4225,7 +4264,21 @@ async function releaseOldIPv4PublicIpForRetry(
 			oldPublicIPv4: options.oldPublicIPv4
 		}
 	);
-	await deletePublicIpById(clients, options.oldPublicIpId);
+	await deletePublicIpById(clients, options.oldPublicIpId).catch(async (err) => {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(
+			options.progress,
+			`${options.prefix}-delete-old`,
+			'error',
+			'Delete old IPv4 Public IP failed',
+			{
+				oldPublicIpName: options.oldPublicIpName,
+				oldPublicIPv4: options.oldPublicIPv4,
+				error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
+			}
+		);
+		throw new Error(`delete old IPv4 public IP failed (${options.prefix}-delete-old): ${message}`);
+	});
 }
 
 async function resolveCurrentNicIPv4PublicIp(
@@ -5399,7 +5452,8 @@ export async function replaceVmPublicIPv4(
 			version: 'IPv4',
 			progress,
 			step: 'replace-ip-create',
-			waitForAddress: true
+			waitForAddress: true,
+			failureProgressStatus: 'info'
 		});
 	} catch (err) {
 		await releaseOldIPv4PublicIpForRetry(clients, {
@@ -5422,6 +5476,8 @@ export async function replaceVmPublicIPv4(
 			progress,
 			step: 'replace-ip-create-retry',
 			waitForAddress: true
+		}).catch((retryErr) => {
+			throw new Error(`retry create IPv4 public IP failed (replace-ip-create-retry): ${formatAzureError(retryErr)}`);
 		});
 	}
 	if (!created.id) throw new Error('新公网 IPv4 创建失败');
@@ -5464,7 +5520,15 @@ export async function replaceVmPublicIPv4(
 				oldPublicIPv4,
 				mode: switchMode
 			});
-			await deletePublicIpById(clients, oldPublicIpId);
+			await deletePublicIpById(clients, oldPublicIpId).catch(async (err) => {
+				const message = formatAzureError(err);
+				await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'error', '删除旧 IPv4 公网 IP 失败', {
+					oldPublicIpName,
+					oldPublicIPv4,
+					error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
+				});
+				throw new Error(`delete old IPv4 public IP failed (replace-ip-cleanup): ${message}`);
+			});
 		}
 	} catch (err) {
 		await reportCreateVmProgress(progress, 'replace-ip-recover', 'info', 'IPv4 更换绑定失败，新 IPv4 已保留以便手动恢复', {
@@ -5482,6 +5546,14 @@ export async function replaceVmPublicIPv4(
 		fallbackPublicIpId: created.id,
 		progress,
 		step: 'replace-ip-complete'
+	}).catch(async (err) => {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(progress, 'replace-ip-complete', 'error', '读取更换后的 IPv4 地址失败', {
+			nicName,
+			publicIpName: parseResourceName(created.id ?? ''),
+			error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
+		});
+		throw new Error(`read replaced IPv4 failed (replace-ip-complete): ${message}`);
 	});
 	const createdPublicIPv4 = publicIpAddressValue(created);
 	await reportCreateVmProgress(progress, 'replace-ip-complete', 'success', 'IPv4 更换完成', {
@@ -5549,6 +5621,7 @@ export async function brushVmPublicIPv4Prefix(
 			maxAttempts: options.maxAttempts,
 			nameSalt: String(Date.now()),
 			fallbackToLastOnMiss: true,
+			failureProgressStatus: 'info',
 			progress: options.progress
 		});
 	} catch (err) {
@@ -5573,6 +5646,8 @@ export async function brushVmPublicIPv4Prefix(
 			nameSalt: `${Date.now()}-retry`,
 			fallbackToLastOnMiss: true,
 			progress: options.progress
+		}).catch((retryErr) => {
+			throw new Error(`retry brush IPv4 public IP failed (brush-ip-create-retry): ${formatAzureError(retryErr)}`);
 		});
 	}
 	if (!created.pip.id) throw new Error('匹配公网 IPv4 创建失败');
@@ -5599,7 +5674,15 @@ export async function brushVmPublicIPv4Prefix(
 					oldPublicIPv4,
 					mode: switchMode
 				});
-				await deletePublicIpById(clients, oldPublicIpId);
+				await deletePublicIpById(clients, oldPublicIpId).catch(async (err) => {
+					const message = formatAzureError(err);
+					await reportCreateVmProgress(options.progress, 'brush-ip-cleanup', 'error', '删除旧 IPv4 公网 IP 失败', {
+						oldPublicIpName,
+						oldPublicIPv4,
+						error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
+					});
+					throw new Error(`delete old IPv4 public IP failed (brush-ip-cleanup): ${message}`);
+				});
 			}
 
 			await reportCreateVmProgress(
@@ -5630,7 +5713,15 @@ export async function brushVmPublicIPv4Prefix(
 				oldPublicIPv4,
 				mode: switchMode
 			});
-			await deletePublicIpById(clients, oldPublicIpId);
+			await deletePublicIpById(clients, oldPublicIpId).catch(async (err) => {
+				const message = formatAzureError(err);
+				await reportCreateVmProgress(options.progress, 'brush-ip-cleanup', 'error', '删除旧 IPv4 公网 IP 失败', {
+					oldPublicIpName,
+					oldPublicIPv4,
+					error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
+				});
+				throw new Error(`delete old IPv4 public IP failed (brush-ip-cleanup): ${message}`);
+			});
 		}
 	} catch (err) {
 		if (oldPublicIpId) {
@@ -5651,6 +5742,14 @@ export async function brushVmPublicIPv4Prefix(
 		fallbackPublicIpId: created.pip.id,
 		progress: options.progress,
 		step: 'brush-ip-complete'
+	}).catch(async (err) => {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(options.progress, 'brush-ip-complete', 'error', '读取刷 IP 后的 IPv4 地址失败', {
+			nicName,
+			publicIpName: parseResourceName(created.pip.id ?? ''),
+			error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
+		});
+		throw new Error(`read brushed IPv4 failed (brush-ip-complete): ${message}`);
 	});
 	const createdPublicIPv4 = publicIpAddressValue(created.pip);
 	await reportCreateVmProgress(options.progress, 'brush-ip-complete', 'success', '刷 IPv4 段完成', {

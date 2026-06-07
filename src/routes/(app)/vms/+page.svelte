@@ -113,7 +113,7 @@
 	type OperationStreamMessage<T> =
 		| { type: 'progress'; event: CreateProgressEvent }
 		| { type: 'result'; result: T }
-		| { type: 'error'; message: string };
+		| { type: 'error'; message: string; event?: CreateProgressEvent };
 	type CreateStreamMessage =
 		| { type: 'progress'; event: CreateProgressEvent }
 		| {
@@ -621,6 +621,7 @@
 	}
 
 	function failOperationProgress(message: string) {
+		if (operationProgress.some((item) => item.status === 'error' && item.step !== 'operation-failed')) return;
 		mergeOperationProgress({
 			step: 'operation-failed',
 			status: 'error',
@@ -677,6 +678,7 @@
 				} else if (message.type === 'result') {
 					result = message.result;
 				} else if (message.type === 'error') {
+					if (message.event) mergeOperationProgress(message.event);
 					throw new Error(message.message);
 				}
 			}

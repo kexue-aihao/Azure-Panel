@@ -39,7 +39,9 @@ export function vmOperationStream<T>(options: {
 }) {
 	const stream = new ReadableStream<Uint8Array>({
 		async start(controller) {
+			let lastErrorEvent: CreateVmProgressEvent | null = null;
 			const progress = async (event: CreateVmProgressEvent) => {
+				if (event.status === 'error') lastErrorEvent = event;
 				streamMessage(controller, { type: 'progress', event });
 				await options.onProgress?.(event);
 			};
@@ -49,10 +51,16 @@ export function vmOperationStream<T>(options: {
 				streamMessage(controller, { type: 'result', result });
 			} catch (err) {
 				const message = errorMessage(err);
+				const specificErrorEvent = lastErrorEvent as CreateVmProgressEvent | null;
 				if (options.errorStep) {
-					await progress(operationProgressEvent(options.errorStep, 'error', message));
+					await progress(operationProgressEvent(options.errorStep, 'error', message, {
+						lastErrorStep:
+							specificErrorEvent && specificErrorEvent.step !== options.errorStep
+								? specificErrorEvent.step
+								: null
+					}));
 				}
-				streamMessage(controller, { type: 'error', message });
+				streamMessage(controller, { type: 'error', message, event: specificErrorEvent ?? lastErrorEvent });
 			} finally {
 				controller.close();
 			}
