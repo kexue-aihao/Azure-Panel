@@ -5318,6 +5318,43 @@ export async function brushVmPublicIPv4Prefix(
 		oldBinding?.ipConfigName && oldBinding.ipConfigName !== ipConfig.name
 			? ({ ...ipConfig, name: oldBinding.ipConfigName } as NetworkInterfaceIPConfiguration)
 			: ipConfig;
+	if (oldPublicIPv4 && oldPublicIPv4.startsWith(targetPrefix)) {
+		await reportCreateVmProgress(
+			options.progress,
+			'public-ipv4',
+			'success',
+			`当前 IPv4 ${oldPublicIPv4} 已命中目标前缀，无需继续刷 IP`,
+			{
+				attempt: 1,
+				maxAttempts: 1,
+				ip: oldPublicIPv4,
+				targetPrefix,
+				publicIpName: oldPublicIpName || null,
+				matched: true,
+				kept: true,
+				deleted: false,
+				brushRecordOnly: true
+			}
+		);
+		await reportCreateVmProgress(options.progress, 'brush-ip-complete', 'success', '当前 IPv4 已命中目标前缀，无需继续刷 IP', {
+			publicIPv4: oldPublicIPv4,
+			targetPrefix,
+			publicIpName: oldPublicIpName || null,
+			ipConfigName: targetIpConfig.name || null,
+			attempts: 1,
+			matched: true
+		});
+		return {
+			vmName: options.vmName,
+			resourceGroup: options.resourceGroup,
+			publicIPv4: oldPublicIPv4,
+			oldPublicIPv4,
+			publicIpName: oldPublicIpName,
+			targetPrefix,
+			attempts: 1,
+			matched: true
+		};
+	}
 	const created = await createMatchingIPv4PublicIp(clients, {
 		resourceGroup: nicResourceGroup,
 		location: vmLocation,
