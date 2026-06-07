@@ -356,8 +356,9 @@
 		const publicIpName =
 			progressDetailString(event.detail, 'publicIpName') ||
 			progressDetailString(event.detail, 'name');
-		if (!targetPrefix) return null;
 		if (!ip && !publicIpName) return null;
+		const waitAttempt = progressDetailNumber(event.detail, 'waitAttempt');
+		const waitAttempts = progressDetailNumber(event.detail, 'waitAttempts');
 		const explicitMatched = event.detail?.matched === true;
 		const explicitMissed = event.detail?.matched === false;
 		const matched =
@@ -370,8 +371,8 @@
 		const deleted = event.detail?.deleted === true;
 		return {
 			key: `${publicIpName || '-'}:${attempt || 0}`,
-			attempt,
-			maxAttempts,
+			attempt: attempt || waitAttempt || 1,
+			maxAttempts: maxAttempts || waitAttempts || 1,
 			ip,
 			targetPrefix,
 			publicIpName,
@@ -502,7 +503,16 @@
 	}
 
 	function isBrushRecordOnly(event: CreateProgressEvent) {
-		return event.step === 'public-ipv4' && event.detail?.brushRecordOnly === true;
+		return (
+			event.step === 'public-ipv4' &&
+			event.status !== 'error' &&
+			(event.detail?.brushRecordOnly === true ||
+				Boolean(progressDetailString(event.detail, 'ip')) ||
+				Boolean(progressDetailString(event.detail, 'publicIpName')) ||
+				Boolean(progressDetailString(event.detail, 'name')) ||
+				Boolean(progressDetailString(event.detail, 'targetPrefix')) ||
+				Boolean(progressDetailString(event.detail, 'target_prefix')))
+		);
 	}
 
 	function mergeCreateProgress(event: CreateProgressEvent) {
@@ -1057,6 +1067,7 @@
 				message: '创建请求已完成',
 				timestamp: new Date().toISOString()
 			});
+			createBrushedIps = fillBrushedIpFromResult(createBrushedIps, result.public_ipv4 || '');
 			toast = `VM ${result.name} 创建完成，IPv4=${result.public_ipv4 || '-'} IPv6=${result.public_ipv6 || '-'}`;
 			resourceGroup = result.resource_group;
 			refreshCreateNames();
@@ -1171,6 +1182,7 @@
 					}
 				}
 			);
+			operationBrushedIps = fillBrushedIpFromResult(operationBrushedIps, result.public_ipv4 || '');
 			toast = `${vm.name} 已更换 IPv4：${result.old_public_ipv4 || '-'} -> ${result.public_ipv4 || '-'}`;
 			await loadVms();
 		} catch (err) {
@@ -1247,6 +1259,7 @@
 					}
 				}
 			);
+			operationBrushedIps = fillBrushedIpFromResult(operationBrushedIps, result.public_ipv4 || '');
 			toast = `${vm.name} 已匹配 IPv4 ${result.public_ipv4}，尝试 ${result.attempts} 次`;
 			await loadVms();
 		} catch (err) {

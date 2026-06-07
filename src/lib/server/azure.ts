@@ -313,6 +313,7 @@ const AZURE_AUTHORITY_HOST = 'https://login.microsoftonline.com';
 const SUBSCRIPTIONS_API_VERSION = '2020-01-01';
 const COGNITIVE_SERVICES_API_VERSION = '2024-10-01';
 const CAPACITY_QUOTA_API_VERSION = '2020-10-25';
+const NETWORK_PUBLIC_IP_API_VERSION = '2024-05-01';
 export const DEFAULT_PROVIDER_NAMESPACES = [
 	'Microsoft.Compute',
 	'Microsoft.Network',
@@ -1700,14 +1701,126 @@ function latestImageVersion(versions: { name?: string }[]) {
 }
 
 function isPublicIpResourceIPv6(pip: PublicIPAddress) {
-	const version = String(pip.publicIPAddressVersion ?? '').toLowerCase();
+	const raw = pip as PublicIPAddress & {
+		properties?: { publicIPAddressVersion?: string; ipAddress?: string };
+	};
+	const version = String(pip.publicIPAddressVersion ?? raw.properties?.publicIPAddressVersion ?? '').toLowerCase();
 	if (version === 'ipv6') return true;
 	if (version === 'ipv4') return false;
-	return Boolean(pip.ipAddress?.includes(':'));
+	return Boolean(publicIpAddressValue(pip).includes(':'));
+}
+
+function publicIpAddressValue(pip: PublicIPAddress) {
+	const raw = pip as PublicIPAddress & { properties?: { ipAddress?: string } };
+	return String(pip.ipAddress ?? raw.properties?.ipAddress ?? '').trim();
+}
+
+function publicIpIpConfigurationId(pip: PublicIPAddress) {
+	const raw = pip as PublicIPAddress & { properties?: { ipConfiguration?: { id?: string } } };
+	return String(pip.ipConfiguration?.id ?? raw.properties?.ipConfiguration?.id ?? '').trim();
+}
+
+type ArmPublicIpResource = {
+	id?: string;
+	name?: string;
+	location?: string;
+	properties?: {
+		ipAddress?: string;
+		publicIPAddressVersion?: string;
+		ipConfiguration?: { id?: string };
+		provisioningState?: string;
+	};
+};
+
+function armPublicIpToModel(resource: ArmPublicIpResource): PublicIPAddress {
+	return {
+		id: resource.id ?? '',
+		name: resource.name ?? parseResourceName(resource.id ?? ''),
+		location: resource.location ?? '',
+		ipAddress: resource.properties?.ipAddress,
+		publicIPAddressVersion: resource.properties?.publicIPAddressVersion as PublicIPAddress['publicIPAddressVersion'],
+		ipConfiguration: resource.properties?.ipConfiguration,
+		provisioningState: resource.properties?.provisioningState,
+		properties: resource.properties
+	} as PublicIPAddress & { properties?: ArmPublicIpResource['properties'] };
+}
+
+function mergePublicIpModel(base: PublicIPAddress, fallback: PublicIPAddress): PublicIPAddress {
+	const baseRaw = base as PublicIPAddress & { properties?: ArmPublicIpResource['properties'] };
+	const fallbackRaw = fallback as PublicIPAddress & { properties?: ArmPublicIpResource['properties'] };
+	const baseIpConfiguration = base.ipConfiguration?.id ? base.ipConfiguration : baseRaw.properties?.ipConfiguration;
+	const fallbackIpConfiguration = fallback.ipConfiguration?.id
+		? fallback.ipConfiguration
+		: fallbackRaw.properties?.ipConfiguration;
+	return {
+		...base,
+		...fallback,
+		id: fallback.id || base.id,
+		name: fallback.name || base.name,
+		location: fallback.location || base.location,
+		ipAddress: publicIpAddressValue(base) || publicIpAddressValue(fallback) || undefined,
+		publicIPAddressVersion: base.publicIPAddressVersion ?? fallback.publicIPAddressVersion,
+		ipConfiguration: baseIpConfiguration ?? fallbackIpConfiguration,
+		provisioningState: base.provisioningState ?? fallback.provisioningState,
+		properties: {
+			...(baseRaw.properties ?? {}),
+			...(fallbackRaw.properties ?? {})
+		}
+	} as PublicIPAddress & { properties?: ArmPublicIpResource['properties'] };
+}
+
+function publicIpArmPath(clients: AzureClients, resourceGroup: string, publicIpName: string) {
+	return (
+		`/subscriptions/${encodeURIComponent(clients.subscriptionId)}` +
+		`/resourceGroups/${encodeURIComponent(resourceGroup)}` +
+		`/providers/Microsoft.Network/publicIPAddresses/${encodeURIComponent(publicIpName)}` +
+		`?api-version=${NETWORK_PUBLIC_IP_API_VERSION}`
+	);
+}
+
+function publicIpListArmPath(clients: AzureClients, resourceGroup: string) {
+	return (
+		`/subscriptions/${encodeURIComponent(clients.subscriptionId)}` +
+		`/resourceGroups/${encodeURIComponent(resourceGroup)}` +
+		`/providers/Microsoft.Network/publicIPAddresses` +
+		`?api-version=${NETWORK_PUBLIC_IP_API_VERSION}`
+	);
+}
+
+async function getPublicIpViaArm(
+	clients: AzureClients,
+	resourceGroup: string,
+	publicIpName: string
+): Promise<PublicIPAddress> {
+	const payload = (await sendArmRequest(clients.credential, clients.clientOptions, {
+		method: 'GET',
+		pathOrUrl: publicIpArmPath(clients, resourceGroup, publicIpName)
+	})) as ArmPublicIpResource;
+	return armPublicIpToModel(payload);
+}
+
+async function getPublicIpWithRawFallback(
+	clients: AzureClients,
+	resourceGroup: string,
+	publicIpName: string
+): Promise<PublicIPAddress> {
+	const pip = await clients.network.publicIPAddresses.get(resourceGroup, publicIpName);
+	if (publicIpAddressValue(pip) && publicIpIpConfigurationId(pip)) return pip;
+	const raw = await getPublicIpViaArm(clients, resourceGroup, publicIpName).catch(() => null);
+	return raw ? mergePublicIpModel(pip, raw) : pip;
+}
+
+async function listPublicIpsViaArm(clients: AzureClients, resourceGroup: string) {
+	const resources = await collectArmPages<ArmPublicIpResource>(
+		clients.credential,
+		clients.clientOptions,
+		publicIpListArmPath(clients, resourceGroup)
+	);
+	return resources.map(armPublicIpToModel);
 }
 
 function rememberPublicIp(ips: { publicIPv4: string; publicIPv6: string }, pip: PublicIPAddress) {
-	const address = pip.ipAddress ?? '';
+	const address = publicIpAddressValue(pip);
 	if (!address) return false;
 	if (isPublicIpResourceIPv6(pip)) {
 		if (!ips.publicIPv6) ips.publicIPv6 = address;
@@ -1721,7 +1834,7 @@ function publicIpReferencesNic(
 	pip: PublicIPAddress,
 	nics: { nicResourceGroup: string; nicName: string; nic: NetworkInterface }[]
 ) {
-	const ipConfigId = normalizeResourceToken(pip.ipConfiguration?.id ?? '');
+	const ipConfigId = normalizeResourceToken(publicIpIpConfigurationId(pip));
 	if (!ipConfigId) return false;
 	return nics.some(({ nicName, nic }) => {
 		const nicId = normalizeResourceToken(nic.id ?? '');
@@ -1764,24 +1877,28 @@ async function collectPublicIpsFromResourceGroup(
 	let associatedIPv6 = '';
 	let associatedIPv4Count = 0;
 	let associatedIPv6Count = 0;
+	const candidatesByKey = new Map<string, PublicIPAddress>();
 
-	for await (const listed of clients.network.publicIPAddresses.list(options.resourceGroup)) {
-		if (options.ips.publicIPv4 && options.ips.publicIPv6) break;
-		const pipName = listed.name ?? parseResourceName(listed.id ?? '');
-		let pip = listed;
-		if (pipName) {
-			pip = await clients.network.publicIPAddresses
-				.get(options.resourceGroup, pipName)
-				.catch(() => listed);
-		}
+	const rememberCandidate = (candidate: PublicIPAddress) => {
+		const key =
+			normalizeResourceToken(candidate.id ?? '') ||
+			normalizeResourceToken(candidate.name ?? '') ||
+			`anonymous-${candidatesByKey.size + 1}`;
+		const existing = candidatesByKey.get(key);
+		candidatesByKey.set(key, existing ? mergePublicIpModel(existing, candidate) : candidate);
+	};
+
+	const inspectPublicIp = async (candidate: PublicIPAddress) => {
+		const pipName = candidate.name ?? parseResourceName(candidate.id ?? '');
+		const pip = candidate;
 		const linkedToNic = publicIpReferencesNic(pip, options.nics);
 		const nameMatchesVm = publicIpNameMatchesVm(pip, options.vmName);
 		if (!linkedToNic && !nameMatchesVm) {
-			const address = pip.ipAddress ?? '';
+			const address = publicIpAddressValue(pip);
 			if (address) {
 				const associatedWithAnyNic =
-					Boolean(pip.ipConfiguration?.id) &&
-					normalizeResourceToken(pip.ipConfiguration?.id ?? '').includes('/networkinterfaces/');
+					Boolean(publicIpIpConfigurationId(pip)) &&
+					normalizeResourceToken(publicIpIpConfigurationId(pip)).includes('/networkinterfaces/');
 				if (isPublicIpResourceIPv6(pip)) {
 					fallbackIPv6 = address;
 					fallbackIPv6Count += 1;
@@ -1798,7 +1915,7 @@ async function collectPublicIpsFromResourceGroup(
 					}
 				}
 			}
-			continue;
+			return;
 		}
 		if (options.progress && pipName) {
 			await reportCreateVmProgress(
@@ -1814,6 +1931,25 @@ async function collectPublicIpsFromResourceGroup(
 			);
 		}
 		rememberPublicIp(options.ips, pip);
+	};
+
+	for await (const listed of clients.network.publicIPAddresses.list(options.resourceGroup)) {
+		const pipName = listed.name ?? parseResourceName(listed.id ?? '');
+		const pip =
+			pipName && (!publicIpAddressValue(listed) || !publicIpIpConfigurationId(listed))
+				? await getPublicIpWithRawFallback(clients, options.resourceGroup, pipName).catch(() => listed)
+				: listed;
+		rememberCandidate(pip);
+	}
+
+	const rawPublicIps = await listPublicIpsViaArm(clients, options.resourceGroup).catch(() => []);
+	for (const pip of rawPublicIps) {
+		rememberCandidate(pip);
+	}
+
+	for (const pip of candidatesByKey.values()) {
+		if (options.ips.publicIPv4 && options.ips.publicIPv6) break;
+		await inspectPublicIp(pip);
 	}
 
 	if (!options.ips.publicIPv4 && associatedIPv4Count === 1) options.ips.publicIPv4 = associatedIPv4;
@@ -3026,8 +3162,8 @@ async function waitForPublicIpAddress(
 	const attempts = Math.max(1, Math.min(options.attempts ?? 20, 60));
 	const delayMs = Math.max(500, options.delayMs ?? 1500);
 	const step = options.step ?? `public-ip-${(options.version ?? 'IPv4').toLowerCase()}`;
-	let pip = await clients.network.publicIPAddresses.get(resourceGroup, publicIpName);
-	for (let i = 0; i < attempts && !pip.ipAddress; i++) {
+	let pip = await getPublicIpWithRawFallback(clients, resourceGroup, publicIpName);
+	for (let i = 0; i < attempts && !publicIpAddressValue(pip); i++) {
 		await reportCreateVmProgress(
 			options.progress,
 			step,
@@ -3043,7 +3179,7 @@ async function waitForPublicIpAddress(
 			}
 		);
 		await sleep(delayMs);
-		pip = await clients.network.publicIPAddresses.get(resourceGroup, publicIpName);
+		pip = await getPublicIpWithRawFallback(clients, resourceGroup, publicIpName);
 	}
 	return pip;
 }
@@ -3122,8 +3258,13 @@ async function createPublicIp(
 			}));
 			throw state.error;
 		}
-		const pip = poller.getResult() ?? (await clients.network.publicIPAddresses.get(options.resourceGroup, options.name));
-		const ready = options.waitForAddress === true && !pip.ipAddress
+		const pollerResult =
+			poller.getResult() ?? (await clients.network.publicIPAddresses.get(options.resourceGroup, options.name));
+		const pip =
+			publicIpAddressValue(pollerResult) && publicIpIpConfigurationId(pollerResult)
+				? pollerResult
+				: await getPublicIpWithRawFallback(clients, options.resourceGroup, options.name);
+		const ready = options.waitForAddress === true && !publicIpAddressValue(pip)
 			? await waitForPublicIpAddress(clients, options.resourceGroup, options.name, {
 					attempts: options.version === 'IPv4' ? 30 : 20,
 					delayMs: 1500,
@@ -3139,7 +3280,7 @@ async function createPublicIp(
 		if (!ready.id) throw new Error(`Azure 未返回 ${options.version} 公网 IP 资源 ID`);
 		await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, withPublicIpDetail({
 			name: options.name,
-			ip: ready.ipAddress ?? '',
+			ip: publicIpAddressValue(ready),
 			ddosProtection: Boolean(options.ddosProtectionPlanId),
 			polls
 		}));
@@ -3228,7 +3369,7 @@ async function createMatchingIPv4PublicIp(
 				ddosProtectionPlanId: options.ddosProtectionPlanId,
 				progress: options.progress,
 				step: 'public-ipv4',
-				waitForAddress: true,
+				waitForAddress: Boolean(targetPrefix),
 				progressDetail: {
 					attempt,
 					maxAttempts,
@@ -3257,7 +3398,7 @@ async function createMatchingIPv4PublicIp(
 			await deletePublicIpByName(clients, options.resourceGroup, name).catch(() => undefined);
 			continue;
 		}
-		const address = pip.ipAddress ?? '';
+		const address = publicIpAddressValue(pip);
 		const matched = !targetPrefix || address.startsWith(targetPrefix);
 		if (matched) {
 			await reportCreateVmProgress(
@@ -3563,7 +3704,7 @@ async function rememberPublicIpFromConfig(
 	const pipName = parseResourceName(pipId);
 	const pipResourceGroup = parseResourceGroup(pipId);
 	if (!pipName || !pipResourceGroup) return;
-	const pip = await clients.network.publicIPAddresses.get(pipResourceGroup, pipName);
+	const pip = await getPublicIpWithRawFallback(clients, pipResourceGroup, pipName);
 	rememberPublicIp(ips, pip);
 }
 
@@ -3749,8 +3890,8 @@ async function waitForNicAttachedPublicIPv4(
 			if (!publicIpName || !publicIpResourceGroup) {
 				throw new Error('网卡尚未返回已绑定的 IPv4 公网 IP');
 			}
-			const pip = await clients.network.publicIPAddresses.get(publicIpResourceGroup, publicIpName);
-			const publicIPv4 = pip.ipAddress ?? '';
+			const pip = await getPublicIpWithRawFallback(clients, publicIpResourceGroup, publicIpName);
+			const publicIPv4 = publicIpAddressValue(pip);
 			if (publicIPv4) {
 				return {
 					publicIPv4,
@@ -3950,8 +4091,8 @@ export async function enableVmDdosProtection(
 			publicIpName,
 			resourceGroup: publicIpResourceGroup
 		});
-		const publicIp = await clients.network.publicIPAddresses.get(publicIpResourceGroup, publicIpName);
-		publicIPv4 = publicIp.ipAddress ?? '';
+		const publicIp = await getPublicIpWithRawFallback(clients, publicIpResourceGroup, publicIpName);
+		publicIPv4 = publicIpAddressValue(publicIp);
 		publicIp.ddosSettings = {
 			protectionMode: 'Enabled',
 			ddosProtectionPlan: { id: plan.id }
@@ -3961,7 +4102,7 @@ export async function enableVmDdosProtection(
 			publicIpName,
 			publicIp
 		);
-		publicIPv4 = updatedPublicIp.ipAddress ?? publicIPv4;
+		publicIPv4 = publicIpAddressValue(updatedPublicIp) || publicIPv4;
 		publicIPv4DdosEnabled = true;
 		await reportCreateVmProgress(progress, 'ddos-public-ip', 'success', '当前 IPv4 公网 IP 已启用 DDoS 保护模式', {
 			publicIpName,
@@ -4459,8 +4600,8 @@ async function createNetworkForVm(
 
 	await reportCreateVmProgress(options.progress, 'nic', 'running', '创建网卡并准备 VM 网络配置', {
 		nicName,
-		ipv4: ipv4.ipAddress ?? '',
-		ipv6: ipv6?.ipAddress ?? '',
+		ipv4: publicIpAddressValue(ipv4),
+		ipv6: ipv6 ? publicIpAddressValue(ipv6) : '',
 		acceleratedNetworking: Boolean(options.enableAcceleratedNetworking)
 	});
 	let nic: NetworkInterface;
@@ -4496,8 +4637,8 @@ async function createNetworkForVm(
 	});
 
 	const createdIps = {
-		publicIPv4: ipv4.ipAddress ?? '',
-		publicIPv6: ipv6?.ipAddress ?? ''
+		publicIPv4: publicIpAddressValue(ipv4),
+		publicIPv6: ipv6 ? publicIpAddressValue(ipv6) : ''
 	};
 	if (!createdIps.publicIPv4 || (ipv6?.id && !createdIps.publicIPv6)) {
 		const fromNic = await readPublicIpsFromNic(clients, {
@@ -4669,14 +4810,14 @@ export async function replaceVmPublicIPv4(
 	const oldPublicIpName = oldPublicIpId ? parseResourceName(oldPublicIpId) : '';
 	const oldPublicIpResourceGroup = oldPublicIpId ? parseResourceGroup(oldPublicIpId) : '';
 	const oldPublicIp = oldPublicIpName
-		? await clients.network.publicIPAddresses
-				.get(oldPublicIpResourceGroup, oldPublicIpName)
+		? await getPublicIpWithRawFallback(clients, oldPublicIpResourceGroup, oldPublicIpName)
 				.catch(() => null)
 		: null;
+	const oldPublicIPv4 = oldPublicIp ? publicIpAddressValue(oldPublicIp) : '';
 	await reportCreateVmProgress(progress, 'replace-ip-create', 'running', '创建新的 IPv4 公网 IP', {
 		resourceGroup: nicResourceGroup,
 		vmName,
-		oldPublicIPv4: oldPublicIp?.ipAddress ?? ''
+		oldPublicIPv4
 	});
 	const created = await createMatchingIPv4PublicIp(clients, {
 		resourceGroup: nicResourceGroup,
@@ -4718,15 +4859,16 @@ export async function replaceVmPublicIPv4(
 		progress,
 		step: 'replace-ip-complete'
 	});
+	const createdPublicIPv4 = publicIpAddressValue(created.pip);
 	await reportCreateVmProgress(progress, 'replace-ip-complete', 'success', 'IPv4 更换完成', {
-		oldPublicIPv4: oldPublicIp?.ipAddress ?? '',
-		publicIPv4: fresh.publicIPv4 || (created.pip.ipAddress ?? '')
+		oldPublicIPv4,
+		publicIPv4: fresh.publicIPv4 || createdPublicIPv4
 	});
 	return {
 		vmName,
 		resourceGroup,
-		publicIPv4: fresh.publicIPv4 || (created.pip.ipAddress ?? ''),
-		oldPublicIPv4: oldPublicIp?.ipAddress ?? '',
+		publicIPv4: fresh.publicIPv4 || createdPublicIPv4,
+		oldPublicIPv4,
 		publicIpName: fresh.publicIpName || parseResourceName(created.pip.id)
 	};
 }
@@ -4760,10 +4902,10 @@ export async function brushVmPublicIPv4Prefix(
 	const oldPublicIpName = oldPublicIpId ? parseResourceName(oldPublicIpId) : '';
 	const oldPublicIpResourceGroup = oldPublicIpId ? parseResourceGroup(oldPublicIpId) : '';
 	const oldPublicIp = oldPublicIpName
-		? await clients.network.publicIPAddresses
-				.get(oldPublicIpResourceGroup, oldPublicIpName)
+		? await getPublicIpWithRawFallback(clients, oldPublicIpResourceGroup, oldPublicIpName)
 				.catch(() => null)
 		: null;
+	const oldPublicIPv4 = oldPublicIp ? publicIpAddressValue(oldPublicIp) : '';
 	const created = await createMatchingIPv4PublicIp(clients, {
 		resourceGroup: nicResourceGroup,
 		location: vmLocation,
@@ -4815,8 +4957,9 @@ export async function brushVmPublicIPv4Prefix(
 		progress: options.progress,
 		step: 'brush-ip-complete'
 	});
+	const createdPublicIPv4 = publicIpAddressValue(created.pip);
 	await reportCreateVmProgress(options.progress, 'brush-ip-complete', 'success', '刷 IPv4 段完成', {
-		publicIPv4: fresh.publicIPv4 || (created.pip.ipAddress ?? ''),
+		publicIPv4: fresh.publicIPv4 || createdPublicIPv4,
 		targetPrefix,
 		attempts: created.attempts,
 		matched: created.matched
@@ -4824,8 +4967,8 @@ export async function brushVmPublicIPv4Prefix(
 	return {
 		vmName: options.vmName,
 		resourceGroup: options.resourceGroup,
-		publicIPv4: fresh.publicIPv4 || (created.pip.ipAddress ?? ''),
-		oldPublicIPv4: oldPublicIp?.ipAddress ?? '',
+		publicIPv4: fresh.publicIPv4 || createdPublicIPv4,
+		oldPublicIPv4,
 		publicIpName: fresh.publicIpName || parseResourceName(created.pip.id),
 		targetPrefix,
 		attempts: created.attempts,
