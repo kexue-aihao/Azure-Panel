@@ -1294,7 +1294,7 @@ health_check() {
 	sleep 2
 	if command -v curl >/dev/null 2>&1; then
 		for attempt in $(seq 1 "$max_attempts"); do
-			if curl -fsS --connect-timeout 3 --max-time 8 "$url" >/dev/null; then
+			if curl -fsS --connect-timeout 3 --max-time 8 "$url" >/dev/null 2>&1; then
 				log "健康检查通过 ✓"
 				return 0
 			fi

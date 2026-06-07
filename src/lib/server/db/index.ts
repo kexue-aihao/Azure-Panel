@@ -247,6 +247,11 @@ function readPositiveIntEnv(key: string, fallback: number) {
 	return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function readNonNegativeIntEnv(key: string, fallback: number) {
+	const value = Number(readEnv(key));
+	return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
 function compactSql(sql: string) {
 	return sql.replace(/\s+/g, ' ').trim().slice(0, 120);
 }
@@ -422,7 +427,7 @@ async function mysqlStartupPing(pool: Pool) {
 
 async function withMysqlSchemaLock<T>(pool: Pool, fn: () => Promise<T>): Promise<T> {
 	const lockName = readEnv('MYSQL_SCHEMA_LOCK_NAME') ?? 'azure-panel:schema:init';
-	const lockWaitSeconds = readPositiveIntEnv('MYSQL_SCHEMA_LOCK_TIMEOUT_SECONDS', 15);
+	const lockWaitSeconds = readNonNegativeIntEnv('MYSQL_SCHEMA_LOCK_TIMEOUT_SECONDS', 0);
 	let connection: PoolConnection | null = null;
 	let locked = false;
 
@@ -438,8 +443,8 @@ async function withMysqlSchemaLock<T>(pool: Pool, fn: () => Promise<T>): Promise
 		locked = Number(rows[0]?.locked ?? 0) === 1;
 		if (!locked) {
 			throw codedError(
-				`mysql-schema:lock failed: another process is still initializing schema after ${lockWaitSeconds} seconds`,
-				'MYSQL_SCHEMA_LOCK_TIMEOUT'
+				`mysql-schema:lock busy: another process is initializing schema`,
+				'MYSQL_SCHEMA_LOCK_BUSY'
 			);
 		}
 
@@ -507,6 +512,188 @@ async function mysqlInitQuery<T extends QueryResult = QueryResult>(
 
 function countFromRows(rows: RowDataPacket[]) {
 	return Number(rows[0]?.count ?? 0);
+}
+
+const MYSQL_SCHEMA_READY_COLUMNS: Record<string, string[]> = {
+	users: ['id', 'email', 'password_hash', 'role', 'disabled', 'created_at'],
+	proxy_profiles: [
+		'id',
+		'user_id',
+		'name',
+		'type',
+		'host',
+		'port',
+		'username_encrypted',
+		'password_encrypted',
+		'managed_core',
+		'share_link_encrypted',
+		'created_at'
+	],
+	azure_accounts: [
+		'id',
+		'user_id',
+		'name',
+		'tenant_id',
+		'client_id',
+		'client_secret_encrypted',
+		'subscription_id',
+		'proxy_profile_id',
+		'proxy_url_encrypted',
+		'vm_region_cache',
+		'vm_image_cache',
+		'vm_provider_cache',
+		'remark',
+		'created_at'
+	],
+	dns_configs: [
+		'id',
+		'user_id',
+		'name',
+		'base_url',
+		'uid',
+		'api_key_encrypted',
+		'username_encrypted',
+		'password_encrypted',
+		'enabled',
+		'created_at'
+	],
+	dns_record_bindings: [
+		'id',
+		'user_id',
+		'config_id',
+		'name',
+		'domain_id',
+		'domain_name',
+		'subdomain',
+		'record_type',
+		'line',
+		'ttl',
+		'weight',
+		'mx',
+		'remark',
+		'enabled',
+		'last_a_record_id',
+		'last_aaaa_record_id',
+		'last_ipv4',
+		'last_ipv6',
+		'last_synced_at',
+		'created_at'
+	],
+	notification_settings: [
+		'id',
+		'user_id',
+		'telegram_bot_token_encrypted',
+		'telegram_chat_id',
+		'telegram_group_chat_ids',
+		'enabled',
+		'subscription_check_interval_hours',
+		'last_subscription_checked_at',
+		'created_at'
+	],
+	subscription_notification_states: [
+		'id',
+		'user_id',
+		'account_id',
+		'subscription_id',
+		'display_name',
+		'last_state',
+		'last_notified_state',
+		'last_checked_at',
+		'last_notified_at',
+		'created_at'
+	],
+	workflow_policies: [
+		'id',
+		'user_id',
+		'account_id',
+		'name',
+		'enabled',
+		'resource_group',
+		'location',
+		'vm_names_json',
+		'min_running_count',
+		'replenish_target_count',
+		'auto_start',
+		'auto_create',
+		'vm_size',
+		'image_reference',
+		'name_prefix',
+		'admin_username',
+		'admin_password_encrypted',
+		'userdata_encrypted',
+		'enable_ipv6',
+		'ip_prefix',
+		'ip_brush_max_attempts',
+		'check_interval_seconds',
+		'status_check_enabled',
+		'status_trigger_states',
+		'dns_binding_id',
+		'last_account_status',
+		'last_status_checked_at',
+		'last_run_at',
+		'created_at'
+	],
+	workflow_logs: ['id', 'policy_id', 'action', 'status', 'message', 'created_at'],
+	execution_logs: [
+		'id',
+		'user_id',
+		'account_id',
+		'source',
+		'action',
+		'status',
+		'message',
+		'resource_group',
+		'vm_name',
+		'created_at'
+	]
+};
+
+function sqlPlaceholders(count: number) {
+	return Array.from({ length: count }, () => '?').join(', ');
+}
+
+async function isMysqlSchemaReady(pool: Pool) {
+	const tableNames = Object.keys(MYSQL_SCHEMA_READY_COLUMNS);
+	const tablePlaceholders = sqlPlaceholders(tableNames.length);
+	const [tables] = await mysqlInitQuery<RowDataPacket[]>(
+		pool,
+		`SELECT TABLE_NAME AS table_name
+		 FROM information_schema.TABLES
+		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (${tablePlaceholders})`,
+		tableNames,
+		'mysql-schema:ready-check:tables'
+	);
+	const existingTables = new Set(tables.map((row) => String(row.table_name)));
+	if (tableNames.some((table) => !existingTables.has(table))) return false;
+
+	const [columns] = await mysqlInitQuery<RowDataPacket[]>(
+		pool,
+		`SELECT TABLE_NAME AS table_name, COLUMN_NAME AS column_name
+		 FROM information_schema.COLUMNS
+		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (${tablePlaceholders})`,
+		tableNames,
+		'mysql-schema:ready-check:columns'
+	);
+	const existingColumns = new Set(
+		columns.map((row) => `${String(row.table_name)}.${String(row.column_name)}`)
+	);
+	return Object.entries(MYSQL_SCHEMA_READY_COLUMNS).every(([table, columnNames]) =>
+		columnNames.every((column) => existingColumns.has(`${table}.${column}`))
+	);
+}
+
+async function waitForMysqlSchemaReady(pool: Pool) {
+	const timeoutMs = readPositiveIntEnv('MYSQL_SCHEMA_READY_WAIT_MS', 45_000);
+	const intervalMs = readPositiveIntEnv('MYSQL_SCHEMA_READY_INTERVAL_MS', 1_000);
+	const deadline = Date.now() + timeoutMs;
+
+	while (Date.now() < deadline) {
+		markStartupStep('mysql-schema:wait-ready');
+		if (await isMysqlSchemaReady(pool)) return true;
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
+	}
+
+	return false;
 }
 
 async function mysqlColumnExists(pool: Pool, table: string, column: string) {
@@ -611,7 +798,27 @@ function ensureSqliteAdminUsers(sqlite: Database.Database) {
 
 async function ensureMysqlSchema(pool: Pool) {
 	await mysqlStartupPing(pool);
-	await withMysqlSchemaLock(pool, () => ensureMysqlSchemaAfterLock(pool));
+	const schemaReadyBeforeLock = await isMysqlSchemaReady(pool);
+
+	try {
+		await withMysqlSchemaLock(pool, async () => {
+			await ensureMysqlSchemaAfterLock(pool);
+		});
+		markStartupStep('mysql-schema:ready');
+		return;
+	} catch (err) {
+		if ((err as { code?: string }).code === 'MYSQL_SCHEMA_LOCK_BUSY') {
+			if (schemaReadyBeforeLock || (await waitForMysqlSchemaReady(pool))) {
+				markStartupStep('mysql-schema:ready');
+				return;
+			}
+			throw codedError(
+				'mysql-schema:lock busy and schema did not become ready; an old startup process may still be holding the schema initialization lock',
+				'MYSQL_SCHEMA_LOCK_BUSY'
+			);
+		}
+		throw err;
+	}
 }
 
 async function ensureMysqlSchemaAfterLock(pool: Pool) {
@@ -837,8 +1044,11 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 		pool.on('connection', setMysqlSessionTimezone);
 		mysqlDb = drizzleMysql(pool, { schema: mysqlSchema, mode: 'default' }) as unknown as MysqlDb;
 		try {
-			await mysqlStartupPing(pool);
-			if (ensureSchema) await withMysqlSchemaLock(pool, () => ensureMysqlSchemaAfterLock(pool));
+			if (ensureSchema) {
+				await ensureMysqlSchema(pool);
+			} else {
+				await mysqlStartupPing(pool);
+			}
 			console.log(`[db] Connected to MySQL: ${user}@${host}:${port}/${database}`);
 			return;
 		} catch (err) {
