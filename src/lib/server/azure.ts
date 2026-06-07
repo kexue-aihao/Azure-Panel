@@ -3386,7 +3386,23 @@ async function createPublicIp(
 		}));
 		return ready;
 	} catch (err) {
-		const message = formatAzureError(err);
+		const message = enrichPublicIpCreateFailureMessage(options.version, formatAzureError(err));
+		const recovered = await recoverPublicIpAfterCreateFailure(clients, options);
+		if (recovered) {
+			await reportCreateVmProgress(
+				options.progress,
+				step,
+				'success',
+				`${options.version} Public IP recovered after Azure LRO failure`,
+				withPublicIpDetail({
+					name: options.name,
+					ip: publicIpAddressValue(recovered),
+					recoveredAfterLroFailure: true
+				})
+			);
+			return recovered;
+		}
+		await deletePublicIpByName(clients, options.resourceGroup, options.name).catch(() => undefined);
 		await reportCreateVmProgress(options.progress, step, 'error', `${options.version} 公网 IP 创建失败`, withPublicIpDetail({
 			name: options.name,
 			version: options.version,
@@ -3394,6 +3410,34 @@ async function createPublicIp(
 		}));
 		throw new Error(`${options.version} 公网 IP 创建失败 ${options.name}: ${message}`);
 	}
+}
+
+async function recoverPublicIpAfterCreateFailure(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		name: string;
+		version: 'IPv4' | 'IPv6';
+		waitForAddress?: boolean;
+	}
+) {
+	const pip = await getPublicIpWithRawFallback(clients, options.resourceGroup, options.name).catch(() => null);
+	if (!pip?.id) return null;
+	if (String(pip.provisioningState ?? '').toLowerCase() === 'failed') return null;
+	const versionMatches =
+		options.version === 'IPv6' ? isPublicIpResourceIPv6(pip) : !isPublicIpResourceIPv6(pip);
+	if (!versionMatches) return null;
+	if (options.waitForAddress && !publicIpAddressValue(pip)) return null;
+	return pip;
+}
+
+function enrichPublicIpCreateFailureMessage(version: 'IPv4' | 'IPv6', message: string) {
+	if (!/long-running operation has failed|operation failed|failed/i.test(message)) return message;
+	return (
+		`${message}. Azure changes a VM public IP by creating an available Public IP resource first, ` +
+		`then updating the NIC ipConfiguration publicIPAddress reference. This failed before NIC binding while creating the new ${version} Public IP. ` +
+		`Common causes: regional Public IP capacity, Public IP quota, subscription/policy restrictions, or Microsoft.Network provider issues.`
+	);
 }
 
 async function deletePublicIpById(clients: AzureClients, publicIpId?: string) {
@@ -4143,6 +4187,40 @@ async function detachOldPublicIpOrSwapDirectly(
 		prefix: 'replace-ip' | 'brush-ip';
 	}
 ): Promise<'detached' | 'swapped' | 'none'> {
+	await reportCreateVmProgress(
+		options.progress,
+		`${options.prefix}-swap`,
+		'running',
+		'Replace NIC IPv4 public IP binding',
+		{
+			nicName: options.nicName,
+			oldPublicIpName: options.oldPublicIpName,
+			oldPublicIPv4: options.oldPublicIPv4,
+			publicIpName: parseResourceName(options.newPublicIpId)
+		}
+	);
+	await attachPublicIpToNic(clients, {
+		nicResourceGroup: options.nicResourceGroup,
+		nicName: options.nicName,
+		nic: options.nic,
+		ipConfig: options.ipConfig,
+		publicIpId: options.newPublicIpId,
+		progress: options.progress,
+		step: `${options.prefix}-swap`
+	});
+	await reportCreateVmProgress(
+		options.progress,
+		`${options.prefix}-swap`,
+		'success',
+		'NIC IPv4 public IP binding replaced',
+		{
+			nicName: options.nicName,
+			oldPublicIpName: options.oldPublicIpName,
+			publicIpName: parseResourceName(options.newPublicIpId)
+		}
+	);
+	return options.oldPublicIpId ? 'swapped' : 'none';
+
 	if (!options.oldPublicIpId) return 'none';
 
 	await reportCreateVmProgress(
