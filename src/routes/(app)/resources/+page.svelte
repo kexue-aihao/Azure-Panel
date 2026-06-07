@@ -534,17 +534,19 @@
 		selectedAiAccount = null;
 		aiKeys = null;
 		deployments = [];
+		providers = [];
 		resetResourceBrowser();
 		await loadSubscriptions();
-		await Promise.all([loadProviders(), loadAiAccounts()]);
+		await loadAiAccounts();
 	}
 
 	async function changeSubscription() {
 		selectedAiAccount = null;
 		aiKeys = null;
 		deployments = [];
+		providers = [];
 		resetResourceBrowser();
-		await Promise.all([loadProviders(), loadAiAccounts()]);
+		await loadAiAccounts();
 	}
 
 	async function copy(value: string) {

@@ -55,6 +55,11 @@ function isProviderRegistrationPending(provider: AzureProviderStatus) {
 	return providerState(provider) === 'registering';
 }
 
+function isProviderReadAuthorizationError(provider: AzureProviderStatus) {
+	const state = provider.registrationState || '';
+	return /AuthorizationFailed/i.test(state) && /providers\/read/i.test(state);
+}
+
 function normalizeAzureProxy(proxy: ProxyRuntimeConfig | string | null): ProxyRuntimeConfig | null {
 	if (!proxy) return null;
 	return typeof proxy === 'string' ? parseProxyUrl(proxy) : proxy;
@@ -78,8 +83,12 @@ async function autoRegisterMissingProviders(
 	try {
 		const clients = createAzureClients(account, normalizeAzureProxy(proxy));
 		const statuses = await listProviderStatuses(clients, DEFAULT_PROVIDER_NAMESPACES);
-		const missing = statuses.filter((provider) => !isProviderRegistered(provider));
-		if (missing.length === 0) {
+		const providerReadBlocked =
+			statuses.length > 0 && statuses.every((provider) => isProviderReadAuthorizationError(provider));
+		const missingNamespaces = providerReadBlocked
+			? DEFAULT_PROVIDER_NAMESPACES
+			: statuses.filter((provider) => !isProviderRegistered(provider)).map((provider) => provider.namespace);
+		if (missingNamespaces.length === 0) {
 			return {
 				...baseResult,
 				registered: statuses.length
@@ -88,7 +97,9 @@ async function autoRegisterMissingProviders(
 
 		const registeredProviders = await registerResourceProviders(
 			clients,
-			missing.map((provider) => provider.namespace)
+			missingNamespaces,
+			undefined,
+			{ skipStatusCheck: true }
 		);
 		const registered = registeredProviders.filter(isProviderRegistered).length;
 		const pending = registeredProviders.filter(isProviderRegistrationPending).length;
@@ -96,11 +107,13 @@ async function autoRegisterMissingProviders(
 		return {
 			checked: true,
 			attempted: true,
-			missing: missing.map((provider) => provider.namespace),
+			missing: missingNamespaces,
 			registered,
 			pending,
 			failed,
-			message: `已自动处理 ${missing.length} 个缺失 Provider，已注册 ${registered} 个，等待生效 ${pending} 个，失败 ${failed} 个`,
+			message: providerReadBlocked
+				? `Provider 状态读取权限不足，已改为直接提交 ${missingNamespaces.length} 个常用 Provider 注册请求：已注册 ${registered} 个，等待生效 ${pending} 个，失败 ${failed} 个`
+				: `已自动处理 ${missingNamespaces.length} 个缺失 Provider，已注册 ${registered} 个，等待生效 ${pending} 个，失败 ${failed} 个`,
 			error: failed ? registeredProviders.filter((provider) => !isProviderRegistered(provider) && !isProviderRegistrationPending(provider)).map((provider) => `${provider.namespace}: ${provider.registrationState}`).join('；') : ''
 		};
 	} catch (err) {

@@ -41,7 +41,9 @@ async function registerProvidersWithCache(options: {
 		})
 	);
 
-	const providers = await registerResourceProviders(clients, options.namespaces, options.progress);
+	const providers = await registerResourceProviders(clients, options.namespaces, options.progress, {
+		skipStatusCheck: true
+	});
 	if (canCacheProviderStatuses(providers)) {
 		await options.progress?.(
 			operationProgressEvent('provider-cache', 'running', '正在写入 Provider 状态缓存')

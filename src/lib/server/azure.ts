@@ -1895,7 +1895,8 @@ export async function listProviderStatuses(
 export async function registerResourceProviders(
 	clients: AzureClients,
 	namespaces = DEFAULT_PROVIDER_NAMESPACES,
-	progress?: CreateVmProgressReporter
+	progress?: CreateVmProgressReporter,
+	options: { skipStatusCheck?: boolean } = {}
 ): Promise<AzureProviderStatus[]> {
 	const statuses: AzureProviderStatus[] = [];
 	for (const [index, namespace] of namespaces.entries()) {
@@ -1906,8 +1907,19 @@ export async function registerResourceProviders(
 			total: namespaces.length
 		};
 		try {
-			await reportCreateVmProgress(progress, `${step}-check`, 'running', `检查 ${namespace} 注册状态`, detail);
-			const provider = await clients.resources.providers.get(namespace).catch(() => null);
+			let provider: Provider | null = null;
+			if (options.skipStatusCheck) {
+				await reportCreateVmProgress(
+					progress,
+					`${step}-check`,
+					'info',
+					`跳过 ${namespace} 状态读取，直接提交注册请求`,
+					detail
+				);
+			} else {
+				await reportCreateVmProgress(progress, `${step}-check`, 'running', `检查 ${namespace} 注册状态`, detail);
+				provider = await clients.resources.providers.get(namespace).catch(() => null);
+			}
 			if (provider?.registrationState?.toLowerCase() === 'registered') {
 				const status = providerToStatus(provider, namespace);
 				statuses.push(status);
