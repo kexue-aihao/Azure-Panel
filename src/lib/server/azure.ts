@@ -1895,18 +1895,21 @@ export async function listVirtualMachines(
 
 	for await (const vm of iterator) {
 		const rg = parseResourceGroup(vm.id ?? '');
+		const fullVm = vm.name
+			? await clients.compute.virtualMachines.get(rg, vm.name).catch(() => vm)
+			: vm;
 		const view = await clients.compute.virtualMachines.instanceView(rg, vm.name!);
 		const power =
 			view.statuses?.find((s) => s.code?.startsWith('PowerState/'))?.code?.replace('PowerState/', '') ??
 			'unknown';
-		const publicIps = await collectPublicIps(clients, vm, rg);
+		const publicIps = await collectPublicIps(clients, fullVm, rg);
 		items.push({
-			name: vm.name ?? '',
+			name: fullVm.name ?? vm.name ?? '',
 			resourceGroup: rg,
-			location: vm.location ?? '',
-			vmSize: vm.hardwareProfile?.vmSize ?? '',
+			location: fullVm.location ?? vm.location ?? '',
+			vmSize: fullVm.hardwareProfile?.vmSize ?? vm.hardwareProfile?.vmSize ?? '',
 			powerState: power,
-			provisioningState: vm.provisioningState ?? '',
+			provisioningState: fullVm.provisioningState ?? vm.provisioningState ?? '',
 			publicIPv4: publicIps.publicIPv4,
 			publicIPv6: publicIps.publicIPv6
 		});
@@ -3421,6 +3424,23 @@ function pickNicIPv4ConfigFromList(
 	);
 }
 
+function mergeNicIpConfig(
+	current: NetworkInterfaceIPConfiguration | undefined,
+	incoming: NetworkInterfaceIPConfiguration
+): NetworkInterfaceIPConfiguration {
+	if (!current) return incoming;
+	return {
+		...current,
+		...incoming,
+		subnet: incoming.subnet?.id ? incoming.subnet : current.subnet,
+		publicIPAddress: incoming.publicIPAddress?.id ? incoming.publicIPAddress : current.publicIPAddress,
+		privateIPAddress: incoming.privateIPAddress ?? current.privateIPAddress,
+		privateIPAddressVersion: incoming.privateIPAddressVersion ?? current.privateIPAddressVersion,
+		privateIPAllocationMethod: incoming.privateIPAllocationMethod ?? current.privateIPAllocationMethod,
+		primary: incoming.primary ?? current.primary
+	};
+}
+
 async function loadNetworkInterfaceIpConfigurations(
 	clients: AzureClients,
 	nicResourceGroup: string,
@@ -3437,7 +3457,7 @@ async function loadNetworkInterfaceIpConfigurations(
 	if (options.forceList || byName.size === 0 || !pickNicIPv4ConfigFromList([...byName.values()])) {
 		for await (const config of clients.network.networkInterfaceIPConfigurations.list(nicResourceGroup, nicName)) {
 			const key = config.name || `config-${byName.size + 1}`;
-			byName.set(key, config);
+			byName.set(key, mergeNicIpConfig(byName.get(key), config));
 		}
 	}
 
@@ -4595,13 +4615,19 @@ export async function createVmAdvanced(
 	await reportCreateVmProgress(options.progress, 'vm', 'success', 'Azure VM 实例已创建', {
 		vmName
 	});
+	let refreshedIps: VmPublicIpRefreshResult | null = null;
+	try {
+		refreshedIps = await refreshVmPublicIps(clients, resourceGroup, vmName);
+	} catch {
+		// Public IP assignment can lag behind VM creation; listing/refresh actions can read it later.
+	}
 
 	const result = {
 		name: vmName,
 		resourceGroup,
 		location,
-		publicIPv4: network.publicIPv4,
-		publicIPv6: network.publicIPv6,
+		publicIPv4: refreshedIps?.publicIPv4 || network.publicIPv4,
+		publicIPv6: refreshedIps?.publicIPv6 || network.publicIPv6,
 		ipBrushAttempts: network.ipBrushAttempts,
 		ipBrushMatched: network.ipBrushMatched
 	};

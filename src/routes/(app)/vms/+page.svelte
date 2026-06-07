@@ -260,6 +260,18 @@
 	let fixedProxies = $derived(proxies.filter((proxy) => proxy.source === 'fixed'));
 	let clientIpProxy = $derived(proxies.find((proxy) => proxy.source === 'client_ip') ?? null);
 	let selectedAccount = $derived(accounts.find((account) => account.id === accountId) ?? null);
+	let createReady = $derived(
+		Boolean(
+			accountId &&
+				!createLoading &&
+				!regionLoading &&
+				!sizeLoading &&
+				!imageLoading &&
+				regions.some((region) => region.name === createForm.location) &&
+				vmSizes.some((size) => size.name === createForm.vm_size) &&
+				vmImages.some((image) => image.imageReference === createForm.image_reference)
+		)
+	);
 
 	function syncProxySelection() {
 		if (proxyMode !== 'profile') {
@@ -863,6 +875,7 @@
 				location = regions[0].name;
 			}
 			syncCreateLocation();
+			regionLoading = false;
 			await loadRegionDetails(refresh);
 		} catch (err) {
 			regions = [];
@@ -1731,9 +1744,15 @@
 		<button
 			class="btn-primary"
 			type="submit"
-			disabled={createLoading}
+			disabled={!createReady}
 		>
-			{createLoading ? '创建中...' : '创建 VM'}
+			{createLoading
+				? '创建中...'
+				: regionLoading
+					? '识别区域中...'
+					: sizeLoading || imageLoading
+						? '加载规格/系统中...'
+						: '创建 VM'}
 		</button>
 		{#if createProgress.length && !createProgressDialogOpen}
 			<div class="rounded-xl border border-border bg-background p-3">
