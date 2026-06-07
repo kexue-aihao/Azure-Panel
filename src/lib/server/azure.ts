@@ -3609,69 +3609,6 @@ async function createNetworkInterfaceWithRetry(
 	throw new Error(`网卡创建失败 ${options.nicName}: ${lastError || 'Azure 未返回创建结果'}`);
 }
 
-async function waitForNicPublicIps(
-	clients: AzureClients,
-	options: {
-		resourceGroup: string;
-		vmName: string;
-		nicResourceGroup: string;
-		nicName: string;
-		nic: NetworkInterface;
-		requireIpv6: boolean;
-		progress?: CreateVmProgressReporter;
-	}
-): Promise<{ nic: NetworkInterface; publicIPv4: string; publicIPv6: string }> {
-	let latestNic = options.nic;
-	let lastError = '';
-	for (let attempt = 1; attempt <= 15; attempt++) {
-		try {
-			latestNic = await clients.network.networkInterfaces.get(options.nicResourceGroup, options.nicName);
-			const { ips, configs } = await readPublicIpsFromNic(clients, {
-				nicResourceGroup: options.nicResourceGroup,
-				nicName: options.nicName,
-				nic: latestNic
-			});
-			if (!ips.publicIPv4 || (options.requireIpv6 && !ips.publicIPv6)) {
-				await collectPublicIpsFromResourceGroup(clients, {
-					resourceGroup: options.resourceGroup,
-					vmName: options.vmName,
-					nics: [{ nicResourceGroup: options.nicResourceGroup, nicName: options.nicName, nic: latestNic }],
-					ips,
-					progress: options.progress,
-					progressStep: 'nic-public-ip'
-				}).catch(() => undefined);
-			}
-			const hasIpv4Config = configs.some((config) => isNicIPv4Config(config) && config.publicIPAddress?.id);
-			const hasIpv6Config = configs.some((config) => isNicIPv6Config(config) && config.publicIPAddress?.id);
-			if (ips.publicIPv4 && (!options.requireIpv6 || ips.publicIPv6)) {
-				await reportCreateVmProgress(options.progress, 'nic-public-ip', 'success', '网卡公网 IP 绑定已确认', {
-					nicName: options.nicName,
-					publicIPv4: ips.publicIPv4,
-					publicIPv6: ips.publicIPv6 || '-',
-					hasIpv4Config,
-					hasIpv6Config
-				});
-				return { nic: latestNic, publicIPv4: ips.publicIPv4, publicIPv6: ips.publicIPv6 };
-			}
-			lastError =
-				`公网 IP 尚未完整返回: IPv4=${ips.publicIPv4 || '-'} IPv6=${ips.publicIPv6 || '-'} ` +
-				`IPv4Config=${hasIpv4Config ? 'yes' : 'no'} IPv6Config=${hasIpv6Config ? 'yes' : 'no'}`;
-		} catch (err) {
-			lastError = formatAzureError(err);
-			if (!isTransientAzureReadError(err) && attempt >= 2) throw err;
-		}
-		await reportCreateVmProgress(options.progress, 'nic-public-ip', 'info', `等待网卡返回公网 IP 绑定 ${attempt}/15`, {
-			nicName: options.nicName,
-			requireIpv6: options.requireIpv6,
-			error: lastError.length > 800 ? `${lastError.slice(0, 800)}...` : lastError
-		});
-		await sleep(3000);
-	}
-	throw new Error(
-		`网卡公网 IP 绑定确认失败 ${options.nicName}: ${lastError || 'Azure 未返回 IPv4/IPv6 公网 IP'}`
-	);
-}
-
 async function findVmNetworkInterface(
 	clients: AzureClients,
 	resourceGroup: string,
@@ -4538,34 +4475,26 @@ async function createNetworkForVm(
 		acceleratedNetworking: Boolean(nic.enableAcceleratedNetworking)
 	});
 
-	const confirmedNetwork = await waitForNicPublicIps(clients, {
-		resourceGroup: options.resourceGroup,
-		vmName: options.vmName,
-		nicResourceGroup: options.resourceGroup,
-		nicName,
-		nic,
-		requireIpv6: Boolean(ipv6?.id),
-		progress: options.progress
-	});
-	nic = confirmedNetwork.nic;
 	const createdIps = {
-		publicIPv4: confirmedNetwork.publicIPv4,
-		publicIPv6: confirmedNetwork.publicIPv6
+		publicIPv4: ipv4.ipAddress ?? '',
+		publicIPv6: ipv6?.ipAddress ?? ''
 	};
-	if (createdIps.publicIPv4) {
-		await reportCreateVmProgress(
-			options.progress,
-			'public-ipv4',
-			'success',
-			`IPv4 ${createdIps.publicIPv4} 已确认为最终使用地址`,
-			{
-				ip: createdIps.publicIPv4,
-				publicIpName: parseResourceName(ipv4.id),
-				matched: false,
-				kept: true,
-				deleted: false
-			}
-		);
+	if (!createdIps.publicIPv4 || (ipv6?.id && !createdIps.publicIPv6)) {
+		const fromNic = await readPublicIpsFromNic(clients, {
+			nicResourceGroup: options.resourceGroup,
+			nicName,
+			nic
+		}).catch(() => null);
+		if (fromNic?.ips.publicIPv4) createdIps.publicIPv4 = fromNic.ips.publicIPv4;
+		if (fromNic?.ips.publicIPv6) createdIps.publicIPv6 = fromNic.ips.publicIPv6;
+	}
+	if (!createdIps.publicIPv4 || (ipv6?.id && !createdIps.publicIPv6)) {
+		await collectPublicIpsFromResourceGroup(clients, {
+			resourceGroup: options.resourceGroup,
+			vmName: options.vmName,
+			nics: [{ nicResourceGroup: options.resourceGroup, nicName, nic }],
+			ips: createdIps
+		}).catch(() => undefined);
 	}
 
 	return {
