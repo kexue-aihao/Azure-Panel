@@ -37,7 +37,7 @@ export const POST: RequestHandler = async (event) => {
 		userdataEncrypted: encryptSecret(String(body.userdata ?? '')),
 		enableIpv6: Boolean(body.enable_ipv6),
 		ipPrefix: String(body.ip_prefix ?? ''),
-		ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 30),
+		ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 10),
 		checkIntervalSeconds: 60,
 		statusCheckEnabled: body.status_check_enabled !== false,
 		statusTriggerStates: DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES,

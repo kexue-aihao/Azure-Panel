@@ -3927,12 +3927,31 @@ async function createNetworkForVm(
 		progress: options.progress
 	});
 
+	const targetIPv4Prefix = normalizeCreateIpPrefix(options.ipPrefix);
+	const ipv4MaxAttempts = normalizeAttempts(options.ipBrushMaxAttempts, 10);
 	await reportCreateVmProgress(
 		options.progress,
 		'public-ipv4',
-		'info',
-		'创建 VM 前不预创建 IPv4 公网 IP，先使用私网网卡开机，VM 成功后再刷 IPv4 并绑定'
+		'running',
+		`创建 VM 前先刷 IPv4 前缀 ${targetIPv4Prefix}，最多 ${ipv4MaxAttempts} 次`,
+		{
+			targetPrefix: targetIPv4Prefix,
+			maxAttempts: ipv4MaxAttempts
+		}
 	);
+	const ipv4 = await createMatchingIPv4PublicIp(clients, {
+		resourceGroup: options.resourceGroup,
+		location: options.location,
+		vmName: options.vmName,
+		targetPrefix: targetIPv4Prefix,
+		maxAttempts: ipv4MaxAttempts,
+		nameSalt: String(Date.now()),
+		ddosProtectionPlanId: ddosPlan?.id,
+		fallbackToLastOnMiss: true,
+		progress: options.progress
+	});
+	if (!ipv4.pip.id) throw new Error('IPv4 公网 IP 创建失败');
+
 	let ipv6: PublicIPAddress | null = null;
 	if (options.enableIpv6) {
 		try {
@@ -3998,7 +4017,8 @@ async function createNetworkForVm(
 			primary: true,
 			subnet: { id: subnetId },
 			privateIPAllocationMethod: 'Dynamic',
-			privateIPAddressVersion: 'IPv4'
+			privateIPAddressVersion: 'IPv4',
+			publicIPAddress: { id: ipv4.pip.id }
 		}
 	];
 	if (ipv6?.id) {
@@ -4014,7 +4034,7 @@ async function createNetworkForVm(
 
 	await reportCreateVmProgress(options.progress, 'nic', 'running', '创建网卡并准备 VM 网络配置', {
 		nicName,
-		ipv4: '',
+		ipv4: ipv4.pip.ipAddress ?? '',
 		ipv6: ipv6?.ipAddress ?? ''
 	});
 	let nic: NetworkInterface;
@@ -4033,7 +4053,7 @@ async function createNetworkForVm(
 		await reportCreateVmProgress(options.progress, 'nic', 'error', '网卡创建失败', {
 			nicName,
 			subnetId,
-			ipv4PublicIpId: '',
+			ipv4PublicIpId: ipv4.pip.id,
 			ipv6PublicIpId: ipv6?.id ?? '',
 			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
 		});
@@ -4048,10 +4068,10 @@ async function createNetworkForVm(
 
 	return {
 		nic,
-		publicIPv4: '',
+		publicIPv4: ipv4.pip.ipAddress ?? '',
 		publicIPv6: ipv6?.ipAddress ?? '',
-		ipBrushAttempts: 0,
-		ipBrushMatched: false
+		ipBrushAttempts: ipv4.attempts,
+		ipBrushMatched: ipv4.matched
 	};
 }
 
@@ -4146,65 +4166,14 @@ export async function createVmAdvanced(
 		vmName
 	});
 
-	let publicIPv4 = network.publicIPv4;
-	let ipBrushAttempts = network.ipBrushAttempts;
-	let ipBrushMatched = network.ipBrushMatched;
-	const postCreateIpPrefix = normalizeCreateIpPrefix(options.ipPrefix);
-	const postCreateIpBrushMaxAttempts = normalizeAttempts(options.ipBrushMaxAttempts);
-	await reportCreateVmProgress(
-		options.progress,
-		'post-create-ip-brush',
-		'running',
-		`VM 已创建，开始后置刷 IPv4 前缀 ${postCreateIpPrefix}`,
-		{
-			vmName,
-			targetPrefix: postCreateIpPrefix,
-			maxAttempts: postCreateIpBrushMaxAttempts,
-			currentIPv4: publicIPv4
-		}
-	);
-	try {
-		const brushed = await brushVmPublicIPv4Prefix(clients, {
-			resourceGroup,
-			vmName,
-			ipPrefix: postCreateIpPrefix,
-			maxAttempts: postCreateIpBrushMaxAttempts,
-			progress: options.progress
-		});
-		publicIPv4 = brushed.publicIPv4 || publicIPv4;
-		ipBrushAttempts = brushed.attempts;
-		ipBrushMatched = brushed.matched;
-		await reportCreateVmProgress(options.progress, 'post-create-ip-brush', 'success', '后置刷 IPv4 已完成', {
-			vmName,
-			publicIPv4,
-			targetPrefix: postCreateIpPrefix,
-			attempts: ipBrushAttempts,
-			matched: ipBrushMatched
-		});
-	} catch (err) {
-		const message = formatAzureError(err);
-		await reportCreateVmProgress(
-			options.progress,
-			'post-create-ip-brush',
-			'info',
-			'后置刷 IPv4 未完成，保留当前已创建 VM 和当前公网 IP 继续',
-			{
-				vmName,
-				publicIPv4,
-				targetPrefix: postCreateIpPrefix,
-				error: message.length > 800 ? `${message.slice(0, 800)}...` : message
-			}
-		);
-	}
-
 	const result = {
 		name: vmName,
 		resourceGroup,
 		location,
-		publicIPv4,
+		publicIPv4: network.publicIPv4,
 		publicIPv6: network.publicIPv6,
-		ipBrushAttempts,
-		ipBrushMatched
+		ipBrushAttempts: network.ipBrushAttempts,
+		ipBrushMatched: network.ipBrushMatched
 	};
 	await reportCreateVmProgress(options.progress, 'complete', 'success', '创建流程完成', {
 		vmName,

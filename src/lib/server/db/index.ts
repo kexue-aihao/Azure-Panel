@@ -168,7 +168,7 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		userdata_encrypted text NOT NULL,
 		enable_ipv6 tinyint(1) NOT NULL DEFAULT 0,
 		ip_prefix varchar(32) NOT NULL DEFAULT '',
-		ip_brush_max_attempts int NOT NULL DEFAULT 30,
+		ip_brush_max_attempts int NOT NULL DEFAULT 10,
 		check_interval_seconds int NOT NULL DEFAULT 60,
 		status_check_enabled tinyint(1) NOT NULL DEFAULT 1,
 		status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled',
@@ -971,7 +971,7 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 		pool,
 		'workflow_policies',
 		'ip_brush_max_attempts',
-		'ip_brush_max_attempts int NOT NULL DEFAULT 30'
+		'ip_brush_max_attempts int NOT NULL DEFAULT 10'
 	);
 	await addMysqlColumnIfMissing(
 		pool,
@@ -1267,7 +1267,7 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 			userdata_encrypted TEXT NOT NULL DEFAULT '',
 			enable_ipv6 INTEGER NOT NULL DEFAULT 0,
 			ip_prefix TEXT NOT NULL DEFAULT '',
-			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30,
+			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 10,
 			check_interval_seconds INTEGER NOT NULL DEFAULT 60,
 			status_check_enabled INTEGER NOT NULL DEFAULT 1,
 			status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned,disabled',
@@ -1369,7 +1369,7 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	}
 	if (!workflowColumns.some((column) => column.name === 'ip_brush_max_attempts')) {
 		sqlite.exec(
-			'ALTER TABLE workflow_policies ADD COLUMN ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30'
+			'ALTER TABLE workflow_policies ADD COLUMN ip_brush_max_attempts INTEGER NOT NULL DEFAULT 10'
 		);
 	}
 	if (!workflowColumns.some((column) => column.name === 'check_interval_seconds')) {

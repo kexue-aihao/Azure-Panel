@@ -195,7 +195,7 @@
 		dns_binding_id: '',
 		userdata: '',
 		ip_prefix: '',
-		ip_brush_max_attempts: 30
+		ip_brush_max_attempts: 10
 	});
 
 	const accountSelectId = 'account-select';
@@ -1611,7 +1611,7 @@
 			/>
 		</div>
 		<p class="-mt-2 text-xs text-muted">
-			创建 VM 时超过最大刷 IP 次数仍未命中，会保留最后一次刷到的 IPv4 并继续下一步。
+			创建 VM 时默认最多刷 10 次 IPv4；超过最大次数仍未命中，会保留最后一次刷到的 IPv4 并继续下一步。
 		</p>
 		<textarea
 			class="input min-h-36 font-mono text-xs"

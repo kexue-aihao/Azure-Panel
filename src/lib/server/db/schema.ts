@@ -162,7 +162,7 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	userdataEncrypted: text('userdata_encrypted').notNull().default(''),
 	enableIpv6: integer('enable_ipv6', { mode: 'boolean' }).notNull().default(false),
 	ipPrefix: text('ip_prefix').notNull().default(''),
-	ipBrushMaxAttempts: integer('ip_brush_max_attempts').notNull().default(30),
+	ipBrushMaxAttempts: integer('ip_brush_max_attempts').notNull().default(10),
 	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(60),
 	statusCheckEnabled: integer('status_check_enabled', { mode: 'boolean' }).notNull().default(true),
 	statusTriggerStates: text('status_trigger_states').notNull().default('banned,warning,warned,disabled'),

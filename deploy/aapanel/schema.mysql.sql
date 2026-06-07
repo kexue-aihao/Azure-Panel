@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS `workflow_policies` (
   `userdata_encrypted` text,
   `enable_ipv6` tinyint(1) NOT NULL DEFAULT 0,
   `ip_prefix` varchar(32) NOT NULL DEFAULT '',
-  `ip_brush_max_attempts` int NOT NULL DEFAULT 30,
+  `ip_brush_max_attempts` int NOT NULL DEFAULT 10,
   `check_interval_seconds` int NOT NULL DEFAULT 60,
   `status_check_enabled` tinyint(1) NOT NULL DEFAULT 1,
   `status_trigger_states` varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled',
