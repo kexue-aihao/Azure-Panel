@@ -147,6 +147,9 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	}).notNull().default(''),
 	replenishmentPendingAccountId: int('replenishment_pending_account_id').notNull().default(0),
 	lastReplenishmentError: varchar('last_replenishment_error', { length: 1024 }).notNull().default(''),
+	replenishmentInProgress: boolean('replenishment_in_progress').notNull().default(false),
+	replenishmentStartedAt: timestamp('replenishment_started_at'),
+	replenishmentLockToken: varchar('replenishment_lock_token', { length: 64 }).notNull().default(''),
 	lastRunAt: timestamp('last_run_at'),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });

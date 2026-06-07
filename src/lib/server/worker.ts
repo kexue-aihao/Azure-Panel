@@ -1,12 +1,14 @@
 import { decryptSecret } from './crypto';
 import { getWorkerIntervalMs } from './env';
 import {
+	acquireWorkflowReplenishmentLock,
 	deleteAccount,
 	findAccountById,
 	findDnsBindingByUser,
 	findDnsConfigByUser,
 	findNotificationSettingsByUser,
 	findSubscriptionNotificationState,
+	findWorkflowByUser,
 	findProxyProfileByUser,
 	insertWorkflowLog,
 	listAccountsByUser,
@@ -17,6 +19,7 @@ import {
 	updateWorkflow,
 	updateDnsBindingSyncState,
 	updateNotificationLastSubscriptionChecked,
+	releaseWorkflowReplenishmentLock,
 	upsertSubscriptionNotificationState,
 	updateWorkflowLastRun,
 	updateWorkflowStatusCheck
@@ -49,6 +52,7 @@ import {
 	normalizeSubscriptionCheckIntervalHours,
 	sendTelegramMessageToTargets
 } from './telegram';
+import { randomUUID } from 'node:crypto';
 
 let timer: NodeJS.Timeout | null = null;
 const activePolicies = new Set<number>();
@@ -57,6 +61,7 @@ const SUBSCRIPTION_STATUS_TIMEOUT_MS = 30_000;
 const MIN_POLICY_CHECK_INTERVAL_SECONDS = 10;
 const REPLENISHMENT_FAILURE_BASE_COOLDOWN_MS = 5 * 60 * 1000;
 const REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS = 60 * 60 * 1000;
+const REPLENISHMENT_FLOW_LOCK_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 
 const replenishmentFailureBackoff = new Map<
 	number,
@@ -167,6 +172,69 @@ function shouldRunPolicyStatusCheck(policy: WorkflowPolicy, force: boolean) {
 	if (force || !policy.lastStatusCheckedAt) return true;
 	const intervalMs = safeCheckIntervalSeconds(policy) * 1000;
 	return Date.now() - policy.lastStatusCheckedAt.getTime() >= intervalMs;
+}
+
+function replenishmentFlowStartedAtMs(policy: WorkflowPolicy) {
+	const startedAt = policy.replenishmentStartedAt;
+	if (!startedAt) return 0;
+	if (startedAt instanceof Date) return startedAt.getTime();
+	const value = Number(startedAt);
+	return Number.isFinite(value) ? value : 0;
+}
+
+function activeReplenishmentFlowLock(policy: WorkflowPolicy) {
+	if (!policy.replenishmentInProgress) return null;
+	const startedAtMs = replenishmentFlowStartedAtMs(policy);
+	if (!startedAtMs) return { stale: true, ageMs: REPLENISHMENT_FLOW_LOCK_TIMEOUT_MS };
+	const ageMs = Date.now() - startedAtMs;
+	return {
+		stale: ageMs >= REPLENISHMENT_FLOW_LOCK_TIMEOUT_MS,
+		ageMs
+	};
+}
+
+async function clearStaleReplenishmentFlowLock(policy: WorkflowPolicy) {
+	const released = await releaseWorkflowReplenishmentLock(policy.id, policy.replenishmentLockToken || '');
+	if (released) {
+		policy.replenishmentInProgress = false;
+		policy.replenishmentStartedAt = null;
+		policy.replenishmentLockToken = '';
+	}
+	return released;
+}
+
+async function acquireReplenishmentFlowLock(policy: WorkflowPolicy, reason: string) {
+	const token = randomUUID();
+	const staleBefore = new Date(Date.now() - REPLENISHMENT_FLOW_LOCK_TIMEOUT_MS);
+	const acquired = await acquireWorkflowReplenishmentLock(policy.id, token, staleBefore);
+	if (!acquired) {
+		await insertWorkflowLog(
+			policy.id,
+			'auto_create',
+			'skipped',
+			'上一轮补机流程仍在执行，跳过本轮检测/触发，等待上一轮完成后再继续'
+		);
+		return null;
+	}
+
+	policy.replenishmentInProgress = true;
+	policy.replenishmentStartedAt = new Date();
+	policy.replenishmentLockToken = token;
+	await insertWorkflowLog(
+		policy.id,
+		'auto_create',
+		'running',
+		`${reason}；已锁定本策略，上一轮补机流程完成前不会再次触发检测`
+	);
+	return token;
+}
+
+async function releaseReplenishmentFlowLock(policy: WorkflowPolicy, token: string) {
+	const released = await releaseWorkflowReplenishmentLock(policy.id, token);
+	if (!released) return;
+	policy.replenishmentInProgress = false;
+	policy.replenishmentStartedAt = null;
+	policy.replenishmentLockToken = '';
 }
 
 function policyReplenishmentCooldown(policyId: number) {
@@ -748,12 +816,61 @@ async function removeAbnormalAccountAfterReplenishment(options: {
 
 async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolean } = {}) {
 	const force = options.force === true;
-	for (const policy of policies) {
-		if (activePolicies.has(policy.id)) continue;
+	for (const initialPolicy of policies) {
+		if (activePolicies.has(initialPolicy.id)) {
+			await insertWorkflowLog(
+				initialPolicy.id,
+				'status_check',
+				'skipped',
+				'上一轮补机/检测流程仍在执行，跳过本轮检测/触发，等待上一轮完成后再继续'
+			).catch((err) => {
+				console.warn('[worker] failed to log active policy skip:', err);
+			});
+			continue;
+		}
 
+		let policy = initialPolicy;
+		let flowLockToken: string | null = null;
 		activePolicies.add(policy.id);
 
 		try {
+			const latestPolicy = await findWorkflowByUser(policy.userId, policy.id);
+			if (!latestPolicy || !latestPolicy.enabled) continue;
+			policy = latestPolicy;
+
+			const runningFlow = activeReplenishmentFlowLock(policy);
+			if (runningFlow) {
+				if (!runningFlow.stale) {
+					const runningSeconds = Math.max(1, Math.ceil(runningFlow.ageMs / 1000));
+					await insertWorkflowLog(
+						policy.id,
+						'status_check',
+						'skipped',
+						`上一轮补机流程仍在执行，已运行约 ${runningSeconds} 秒，跳过本轮检测/触发`
+					);
+					continue;
+				}
+
+				const released = await clearStaleReplenishmentFlowLock(policy);
+				if (!released) {
+					await insertWorkflowLog(
+						policy.id,
+						'status_check',
+						'skipped',
+						'上一轮补机执行锁正在被其它进程处理，跳过本轮检测/触发'
+					);
+					continue;
+				}
+				await insertWorkflowLog(
+					policy.id,
+					'status_check',
+					'warning',
+					`检测到上一轮补机执行锁已超过 ${Math.ceil(
+						REPLENISHMENT_FLOW_LOCK_TIMEOUT_MS / 60 / 60 / 1000
+					)} 小时未释放，已按异常中断处理并继续本轮检测`
+				);
+			}
+
 			if (!policy.statusCheckEnabled) {
 				await insertWorkflowLog(policy.id, 'status_check', 'skipped', '账号状态检测未启用，本轮不执行自动补机');
 				continue;
@@ -814,13 +931,23 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 						);
 						continue;
 					}
-					const accounts = await listAccountsByUser(policy.userId);
-					let bootProxyPoolPromise: Promise<WorkerBootProxyRuntime[]> | null = null;
-					const getBootProxyPool = () => {
-						bootProxyPoolPromise ??= collectBootProxyPool(policy);
-						return bootProxyPoolPromise;
-					};
-					await cleanupPendingReplenishmentResourceGroup(policy, accounts, getBootProxyPool);
+					flowLockToken = await acquireReplenishmentFlowLock(
+						policy,
+						`检测到遗留资源组 ${policy.replenishmentPendingResourceGroup}，准备先执行清理`
+					);
+					if (!flowLockToken) continue;
+					try {
+						const accounts = await listAccountsByUser(policy.userId);
+						let bootProxyPoolPromise: Promise<WorkerBootProxyRuntime[]> | null = null;
+						const getBootProxyPool = () => {
+							bootProxyPoolPromise ??= collectBootProxyPool(policy);
+							return bootProxyPoolPromise;
+						};
+						await cleanupPendingReplenishmentResourceGroup(policy, accounts, getBootProxyPool);
+					} finally {
+						await releaseReplenishmentFlowLock(policy, flowLockToken);
+						flowLockToken = null;
+					}
 				} else if (hasReplenishmentFailureState(policy)) {
 					await clearReplenishmentFailure(policy);
 				}
@@ -869,153 +996,166 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 				);
 			}
 
-			if (deficit > 0) {
-				const password = decryptSecret(policy.adminPasswordEncrypted);
-				const userdata = decryptSecret(policy.userdataEncrypted ?? '');
-				if (!password) {
-					await insertWorkflowLog(policy.id, 'auto_create', 'failed', '未配置管理员密码，无法自动补机');
-				} else {
-					const accounts = await listAccountsByUser(policy.userId);
+			const password = decryptSecret(policy.adminPasswordEncrypted);
+			const userdata = decryptSecret(policy.userdataEncrypted ?? '');
+			if (!password) {
+				await insertWorkflowLog(policy.id, 'auto_create', 'failed', '未配置管理员密码，无法自动补机');
+				continue;
+			}
+
+			flowLockToken = await acquireReplenishmentFlowLock(
+				policy,
+				`订阅异常已命中并存在补机缺口 ${deficit} 台，准备执行补机流程`
+			);
+			if (!flowLockToken) continue;
+
+			try {
+				const accounts = await listAccountsByUser(policy.userId);
+				await insertWorkflowLog(
+					policy.id,
+					'account_pool',
+					accounts.length > 0 ? 'success' : 'warning',
+					`Azure 号池当前共有 ${accounts.length} 个账号，自动补机会按添加顺序逐个检测，选中第一个正常订阅账号`
+				);
+				let bootProxyPoolPromise: Promise<WorkerBootProxyRuntime[]> | null = null;
+				const getBootProxyPool = () => {
+					bootProxyPoolPromise ??= collectBootProxyPool(policy);
+					return bootProxyPoolPromise;
+				};
+				if (!(await cleanupPendingReplenishmentResourceGroup(policy, accounts, getBootProxyPool))) {
+					continue;
+				}
+				let accountPoolCursor = 0;
+				const excludedAccountIds = new Set([account.id]);
+				for (let i = 0; i < deficit; i++) {
 					await insertWorkflowLog(
 						policy.id,
-						'account_pool',
-						accounts.length > 0 ? 'success' : 'warning',
-						`Azure 号池当前共有 ${accounts.length} 个账号，自动补机会按添加顺序逐个检测，选中第一个正常订阅账号`
+						'auto_create',
+						'running',
+						`准备创建第 ${i + 1}/${deficit} 台补机，按账号添加顺序选择可用号池账号`
 					);
-					let bootProxyPoolPromise: Promise<WorkerBootProxyRuntime[]> | null = null;
-					const getBootProxyPool = () => {
-						bootProxyPoolPromise ??= collectBootProxyPool(policy);
-						return bootProxyPoolPromise;
-					};
-					if (!(await cleanupPendingReplenishmentResourceGroup(policy, accounts, getBootProxyPool))) {
-						continue;
+					const selected = await pickReplenishmentRuntimeFromPool({
+						policy,
+						accounts,
+						excludedAccountIds,
+						startIndex: accountPoolCursor,
+						getBootProxyPool
+					});
+					const replenishRuntime = selected?.runtime ?? null;
+					if (!replenishRuntime) {
+						await insertWorkflowLog(
+							policy.id,
+							'auto_create',
+							'failed',
+							'账号池中没有可用于补机的正常订阅账号'
+						);
+						break;
 					}
-					let accountPoolCursor = 0;
-					const excludedAccountIds = new Set([account.id]);
-					for (let i = 0; i < deficit; i++) {
+					excludedAccountIds.add(replenishRuntime.account.id);
+					accountPoolCursor = selected ? selected.selectedIndex + 1 : accountPoolCursor + 1;
+					const prefix = policyResourcePrefix(policy);
+					const resourceGroup = randomAzureResourceName(`${prefix}-rg`, 64);
+					const vmName = randomAzureResourceName(prefix, 48);
+					const createClients = replenishRuntime.clients;
+					const createProxyLabel = replenishRuntime.proxyLabel;
+					try {
 						await insertWorkflowLog(
 							policy.id,
 							'auto_create',
 							'running',
-							`准备创建第 ${i + 1}/${deficit} 台补机，按账号添加顺序选择可用号池账号`
+							`已选用补机账号 ${replenishRuntime.account.name}，出口=${createProxyLabel}，开始创建 VM ${vmName}`
 						);
-						const selected = await pickReplenishmentRuntimeFromPool({
-							policy,
-							accounts,
-							excludedAccountIds,
-							startIndex: accountPoolCursor,
-							getBootProxyPool
+						const result = await createVmSimple(createClients, {
+							resourceGroup,
+							location: policy.location,
+							vmName,
+							vmSize: replenishmentVmSize,
+							imageReference: policy.imageReference,
+							adminUsername: policy.adminUsername,
+							adminPassword: password,
+							enableIpv6: policy.enableIpv6,
+							customData: userdata,
+							ipPrefix: policy.ipPrefix,
+							ipBrushMaxAttempts: policy.ipBrushMaxAttempts,
+							progress: (event) => logCreateProgress(policy.id, event)
 						});
-						const replenishRuntime = selected?.runtime ?? null;
-						if (!replenishRuntime) {
-							await insertWorkflowLog(
-								policy.id,
-								'auto_create',
-								'failed',
-								'账号池中没有可用于补机的正常订阅账号'
-							);
-							break;
-						}
-						excludedAccountIds.add(replenishRuntime.account.id);
-						accountPoolCursor = selected
-							? selected.selectedIndex + 1
-							: accountPoolCursor + 1;
-						const prefix = policyResourcePrefix(policy);
-						const resourceGroup = randomAzureResourceName(`${prefix}-rg`, 64);
-						const vmName = randomAzureResourceName(prefix, 48);
-						const createClients = replenishRuntime.clients;
-						const createProxyLabel = replenishRuntime.proxyLabel;
+						await insertWorkflowLog(
+							policy.id,
+							'auto_create',
+							'success',
+							`已使用账号 ${replenishRuntime.account.name} 创建 VM: ${vmName} 规格 ${replenishmentVmSize} 代理=${createProxyLabel} 资源组=${resourceGroup} IPv4=${result.publicIPv4 || '-'} IPv6=${
+								result.publicIPv6 || '-'
+							} 刷 IP 次数=${result.ipBrushAttempts}`
+						);
+						await clearReplenishmentFailure(policy);
+						await saveTrackedVmName(policy, result.name);
+						await notifyReplenishmentSuccess({
+							policy,
+							account: replenishRuntime.account,
+							result,
+							vmSize: replenishmentVmSize
+						});
+						await syncWorkflowDns({ policy, result });
+						await removeAbnormalAccountAfterReplenishment({
+							policy,
+							abnormalAccount: account,
+							replacementAccount: replenishRuntime.account,
+							state: status.state
+						});
+						break;
+					} catch (err) {
+						const createFailureMessage = errorMessage(err);
+						await insertWorkflowLog(
+							policy.id,
+							'auto_create',
+							'failed',
+							`补机失败 ${vmName}: ${createFailureMessage}`
+						);
+						let cleanupFailed = false;
+						let cleanupFailureMessage = '';
 						try {
+							await cleanupFailedReplenishmentResourceGroup(policy.id, createClients, resourceGroup);
+						} catch (cleanupErr) {
+							cleanupFailed = true;
+							cleanupFailureMessage = errorMessage(cleanupErr);
 							await insertWorkflowLog(
 								policy.id,
-								'auto_create',
-								'running',
-								`已选用补机账号 ${replenishRuntime.account.name}，出口=${createProxyLabel}，开始创建 VM ${vmName}`
-							);
-							const result = await createVmSimple(createClients, {
-								resourceGroup,
-								location: policy.location,
-								vmName,
-								vmSize: replenishmentVmSize,
-								imageReference: policy.imageReference,
-								adminUsername: policy.adminUsername,
-								adminPassword: password,
-								enableIpv6: policy.enableIpv6,
-								customData: userdata,
-								ipPrefix: policy.ipPrefix,
-								ipBrushMaxAttempts: policy.ipBrushMaxAttempts,
-								progress: (event) => logCreateProgress(policy.id, event)
-							});
-							await insertWorkflowLog(
-								policy.id,
-								'auto_create',
-								'success',
-								`已使用账号 ${replenishRuntime.account.name} 创建 VM: ${vmName} 规格 ${replenishmentVmSize} 代理=${createProxyLabel} 资源组=${resourceGroup} IPv4=${result.publicIPv4 || '-'} IPv6=${
-									result.publicIPv6 || '-'
-								} 刷 IP 次数=${result.ipBrushAttempts}`
-							);
-							await clearReplenishmentFailure(policy);
-							await saveTrackedVmName(policy, result.name);
-							await notifyReplenishmentSuccess({
-								policy,
-								account: replenishRuntime.account,
-								result,
-								vmSize: replenishmentVmSize
-							});
-							await syncWorkflowDns({ policy, result });
-							await removeAbnormalAccountAfterReplenishment({
-								policy,
-								abnormalAccount: account,
-								replacementAccount: replenishRuntime.account,
-								state: status.state
-							});
-							break;
-						} catch (err) {
-							const createFailureMessage = errorMessage(err);
-							await insertWorkflowLog(
-								policy.id,
-								'auto_create',
+								'cleanup_resource_group',
 								'failed',
-								`补机失败 ${vmName}: ${createFailureMessage}`
+								`补机失败后的临时资源组 ${resourceGroup} 删除失败: ${cleanupFailureMessage}`
 							);
-							let cleanupFailed = false;
-							let cleanupFailureMessage = '';
-							try {
-								await cleanupFailedReplenishmentResourceGroup(policy.id, createClients, resourceGroup);
-							} catch (cleanupErr) {
-								cleanupFailed = true;
-								cleanupFailureMessage = errorMessage(cleanupErr);
-								await insertWorkflowLog(
-									policy.id,
-									'cleanup_resource_group',
-									'failed',
-									`补机失败后的临时资源组 ${resourceGroup} 删除失败: ${cleanupFailureMessage}`
-								);
-							}
-							const cooldownMessage = cleanupFailed
-								? `${createFailureMessage}；临时资源组 ${resourceGroup} 清理失败: ${cleanupFailureMessage}`
-								: createFailureMessage;
-							const cooldown = await recordReplenishmentFailure(policy, cooldownMessage, {
-								resourceGroup: cleanupFailed ? resourceGroup : '',
-								accountId: cleanupFailed ? replenishRuntime.account.id : 0,
-								minCooldownMs: cleanupFailed ? REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS : 0
-							});
-							await insertWorkflowLog(
-								policy.id,
-								'auto_create',
-								'skipped',
-								`补机失败后进入退避冷却，第 ${cooldown.attempts} 次失败，约 ${Math.ceil(
-									cooldown.cooldownMs / 1000
-								)} 秒后再自动重试，避免持续创建 Azure 资源`
-							);
-							break;
 						}
+						const cooldownMessage = cleanupFailed
+							? `${createFailureMessage}；临时资源组 ${resourceGroup} 清理失败: ${cleanupFailureMessage}`
+							: createFailureMessage;
+						const cooldown = await recordReplenishmentFailure(policy, cooldownMessage, {
+							resourceGroup: cleanupFailed ? resourceGroup : '',
+							accountId: cleanupFailed ? replenishRuntime.account.id : 0,
+							minCooldownMs: cleanupFailed ? REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS : 0
+						});
+						await insertWorkflowLog(
+							policy.id,
+							'auto_create',
+							'skipped',
+							`补机失败后进入退避冷却，第 ${cooldown.attempts} 次失败，约 ${Math.ceil(
+								cooldown.cooldownMs / 1000
+							)} 秒后再自动重试，避免持续创建 Azure 资源`
+						);
+						break;
 					}
 				}
+			} finally {
+				await releaseReplenishmentFlowLock(policy, flowLockToken);
+				flowLockToken = null;
 			}
 		} catch (err) {
 			await insertWorkflowLog(policy.id, 'policy_error', 'failed', errorMessage(err));
 		} finally {
+			if (flowLockToken) {
+				await releaseReplenishmentFlowLock(policy, flowLockToken).catch((err) => {
+					console.warn('[worker] failed to release replenishment flow lock:', err);
+				});
+			}
 			await updateWorkflowLastRun(policy.id).catch((err) => {
 				console.warn('[worker] failed to update workflow last_run_at:', err);
 			});

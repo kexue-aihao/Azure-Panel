@@ -180,6 +180,9 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		replenishment_pending_resource_group varchar(90) NOT NULL DEFAULT '',
 		replenishment_pending_account_id int NOT NULL DEFAULT 0,
 		last_replenishment_error varchar(1024) NOT NULL DEFAULT '',
+		replenishment_in_progress tinyint(1) NOT NULL DEFAULT 0,
+		replenishment_started_at timestamp NULL DEFAULT NULL,
+		replenishment_lock_token varchar(64) NOT NULL DEFAULT '',
 		last_run_at timestamp NULL DEFAULT NULL,
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
@@ -640,6 +643,9 @@ const MYSQL_SCHEMA_READY_COLUMNS: Record<string, string[]> = {
 		'replenishment_pending_resource_group',
 		'replenishment_pending_account_id',
 		'last_replenishment_error',
+		'replenishment_in_progress',
+		'replenishment_started_at',
+		'replenishment_lock_token',
 		'last_run_at',
 		'created_at'
 	],
@@ -1072,6 +1078,24 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 	);
 	await addMysqlColumnIfMissing(
 		pool,
+		'workflow_policies',
+		'replenishment_in_progress',
+		'replenishment_in_progress tinyint(1) NOT NULL DEFAULT 0'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'replenishment_started_at',
+		'replenishment_started_at timestamp NULL DEFAULT NULL'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'replenishment_lock_token',
+		"replenishment_lock_token varchar(64) NOT NULL DEFAULT ''"
+	);
+	await addMysqlColumnIfMissing(
+		pool,
 		'notification_settings',
 		'telegram_group_chat_ids',
 		'telegram_group_chat_ids text NULL'
@@ -1255,6 +1279,9 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 			replenishment_pending_resource_group TEXT NOT NULL DEFAULT '',
 			replenishment_pending_account_id INTEGER NOT NULL DEFAULT 0,
 			last_replenishment_error TEXT NOT NULL DEFAULT '',
+			replenishment_in_progress INTEGER NOT NULL DEFAULT 0,
+			replenishment_started_at INTEGER,
+			replenishment_lock_token TEXT NOT NULL DEFAULT '',
 			last_run_at INTEGER,
 			created_at INTEGER NOT NULL
 		);
@@ -1403,6 +1430,19 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	if (!workflowColumns.some((column) => column.name === 'last_replenishment_error')) {
 		sqlite.exec(
 			"ALTER TABLE workflow_policies ADD COLUMN last_replenishment_error TEXT NOT NULL DEFAULT ''"
+		);
+	}
+	if (!workflowColumns.some((column) => column.name === 'replenishment_in_progress')) {
+		sqlite.exec(
+			'ALTER TABLE workflow_policies ADD COLUMN replenishment_in_progress INTEGER NOT NULL DEFAULT 0'
+		);
+	}
+	if (!workflowColumns.some((column) => column.name === 'replenishment_started_at')) {
+		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN replenishment_started_at INTEGER');
+	}
+	if (!workflowColumns.some((column) => column.name === 'replenishment_lock_token')) {
+		sqlite.exec(
+			"ALTER TABLE workflow_policies ADD COLUMN replenishment_lock_token TEXT NOT NULL DEFAULT ''"
 		);
 	}
 	const notificationColumns = sqlite.prepare('PRAGMA table_info(notification_settings)').all() as Array<{

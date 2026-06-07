@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
-import type { RowDataPacket } from 'mysql2';
+import type { ResultSetHeader, RowDataPacket } from 'mysql2';
 import { ADMIN_ROLE, USER_ROLE, isConfiguredAdminEmail, normalizeUserRole } from '../admin';
 import { getDriver, getMysqlDb, getSqliteDb, getSqliteRawDb } from './index';
 import type {
@@ -1099,6 +1099,76 @@ export async function updateWorkflow(
 			.returning()
 			.get() ?? null
 	);
+}
+
+export async function acquireWorkflowReplenishmentLock(
+	policyId: number,
+	token: string,
+	staleBefore: Date
+): Promise<boolean> {
+	const startedAt = new Date();
+	if (getDriver() === 'mysql') {
+		const { pool } = getMysqlDb();
+		const [result] = await pool.query<ResultSetHeader>(
+			`UPDATE workflow_policies
+			 SET replenishment_in_progress = 1,
+			     replenishment_started_at = ?,
+			     replenishment_lock_token = ?
+			 WHERE id = ?
+			   AND (
+			     replenishment_in_progress = 0
+			     OR replenishment_started_at IS NULL
+			     OR replenishment_started_at < ?
+			   )`,
+			[startedAt, token, policyId, staleBefore]
+		);
+		return result.affectedRows > 0;
+	}
+
+	const result = getSqliteRawDb()
+		.prepare(
+			`UPDATE workflow_policies
+			 SET replenishment_in_progress = 1,
+			     replenishment_started_at = ?,
+			     replenishment_lock_token = ?
+			 WHERE id = ?
+			   AND (
+			     replenishment_in_progress = 0
+			     OR replenishment_started_at IS NULL
+			     OR replenishment_started_at < ?
+			   )`
+		)
+		.run(startedAt.getTime(), token, policyId, staleBefore.getTime());
+	return result.changes > 0;
+}
+
+export async function releaseWorkflowReplenishmentLock(
+	policyId: number,
+	token: string
+): Promise<boolean> {
+	if (getDriver() === 'mysql') {
+		const { pool } = getMysqlDb();
+		const [result] = await pool.query<ResultSetHeader>(
+			`UPDATE workflow_policies
+			 SET replenishment_in_progress = 0,
+			     replenishment_started_at = NULL,
+			     replenishment_lock_token = ''
+			 WHERE id = ? AND replenishment_lock_token = ?`,
+			[policyId, token]
+		);
+		return result.affectedRows > 0;
+	}
+
+	const result = getSqliteRawDb()
+		.prepare(
+			`UPDATE workflow_policies
+			 SET replenishment_in_progress = 0,
+			     replenishment_started_at = NULL,
+			     replenishment_lock_token = ''
+			 WHERE id = ? AND replenishment_lock_token = ?`
+		)
+		.run(policyId, token);
+	return result.changes > 0;
 }
 
 export async function deleteWorkflow(policyId: number): Promise<void> {

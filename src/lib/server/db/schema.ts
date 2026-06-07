@@ -174,6 +174,11 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	replenishmentPendingResourceGroup: text('replenishment_pending_resource_group').notNull().default(''),
 	replenishmentPendingAccountId: integer('replenishment_pending_account_id').notNull().default(0),
 	lastReplenishmentError: text('last_replenishment_error').notNull().default(''),
+	replenishmentInProgress: integer('replenishment_in_progress', { mode: 'boolean' })
+		.notNull()
+		.default(false),
+	replenishmentStartedAt: integer('replenishment_started_at', { mode: 'timestamp' }),
+	replenishmentLockToken: text('replenishment_lock_token').notNull().default(''),
 	lastRunAt: integer('last_run_at', { mode: 'timestamp' }),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()

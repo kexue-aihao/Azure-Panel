@@ -523,7 +523,7 @@
 			<input type="checkbox" bind:checked={form.auto_start} /> 自动启动已停止的 VM
 		</label>
 		<label class="flex items-center gap-2 text-sm">
-			<input type="checkbox" bind:checked={form.status_check_enabled} /> 每 60 秒检测正在使用账号订阅状态，异常立即触发补机
+			<input type="checkbox" bind:checked={form.status_check_enabled} /> 每 60 秒检测正在使用账号订阅状态，异常立即触发补机，上一轮补机未完成时跳过本轮
 		</label>
 		<button class="btn-secondary" type="button" disabled={checkingStatus} onclick={() => void checkAccountStatus()}>
 			{checkingStatus ? '检测中...' : '检测触发账号状态'}
@@ -639,7 +639,7 @@
 			{/each}
 		</select>
 		<p class="rounded-lg border border-border bg-background/70 px-3 py-2 text-xs text-muted">
-			补机触发逻辑固定为每 60 秒检测一次当前正在使用账号的订阅状态；检测到 banned、warning、warned 或 disabled 后立即按账号添加顺序选择号池账号补机。
+			补机触发逻辑固定为每 60 秒检测一次当前正在使用账号的订阅状态；检测到 banned、warning、warned 或 disabled 后立即按账号添加顺序选择号池账号补机；上一轮补机流程未完成前不会再次触发检测。
 		</p>
 		<div class="flex flex-wrap gap-2">
 			<button class="btn-primary" type="submit" disabled={savingWorkflow}>
