@@ -44,6 +44,8 @@ export const azureAccounts = sqliteTable('azure_accounts', {
 	}),
 	proxyUrlEncrypted: text('proxy_url_encrypted').default(''),
 	vmRegionCache: text('vm_region_cache').default(''),
+	vmImageCache: text('vm_image_cache').default(''),
+	vmProviderCache: text('vm_provider_cache').default(''),
 	remark: text('remark').default(''),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()

@@ -741,7 +741,7 @@
 				location = regions[0].name;
 			}
 			syncCreateLocation();
-			await loadRegionDetails();
+			await loadRegionDetails(refresh);
 		} catch (err) {
 			regions = [];
 			regionError = err instanceof Error ? err.message : '区域识别失败';
@@ -822,7 +822,7 @@
 		}
 	}
 
-	async function loadVmImages(requestId: number) {
+	async function loadVmImages(requestId: number, refresh = false) {
 		if (!accountId || !location.trim()) {
 			vmImages = [];
 			imageLoading = false;
@@ -836,6 +836,7 @@
 				account_id: String(accountId),
 				location: location.trim()
 			});
+			if (refresh) params.set('refresh', '1');
 			appendProxyParams(params);
 			const images = await api<VmImageOption[]>(`/api/user/azure/image/list?${params}`);
 			if (requestId !== createOptionsRequestId) return;
@@ -855,16 +856,16 @@
 		}
 	}
 
-	async function loadCreateOptions() {
+	async function loadCreateOptions(refreshImages = false) {
 		syncCreateLocation();
 		const requestId = ++createOptionsRequestId;
-		await Promise.all([loadVmSizes(requestId), loadVmImages(requestId)]);
+		await Promise.all([loadVmSizes(requestId), loadVmImages(requestId, refreshImages)]);
 	}
 
-	async function loadRegionDetails() {
+	async function loadRegionDetails(refreshImages = false) {
 		syncCreateLocation();
 		quotas = [];
-		await Promise.all([loadQuotas(), loadCreateOptions()]);
+		await Promise.all([loadQuotas(), loadCreateOptions(refreshImages)]);
 	}
 
 	async function changeAccount() {

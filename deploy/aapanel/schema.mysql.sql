@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS `azure_accounts` (
   `proxy_profile_id` int DEFAULT NULL,
   `proxy_url_encrypted` text,
   `vm_region_cache` text,
+  `vm_image_cache` text,
+  `vm_provider_cache` text,
   `remark` varchar(255) DEFAULT '',
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),

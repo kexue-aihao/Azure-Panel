@@ -58,6 +58,8 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		proxy_profile_id int NULL,
 		proxy_url_encrypted text,
 		vm_region_cache text,
+		vm_image_cache text,
+		vm_provider_cache text,
 		remark varchar(255) DEFAULT '',
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
@@ -295,6 +297,12 @@ async function ensureMysqlSchema(pool: Pool) {
 	await pool.query('ALTER TABLE azure_accounts ADD COLUMN vm_region_cache text NULL').catch((err) => {
 		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
 	});
+	await pool.query('ALTER TABLE azure_accounts ADD COLUMN vm_image_cache text NULL').catch((err) => {
+		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+	});
+	await pool.query('ALTER TABLE azure_accounts ADD COLUMN vm_provider_cache text NULL').catch((err) => {
+		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+	});
 	await pool
 		.query('CREATE INDEX azure_accounts_proxy_profile_id_idx ON azure_accounts (proxy_profile_id)')
 		.catch((err) => {
@@ -460,6 +468,8 @@ export async function initDatabase() {
 			proxy_profile_id INTEGER REFERENCES proxy_profiles(id) ON DELETE SET NULL,
 			proxy_url_encrypted TEXT DEFAULT '',
 			vm_region_cache TEXT DEFAULT '',
+			vm_image_cache TEXT DEFAULT '',
+			vm_provider_cache TEXT DEFAULT '',
 			remark TEXT DEFAULT '',
 			created_at INTEGER NOT NULL
 		);
@@ -596,6 +606,12 @@ export async function initDatabase() {
 	}
 	if (!accountColumns.some((column) => column.name === 'vm_region_cache')) {
 		sqlite.exec("ALTER TABLE azure_accounts ADD COLUMN vm_region_cache TEXT DEFAULT ''");
+	}
+	if (!accountColumns.some((column) => column.name === 'vm_image_cache')) {
+		sqlite.exec("ALTER TABLE azure_accounts ADD COLUMN vm_image_cache TEXT DEFAULT ''");
+	}
+	if (!accountColumns.some((column) => column.name === 'vm_provider_cache')) {
+		sqlite.exec("ALTER TABLE azure_accounts ADD COLUMN vm_provider_cache TEXT DEFAULT ''");
 	}
 	const proxyColumns = sqlite.prepare('PRAGMA table_info(proxy_profiles)').all() as Array<{
 		name: string;
