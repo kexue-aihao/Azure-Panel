@@ -377,13 +377,27 @@
 		const matched = records.find((item) => item.matched);
 		if (matched) return `${prefixText}，已命中 ${matched.ip}，记录 ${records.length} 个公网 IP`;
 		const kept = [...records].reverse().find((item) => item.kept);
-		if (kept && targetPrefix) return `${prefixText}，未命中后保留 ${kept.ip}，记录 ${records.length} 个公网 IP`;
-		if (kept) return `${prefixText}，最终使用 ${kept.ip}，记录 ${records.length} 个公网 IP`;
+		if (kept && targetPrefix) {
+			const keptText = kept.ip || (kept.publicIpName ? `等待 Azure 分配，资源 ${kept.publicIpName}` : '等待 Azure 分配');
+			return `${prefixText}，未命中后保留 ${keptText}，记录 ${records.length} 个公网 IP`;
+		}
+		if (kept) {
+			const keptText = kept.ip || (kept.publicIpName ? `等待 Azure 分配，资源 ${kept.publicIpName}` : '等待 Azure 分配');
+			return `${prefixText}，最终使用 ${keptText}，记录 ${records.length} 个公网 IP`;
+		}
 		const lastMissed = [...records].reverse().find((item) => !item.matched && item.ip);
 		if (lastMissed) return `${prefixText}，最近未命中 ${lastMissed.ip}，记录 ${records.length} 个公网 IP`;
 		const pending = [...records].reverse().find((item) => item.pending);
 		if (pending) return `${prefixText}，正在创建 ${pending.publicIpName || '公网 IP'}，等待 Azure 分配 IPv4`;
 		return `${prefixText}，已记录 ${records.length} 个公网 IP`;
+	}
+
+	function brushedIpPrimaryLabel(item: BrushedIpRecord) {
+		return item.ip ? '完整 IPv4' : '等待 IPv4';
+	}
+
+	function brushedIpPrimaryValue(item: BrushedIpRecord) {
+		return item.ip || '等待 Azure 分配';
 	}
 
 	function brushedIpState(records: BrushedIpRecord[]) {
@@ -421,6 +435,48 @@
 		);
 	}
 
+	function fillBrushedIpFromResult(records: BrushedIpRecord[], ip: string) {
+		if (!ip) return records;
+		const index = [...records]
+			.reverse()
+			.findIndex((item) => item.kept || item.pending || item.publicIpName);
+		const timestamp = new Date().toISOString();
+		if (index === -1) {
+			const attempt = records.length + 1;
+			return [
+				...records,
+				{
+					key: `final:${ip}`,
+					attempt,
+					maxAttempts: attempt,
+					ip,
+					targetPrefix: '',
+					publicIpName: '',
+					pending: false,
+					matched: false,
+					kept: true,
+					deleted: false,
+					timestamp
+				}
+			];
+		}
+
+		const targetIndex = records.length - 1 - index;
+		return records.map((item, itemIndex) => {
+			if (itemIndex !== targetIndex) return item;
+			const matched = item.matched || (Boolean(item.targetPrefix) && ip.startsWith(item.targetPrefix));
+			return {
+				...item,
+				ip,
+				pending: false,
+				matched,
+				kept: true,
+				deleted: false,
+				timestamp
+			};
+		});
+	}
+
 	function rememberCreateBrushedIp(event: CreateProgressEvent) {
 		const record = brushedIpFromEvent(event);
 		if (!record) return;
@@ -433,8 +489,13 @@
 		operationBrushedIps = upsertBrushedIp(operationBrushedIps, record);
 	}
 
+	function isBrushRecordOnly(event: CreateProgressEvent) {
+		return event.step === 'public-ipv4' && event.detail?.brushRecordOnly === true;
+	}
+
 	function mergeCreateProgress(event: CreateProgressEvent) {
 		rememberCreateBrushedIp(event);
+		if (isBrushRecordOnly(event)) return;
 		const index = createProgress.findIndex((item) => item.step === event.step);
 		if (index === -1) {
 			createProgress = [...createProgress, event];
@@ -492,6 +553,7 @@
 
 	function mergeOperationProgress(event: CreateProgressEvent) {
 		rememberOperationBrushedIp(event);
+		if (isBrushRecordOnly(event)) return;
 		const index = operationProgress.findIndex((item) => item.step === event.step);
 		if (index === -1) {
 			operationProgress = [...operationProgress, event];
@@ -983,6 +1045,7 @@
 				message: '创建请求已完成',
 				timestamp: new Date().toISOString()
 			});
+			createBrushedIps = fillBrushedIpFromResult(createBrushedIps, result.public_ipv4);
 			toast = `VM ${result.name} 创建完成，IPv4=${result.public_ipv4 || '-'} IPv6=${result.public_ipv6 || '-'}，刷IP次数=${result.ip_brush_attempts}`;
 			resourceGroup = result.resource_group;
 			refreshCreateNames();
@@ -1804,12 +1867,12 @@
 										{brushedIpBadgeText(item)}
 									</span>
 									<span class="font-mono text-muted">#{item.attempt}/{item.maxAttempts}</span>
-									<span class="text-muted">{item.pending ? '公网 IP 资源' : '完整 IPv4'}</span>
+									<span class="text-muted">{brushedIpPrimaryLabel(item)}</span>
 									<span class="break-all font-mono text-blue-100" title={item.ip || item.publicIpName}>
-										{item.ip || item.publicIpName || '等待 Azure 分配'}
+										{brushedIpPrimaryValue(item)}
 									</span>
 									{#if item.publicIpName}
-										<span class="break-all text-muted">{item.publicIpName}</span>
+										<span class="break-all text-muted">资源：{item.publicIpName}</span>
 									{/if}
 									<span class="ml-auto text-[11px] text-muted">{new Date(item.timestamp).toLocaleTimeString()}</span>
 								</div>
@@ -1937,12 +2000,12 @@
 								{brushedIpBadgeText(item)}
 							</span>
 							<span class="font-mono text-muted">#{item.attempt}/{item.maxAttempts}</span>
-							<span class="text-muted">{item.pending ? '公网 IP 资源' : '完整 IPv4'}</span>
+							<span class="text-muted">{brushedIpPrimaryLabel(item)}</span>
 							<span class="break-all font-mono text-blue-100" title={item.ip || item.publicIpName}>
-								{item.ip || item.publicIpName || '等待 Azure 分配'}
+								{brushedIpPrimaryValue(item)}
 							</span>
 							{#if item.publicIpName}
-								<span class="break-all text-muted">{item.publicIpName}</span>
+								<span class="break-all text-muted">资源：{item.publicIpName}</span>
 							{/if}
 							<span class="ml-auto text-[11px] text-muted">{new Date(item.timestamp).toLocaleTimeString()}</span>
 						</div>

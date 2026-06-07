@@ -1865,27 +1865,9 @@ async function collectPublicIps(
 	}
 
 	for (const { nicResourceGroup, nicName, nic } of nics) {
-		let configs: NetworkInterfaceIPConfiguration[] = [];
-		try {
-			configs = await loadNetworkInterfaceIpConfigurations(clients, nicResourceGroup, nicName, nic, {
-				forceList: true
-			});
-		} catch {
-			configs = nic.ipConfigurations ?? [];
-		}
-		for (const config of configs) {
-			const pipId = config.publicIPAddress?.id;
-			if (!pipId) continue;
-			const pipName = parseResourceName(pipId);
-			const pipResourceGroup = parseResourceGroup(pipId);
-			if (!pipName || !pipResourceGroup) continue;
-			try {
-				const pip = await clients.network.publicIPAddresses.get(pipResourceGroup, pipName);
-				rememberPublicIp(ips, pip);
-			} catch {
-				// Keep listing resilient even if one public IP disappears during refresh.
-			}
-		}
+		const fromNic = await readPublicIpsFromNic(clients, { nicResourceGroup, nicName, nic }).catch(() => null);
+		if (fromNic?.ips.publicIPv4 && !ips.publicIPv4) ips.publicIPv4 = fromNic.ips.publicIPv4;
+		if (fromNic?.ips.publicIPv6 && !ips.publicIPv6) ips.publicIPv6 = fromNic.ips.publicIPv6;
 	}
 	if ((!ips.publicIPv4 || !ips.publicIPv6) && vm.name) {
 		const vmResourceGroup = resourceGroupHint || parseResourceGroup(vm.id ?? '');
@@ -1954,30 +1936,10 @@ export async function refreshVmPublicIps(
 		nicResourceGroup
 	});
 
-	let publicIPv4 = '';
-	let publicIPv6 = '';
-	const ips = { publicIPv4, publicIPv6 };
-	let configs: NetworkInterfaceIPConfiguration[] = [];
-	try {
-		configs = await loadNetworkInterfaceIpConfigurations(clients, nicResourceGroup, nicName, nic, {
-			forceList: true
-		});
-	} catch {
-		configs = nic.ipConfigurations ?? [];
-	}
-	for (const config of configs) {
-		const pipId = config.publicIPAddress?.id;
-		if (!pipId) continue;
-		const pipName = parseResourceName(pipId);
-		const pipResourceGroup = parseResourceGroup(pipId);
-		if (!pipName || !pipResourceGroup) continue;
-		await reportCreateVmProgress(progress, 'refresh-ip-public-ip', 'running', '读取公网 IP 资源', {
-			publicIpName: pipName,
-			publicIpResourceGroup: pipResourceGroup
-		});
-		const pip = await clients.network.publicIPAddresses.get(pipResourceGroup, pipName);
-		rememberPublicIp(ips, pip);
-	}
+	const ips = { publicIPv4: '', publicIPv6: '' };
+	const fromNic = await readPublicIpsFromNic(clients, { nicResourceGroup, nicName, nic }).catch(() => null);
+	if (fromNic?.ips.publicIPv4) ips.publicIPv4 = fromNic.ips.publicIPv4;
+	if (fromNic?.ips.publicIPv6) ips.publicIPv6 = fromNic.ips.publicIPv6;
 
 	if (!ips.publicIPv4 || !ips.publicIPv6) {
 		await collectPublicIpsFromResourceGroup(clients, {
@@ -1989,19 +1951,17 @@ export async function refreshVmPublicIps(
 			progressStep: 'refresh-ip-public-ip'
 		}).catch(() => undefined);
 	}
-	publicIPv4 = ips.publicIPv4;
-	publicIPv6 = ips.publicIPv6;
 	await reportCreateVmProgress(progress, 'refresh-ip-complete', 'success', 'Public IP refresh complete', {
 		vmName,
-		publicIPv4: publicIPv4 || '-',
-		publicIPv6: publicIPv6 || '-',
+		publicIPv4: ips.publicIPv4 || '-',
+		publicIPv6: ips.publicIPv6 || '-',
 		nicName
 	});
 	return {
 		vmName,
 		resourceGroup,
-		publicIPv4,
-		publicIPv6,
+		publicIPv4: ips.publicIPv4,
+		publicIPv6: ips.publicIPv6,
 		nicName,
 		nicResourceGroup
 	};
@@ -3051,11 +3011,36 @@ async function reportCreateVmProgress(
 async function waitForPublicIpAddress(
 	clients: AzureClients,
 	resourceGroup: string,
-	publicIpName: string
+	publicIpName: string,
+	options: {
+		attempts?: number;
+		delayMs?: number;
+		progress?: CreateVmProgressReporter;
+		step?: string;
+		version?: 'IPv4' | 'IPv6';
+		detail?: CreateVmProgressEvent['detail'];
+	} = {}
 ): Promise<PublicIPAddress> {
+	const attempts = Math.max(1, Math.min(options.attempts ?? 20, 60));
+	const delayMs = Math.max(500, options.delayMs ?? 1500);
+	const step = options.step ?? `public-ip-${(options.version ?? 'IPv4').toLowerCase()}`;
 	let pip = await clients.network.publicIPAddresses.get(resourceGroup, publicIpName);
-	for (let i = 0; i < 8 && !pip.ipAddress; i++) {
-		await sleep(1500);
+	for (let i = 0; i < attempts && !pip.ipAddress; i++) {
+		await reportCreateVmProgress(
+			options.progress,
+			step,
+			'running',
+			`等待 Azure 分配 ${options.version ?? 'IPv4'} 公网 IP 地址，第 ${i + 1}/${attempts} 次`,
+			{
+				...(options.detail ?? {}),
+				name: publicIpName,
+				publicIpName,
+				ip: '',
+				waitAttempt: i + 1,
+				waitAttempts: attempts
+			}
+		);
+		await sleep(delayMs);
 		pip = await clients.network.publicIPAddresses.get(resourceGroup, publicIpName);
 	}
 	return pip;
@@ -3135,7 +3120,19 @@ async function createPublicIp(
 			throw state.error;
 		}
 		const pip = poller.getResult() ?? (await clients.network.publicIPAddresses.get(options.resourceGroup, options.name));
-		const ready = pip.ipAddress ? pip : await waitForPublicIpAddress(clients, options.resourceGroup, options.name);
+		const ready = pip.ipAddress
+			? pip
+			: await waitForPublicIpAddress(clients, options.resourceGroup, options.name, {
+					attempts: options.version === 'IPv4' ? 30 : 20,
+					delayMs: 1500,
+					progress: options.progress,
+					step,
+					version: options.version,
+					detail: withPublicIpDetail({
+						version: options.version,
+						ddosProtection: Boolean(options.ddosProtectionPlanId)
+					})
+				});
 		if (!ready.id) throw new Error(`Azure 未返回 ${options.version} 公网 IP 资源 ID`);
 		await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, withPublicIpDetail({
 			name: options.name,
@@ -3283,8 +3280,18 @@ async function createMatchingIPv4PublicIp(
 				options.progress,
 				'public-ipv4',
 				'info',
-				`IPv4 ${address || '-'} 未命中 ${targetPrefix}，已达到最大次数，保留该 IP 并继续创建`,
-				{ attempt, maxAttempts, ip: address, targetPrefix, publicIpName: name, matched: false, kept: true, deleted: false }
+				`IPv4 ${address || '-'} 未命中 ${targetPrefix}，作为最终 IPv4 使用`,
+				{
+					attempt,
+					maxAttempts,
+					ip: address,
+					targetPrefix,
+					publicIpName: name,
+					matched: false,
+					kept: true,
+					deleted: false,
+					brushRecordOnly: true
+				}
 			);
 			return { pip, attempts: attempt, matched: false };
 		}
@@ -3294,7 +3301,17 @@ async function createMatchingIPv4PublicIp(
 			'public-ipv4',
 			'info',
 			`IPv4 ${address || '-'} 未命中 ${targetPrefix}，删除后继续`,
-			{ attempt, maxAttempts, ip: address, targetPrefix, publicIpName: name, matched: false, kept: false, deleted: true }
+			{
+				attempt,
+				maxAttempts,
+				ip: address,
+				targetPrefix,
+				publicIpName: name,
+				matched: false,
+				kept: false,
+				deleted: true,
+				brushRecordOnly: true
+			}
 		);
 		await deletePublicIpById(clients, pip.id);
 	}
@@ -3505,6 +3522,153 @@ function pickNicIPv4Config(
 	preferredName?: string
 ): NetworkInterfaceIPConfiguration | undefined {
 	return pickNicIPv4ConfigFromList(nic.ipConfigurations ?? [], preferredName);
+}
+
+function isNicIPv6Config(config: NetworkInterfaceIPConfiguration) {
+	const version = String(config.privateIPAddressVersion ?? '').toLowerCase();
+	if (version === 'ipv6') return true;
+	if (version === 'ipv4') return false;
+	const name = String(config.name ?? '').toLowerCase();
+	return name.includes('ipv6') && !name.includes('ipv4');
+}
+
+async function rememberPublicIpFromConfig(
+	clients: AzureClients,
+	ips: { publicIPv4: string; publicIPv6: string },
+	config: NetworkInterfaceIPConfiguration
+) {
+	const pipId = config.publicIPAddress?.id;
+	if (!pipId) return;
+	const pipName = parseResourceName(pipId);
+	const pipResourceGroup = parseResourceGroup(pipId);
+	if (!pipName || !pipResourceGroup) return;
+	const pip = await clients.network.publicIPAddresses.get(pipResourceGroup, pipName);
+	rememberPublicIp(ips, pip);
+}
+
+async function readPublicIpsFromNic(
+	clients: AzureClients,
+	options: {
+		nicResourceGroup: string;
+		nicName: string;
+		nic: NetworkInterface;
+	}
+) {
+	const ips = { publicIPv4: '', publicIPv6: '' };
+	const configs = await loadNetworkInterfaceIpConfigurations(
+		clients,
+		options.nicResourceGroup,
+		options.nicName,
+		options.nic,
+		{ forceList: true }
+	).catch(() => options.nic.ipConfigurations ?? []);
+
+	for (const config of configs) {
+		await rememberPublicIpFromConfig(clients, ips, config).catch(() => undefined);
+	}
+	return { ips, configs };
+}
+
+async function createNetworkInterfaceWithRetry(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		nicName: string;
+		nic: NetworkInterface;
+		progress?: CreateVmProgressReporter;
+	}
+): Promise<NetworkInterface> {
+	let lastError = '';
+	for (let attempt = 1; attempt <= 5; attempt++) {
+		try {
+			const nic = await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
+				options.resourceGroup,
+				options.nicName,
+				options.nic
+			);
+			if (!nic.id) throw new Error('Azure 未返回网卡资源 ID');
+			return nic;
+		} catch (err) {
+			lastError = formatAzureError(err);
+			await reportCreateVmProgress(
+				options.progress,
+				'nic',
+				attempt >= 5 ? 'error' : 'info',
+				attempt >= 5 ? '网卡创建失败' : `网卡创建暂未完成，等待后重试 ${attempt}/5`,
+				{
+					nicName: options.nicName,
+					attempt,
+					error: lastError.length > 800 ? `${lastError.slice(0, 800)}...` : lastError
+				}
+			);
+			if (!isTransientAzureReadError(err) && attempt >= 2) throw err;
+			if (attempt < 5) await sleep(4000);
+		}
+	}
+	throw new Error(`网卡创建失败 ${options.nicName}: ${lastError || 'Azure 未返回创建结果'}`);
+}
+
+async function waitForNicPublicIps(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		vmName: string;
+		nicResourceGroup: string;
+		nicName: string;
+		nic: NetworkInterface;
+		requireIpv6: boolean;
+		progress?: CreateVmProgressReporter;
+	}
+): Promise<{ nic: NetworkInterface; publicIPv4: string; publicIPv6: string }> {
+	let latestNic = options.nic;
+	let lastError = '';
+	for (let attempt = 1; attempt <= 15; attempt++) {
+		try {
+			latestNic = await clients.network.networkInterfaces.get(options.nicResourceGroup, options.nicName);
+			const { ips, configs } = await readPublicIpsFromNic(clients, {
+				nicResourceGroup: options.nicResourceGroup,
+				nicName: options.nicName,
+				nic: latestNic
+			});
+			if (!ips.publicIPv4 || (options.requireIpv6 && !ips.publicIPv6)) {
+				await collectPublicIpsFromResourceGroup(clients, {
+					resourceGroup: options.resourceGroup,
+					vmName: options.vmName,
+					nics: [{ nicResourceGroup: options.nicResourceGroup, nicName: options.nicName, nic: latestNic }],
+					ips,
+					progress: options.progress,
+					progressStep: 'nic-public-ip'
+				}).catch(() => undefined);
+			}
+			const hasIpv4Config = configs.some((config) => isNicIPv4Config(config) && config.publicIPAddress?.id);
+			const hasIpv6Config = configs.some((config) => isNicIPv6Config(config) && config.publicIPAddress?.id);
+			if (ips.publicIPv4 && (!options.requireIpv6 || ips.publicIPv6)) {
+				await reportCreateVmProgress(options.progress, 'nic-public-ip', 'success', '网卡公网 IP 绑定已确认', {
+					nicName: options.nicName,
+					publicIPv4: ips.publicIPv4,
+					publicIPv6: ips.publicIPv6 || '-',
+					hasIpv4Config,
+					hasIpv6Config
+				});
+				return { nic: latestNic, publicIPv4: ips.publicIPv4, publicIPv6: ips.publicIPv6 };
+			}
+			lastError =
+				`公网 IP 尚未完整返回: IPv4=${ips.publicIPv4 || '-'} IPv6=${ips.publicIPv6 || '-'} ` +
+				`IPv4Config=${hasIpv4Config ? 'yes' : 'no'} IPv6Config=${hasIpv6Config ? 'yes' : 'no'}`;
+		} catch (err) {
+			lastError = formatAzureError(err);
+			if (!isTransientAzureReadError(err) && attempt >= 2) throw err;
+		}
+		await reportCreateVmProgress(options.progress, 'nic-public-ip', 'info', `等待网卡返回公网 IP 绑定 ${attempt}/15`, {
+			nicName: options.nicName,
+			requireIpv6: options.requireIpv6,
+			error: lastError.length > 800 ? `${lastError.slice(0, 800)}...` : lastError
+		});
+		await sleep(3000);
+	}
+	throw new Error(
+		`网卡公网 IP 绑定确认失败 ${options.nicName}: ${lastError || 'Azure 未返回 IPv4/IPv6 公网 IP'}`
+	);
 }
 
 async function findVmNetworkInterface(
@@ -4274,28 +4438,16 @@ async function createNetworkForVm(
 
 	let ipv6: PublicIPAddress | null = null;
 	if (options.enableIpv6) {
-		try {
-			ipv6 = await createPublicIp(clients, {
-				resourceGroup: options.resourceGroup,
-				location: options.location,
-				name: resourceName(options.vmName, 'pip6'),
-				version: 'IPv6',
-				ddosProtectionPlanId: ddosPlan?.id,
-				progress: options.progress,
-				step: 'public-ipv6'
-			});
-		} catch (err) {
-			await reportCreateVmProgress(
-				options.progress,
-				'public-ipv6',
-				'info',
-				'IPv6 公网 IP 创建失败，已降级为仅私网 IPv4 创建 VM，后续继续创建实例',
-				{
-					error: formatAzureError(err).slice(0, 800)
-				}
-			);
-			ipv6 = null;
-		}
+		ipv6 = await createPublicIp(clients, {
+			resourceGroup: options.resourceGroup,
+			location: options.location,
+			name: resourceName(options.vmName, 'pip6'),
+			version: 'IPv6',
+			ddosProtectionPlanId: ddosPlan?.id,
+			progress: options.progress,
+			step: 'public-ipv6'
+		});
+		if (!ipv6.id) throw new Error('IPv6 公网 IP 创建失败');
 	}
 	await reportCreateVmProgress(options.progress, 'subnet', 'running', '读取子网信息并准备网卡配置', {
 		vnetName,
@@ -4359,15 +4511,16 @@ async function createNetworkForVm(
 	});
 	let nic: NetworkInterface;
 	try {
-		nic = await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
-			options.resourceGroup,
+		nic = await createNetworkInterfaceWithRetry(clients, {
+			resourceGroup: options.resourceGroup,
 			nicName,
-			{
+			progress: options.progress,
+			nic: {
 				location: options.location,
 				networkSecurityGroup: { id: nsg.id },
 				ipConfigurations
 			}
-		);
+		});
 	} catch (err) {
 		const message = formatAzureError(err);
 		await reportCreateVmProgress(options.progress, 'nic', 'error', '网卡创建失败', {
@@ -4379,25 +4532,47 @@ async function createNetworkForVm(
 		});
 		throw new Error(`网卡创建失败 ${nicName}: ${message}`);
 	}
-	if (!nic.id) throw new Error('网卡创建失败');
 
 	await reportCreateVmProgress(options.progress, 'nic', 'success', '网卡已创建', {
 		nicName,
-		nicId: nic.id
+		nicId: nic.id ?? ''
 	});
 
-	const createdIps = {
-		publicIPv4: ipv4.pip.ipAddress ?? '',
-		publicIPv6: ipv6?.ipAddress ?? ''
-	};
-	await collectPublicIpsFromResourceGroup(clients, {
+	const confirmedNetwork = await waitForNicPublicIps(clients, {
 		resourceGroup: options.resourceGroup,
 		vmName: options.vmName,
-		nics: [{ nicResourceGroup: options.resourceGroup, nicName, nic }],
-		ips: createdIps,
-		progress: options.progress,
-		progressStep: 'nic-public-ip'
-	}).catch(() => undefined);
+		nicResourceGroup: options.resourceGroup,
+		nicName,
+		nic,
+		requireIpv6: Boolean(ipv6?.id),
+		progress: options.progress
+	});
+	nic = confirmedNetwork.nic;
+	const createdIps = {
+		publicIPv4: confirmedNetwork.publicIPv4,
+		publicIPv6: confirmedNetwork.publicIPv6
+	};
+	if (createdIps.publicIPv4) {
+		await reportCreateVmProgress(
+			options.progress,
+			'public-ipv4',
+			ipv4.matched ? 'success' : 'info',
+			ipv4.matched
+				? `IPv4 ${createdIps.publicIPv4} 命中目标前缀`
+				: `IPv4 ${createdIps.publicIPv4} 已确认为最终使用地址`,
+			{
+				attempt: ipv4.attempts,
+				maxAttempts: ipv4MaxAttempts,
+				ip: createdIps.publicIPv4,
+				targetPrefix: targetIPv4Prefix,
+				publicIpName: parseResourceName(ipv4.pip.id),
+				matched: ipv4.matched,
+				kept: true,
+				deleted: false,
+				brushRecordOnly: true
+			}
+		);
+	}
 
 	return {
 		nic,
