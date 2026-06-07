@@ -58,8 +58,14 @@ if [[ ! -f "${APP_DIR}/deploy/aapanel/common.sh" ]]; then
 fi
 
 cd "$APP_DIR"
-# shellcheck source=deploy/aapanel/common.sh
-source "${APP_DIR}/deploy/aapanel/common.sh"
+
+load_common() {
+	# shellcheck source=deploy/aapanel/common.sh
+	source "${APP_DIR}/deploy/aapanel/common.sh"
+	log() { echo -e "${GREEN}[update]${NC} $*"; }
+}
+
+load_common
 
 # ---------- 可配置项 ----------
 APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
@@ -69,8 +75,6 @@ REPO_URL="${REPO_URL:-https://github.com/kexue-aihao/Azure-Panel.git}"
 WEB_PROGRAM="${WEB_PROGRAM:-azure-panel-web}"
 WORKER_PROGRAM="${WORKER_PROGRAM:-azure-panel-worker}"
 HEALTH_PORT="${HEALTH_PORT:-3000}"
-
-log() { echo -e "${GREEN}[update]${NC} $*"; }
 
 # ---------- 前置检查 ----------
 require_cmd git
@@ -109,7 +113,17 @@ else
 	else
 		git pull "$GIT_REMOTE" "$GIT_BRANCH"
 	fi
+
+	if [[ "${AZURE_PANEL_UPDATE_REEXEC:-0}" != "1" ]]; then
+		log "已同步新版代码，重新执行新版 update.sh 以避免旧脚本逻辑继续运行..."
+		export AZURE_PANEL_UPDATE_REEXEC=1
+		exec "${BASH:-bash}" "${APP_DIR}/update.sh"
+	fi
 fi
+
+# update.sh 会先加载 common.sh 再拉取代码；如果本次升级更新了 common.sh，
+# 必须重新加载一次，当前进程才能使用新版健康检查/清理/重启逻辑。
+load_common
 
 # 旧版本仓库未记录可执行位时，更新后会变回 0644；这里兜底恢复，避免下次还要手动 chmod。
 chmod +x "${APP_DIR}/install.sh" "${APP_DIR}/update.sh" 2>/dev/null || true
