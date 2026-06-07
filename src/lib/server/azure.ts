@@ -125,11 +125,10 @@ export type CreateVmOptions = {
 	adminUsername: string;
 	adminPassword: string;
 	enableIpv6?: boolean;
+	enableAcceleratedNetworking?: boolean;
 	openPorts?: string | string[];
 	enableDdosProtection?: boolean;
 	customData?: string;
-	ipPrefix?: string;
-	ipBrushMaxAttempts?: number;
 	progress?: CreateVmProgressReporter;
 };
 
@@ -4314,10 +4313,9 @@ async function createNetworkForVm(
 		location: string;
 		vmName: string;
 		enableIpv6: boolean;
+		enableAcceleratedNetworking?: boolean;
 		openPorts?: string | string[];
 		enableDdosProtection?: boolean;
-		ipPrefix?: string;
-		ipBrushMaxAttempts?: number;
 		progress?: CreateVmProgressReporter;
 	}
 ) {
@@ -4411,30 +4409,16 @@ async function createNetworkForVm(
 		progress: options.progress
 	});
 
-	const targetIPv4Prefix = normalizeCreateIpPrefix(options.ipPrefix);
-	const ipv4MaxAttempts = normalizeAttempts(options.ipBrushMaxAttempts, 10);
-	await reportCreateVmProgress(
-		options.progress,
-		'public-ipv4',
-		'running',
-		`创建 VM 前先刷 IPv4 前缀 ${targetIPv4Prefix}，最多 ${ipv4MaxAttempts} 次`,
-		{
-			targetPrefix: targetIPv4Prefix,
-			maxAttempts: ipv4MaxAttempts
-		}
-	);
-	const ipv4 = await createMatchingIPv4PublicIp(clients, {
+	const ipv4 = await createPublicIp(clients, {
 		resourceGroup: options.resourceGroup,
 		location: options.location,
-		vmName: options.vmName,
-		targetPrefix: targetIPv4Prefix,
-		maxAttempts: ipv4MaxAttempts,
-		nameSalt: String(Date.now()),
+		name: resourceName(options.vmName, 'pip4'),
+		version: 'IPv4',
 		ddosProtectionPlanId: ddosPlan?.id,
-		fallbackToLastOnMiss: true,
-		progress: options.progress
+		progress: options.progress,
+		step: 'public-ipv4'
 	});
-	if (!ipv4.pip.id) throw new Error('IPv4 公网 IP 创建失败');
+	if (!ipv4.id) throw new Error('IPv4 公网 IP 创建失败');
 
 	let ipv6: PublicIPAddress | null = null;
 	if (options.enableIpv6) {
@@ -4490,7 +4474,7 @@ async function createNetworkForVm(
 			subnet: { id: subnetId },
 			privateIPAllocationMethod: 'Dynamic',
 			privateIPAddressVersion: 'IPv4',
-			publicIPAddress: { id: ipv4.pip.id }
+			publicIPAddress: { id: ipv4.id }
 		}
 	];
 	if (ipv6?.id) {
@@ -4506,8 +4490,9 @@ async function createNetworkForVm(
 
 	await reportCreateVmProgress(options.progress, 'nic', 'running', '创建网卡并准备 VM 网络配置', {
 		nicName,
-		ipv4: ipv4.pip.ipAddress ?? '',
-		ipv6: ipv6?.ipAddress ?? ''
+		ipv4: ipv4.ipAddress ?? '',
+		ipv6: ipv6?.ipAddress ?? '',
+		acceleratedNetworking: Boolean(options.enableAcceleratedNetworking)
 	});
 	let nic: NetworkInterface;
 	try {
@@ -4518,7 +4503,8 @@ async function createNetworkForVm(
 			nic: {
 				location: options.location,
 				networkSecurityGroup: { id: nsg.id },
-				ipConfigurations
+				ipConfigurations,
+				enableAcceleratedNetworking: Boolean(options.enableAcceleratedNetworking)
 			}
 		});
 	} catch (err) {
@@ -4526,8 +4512,9 @@ async function createNetworkForVm(
 		await reportCreateVmProgress(options.progress, 'nic', 'error', '网卡创建失败', {
 			nicName,
 			subnetId,
-			ipv4PublicIpId: ipv4.pip.id,
+			ipv4PublicIpId: ipv4.id,
 			ipv6PublicIpId: ipv6?.id ?? '',
+			acceleratedNetworking: Boolean(options.enableAcceleratedNetworking),
 			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
 		});
 		throw new Error(`网卡创建失败 ${nicName}: ${message}`);
@@ -4535,7 +4522,8 @@ async function createNetworkForVm(
 
 	await reportCreateVmProgress(options.progress, 'nic', 'success', '网卡已创建', {
 		nicName,
-		nicId: nic.id ?? ''
+		nicId: nic.id ?? '',
+		acceleratedNetworking: Boolean(nic.enableAcceleratedNetworking)
 	});
 
 	const confirmedNetwork = await waitForNicPublicIps(clients, {
@@ -4556,20 +4544,14 @@ async function createNetworkForVm(
 		await reportCreateVmProgress(
 			options.progress,
 			'public-ipv4',
-			ipv4.matched ? 'success' : 'info',
-			ipv4.matched
-				? `IPv4 ${createdIps.publicIPv4} 命中目标前缀`
-				: `IPv4 ${createdIps.publicIPv4} 已确认为最终使用地址`,
+			'success',
+			`IPv4 ${createdIps.publicIPv4} 已确认为最终使用地址`,
 			{
-				attempt: ipv4.attempts,
-				maxAttempts: ipv4MaxAttempts,
 				ip: createdIps.publicIPv4,
-				targetPrefix: targetIPv4Prefix,
-				publicIpName: parseResourceName(ipv4.pip.id),
-				matched: ipv4.matched,
+				publicIpName: parseResourceName(ipv4.id),
+				matched: false,
 				kept: true,
-				deleted: false,
-				brushRecordOnly: true
+				deleted: false
 			}
 		);
 	}
@@ -4578,8 +4560,8 @@ async function createNetworkForVm(
 		nic,
 		publicIPv4: createdIps.publicIPv4,
 		publicIPv6: createdIps.publicIPv6,
-		ipBrushAttempts: ipv4.attempts,
-		ipBrushMatched: ipv4.matched
+		ipBrushAttempts: 0,
+		ipBrushMatched: false
 	};
 }
 
@@ -4629,10 +4611,9 @@ export async function createVmAdvanced(
 		location,
 		vmName,
 		enableIpv6: options.enableIpv6 === true,
+		enableAcceleratedNetworking: options.enableAcceleratedNetworking === true,
 		openPorts: options.openPorts,
 		enableDdosProtection: options.enableDdosProtection === true,
-		ipPrefix: options.ipPrefix,
-		ipBrushMaxAttempts: options.ipBrushMaxAttempts,
 		progress: options.progress
 	});
 

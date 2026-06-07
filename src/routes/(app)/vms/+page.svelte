@@ -193,12 +193,11 @@
 		admin_username: 'azureuser',
 		admin_password: '',
 		enable_ipv6: true,
+		enable_accelerated_networking: false,
 		open_ports: '*',
 		enable_ddos_protection: false,
 		dns_binding_id: '',
-		userdata: '',
-		ip_prefix: '',
-		ip_brush_max_attempts: 10
+		userdata: ''
 	});
 
 	const accountSelectId = 'account-select';
@@ -345,6 +344,7 @@
 		const publicIpName =
 			progressDetailString(event.detail, 'publicIpName') ||
 			progressDetailString(event.detail, 'name');
+		if (!targetPrefix) return null;
 		if (!ip && !publicIpName) return null;
 		const explicitMatched = event.detail?.matched === true;
 		const explicitMissed = event.detail?.matched === false;
@@ -1036,8 +1036,7 @@
 				...createForm,
 				account_id: accountId,
 				...proxyPayload(),
-				dns_binding_id: createForm.dns_binding_id ? Number(createForm.dns_binding_id) : 0,
-				ip_brush_max_attempts: Number(createForm.ip_brush_max_attempts)
+				dns_binding_id: createForm.dns_binding_id ? Number(createForm.dns_binding_id) : 0
 			});
 			mergeCreateProgress({
 				step: 'prepare',
@@ -1045,8 +1044,7 @@
 				message: '创建请求已完成',
 				timestamp: new Date().toISOString()
 			});
-			createBrushedIps = fillBrushedIpFromResult(createBrushedIps, result.public_ipv4);
-			toast = `VM ${result.name} 创建完成，IPv4=${result.public_ipv4 || '-'} IPv6=${result.public_ipv6 || '-'}，刷IP次数=${result.ip_brush_attempts}`;
+			toast = `VM ${result.name} 创建完成，IPv4=${result.public_ipv4 || '-'} IPv6=${result.public_ipv6 || '-'}`;
 			resourceGroup = result.resource_group;
 			refreshCreateNames();
 			refreshAdminPassword();
@@ -1685,6 +1683,13 @@
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={createForm.enable_ipv6} /> 同时创建 IPv6 公网地址
 		</label>
+		<label class="flex items-center gap-2 text-sm">
+			<input type="checkbox" bind:checked={createForm.enable_accelerated_networking} />
+			启用 Azure 加速网络
+		</label>
+		<p class="-mt-2 text-xs text-muted">
+			创建 VM 时会直接申请 IPv4 公网 IP；勾选 IPv6 时同步创建 IPv6 公网 IP，不再执行创建前刷 IP 段。
+		</p>
 		<div>
 			<label class="mb-1 block text-xs text-muted" for="create-open-ports">入站放行端口</label>
 			<input
@@ -1717,24 +1722,6 @@
 		</label>
 		<p class="-mt-2 text-xs text-muted">
 			DDoS Protection Plan 可能产生 Azure 官方额外费用；如果当前订阅或区域不允许创建，将自动跳过并继续创建 VM。
-		</p>
-		<div class="grid gap-3 md:grid-cols-2">
-			<input
-				class="input"
-				bind:value={createForm.ip_prefix}
-				placeholder="目标 IPv4 前缀，留空默认 85.211"
-			/>
-			<input
-				class="input"
-				type="number"
-				min="1"
-				max="500"
-				bind:value={createForm.ip_brush_max_attempts}
-				placeholder="最大刷 IP 次数"
-			/>
-		</div>
-		<p class="-mt-2 text-xs text-muted">
-			创建 VM 时默认最多刷 10 次 IPv4；超过最大次数仍未命中，会保留最后一次刷到的 IPv4 并继续下一步。
 		</p>
 		<textarea
 			class="input min-h-36 font-mono text-xs"

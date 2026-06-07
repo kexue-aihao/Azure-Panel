@@ -1079,8 +1079,6 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 							adminPassword: password,
 							enableIpv6: policy.enableIpv6,
 							customData: userdata,
-							ipPrefix: policy.ipPrefix,
-							ipBrushMaxAttempts: policy.ipBrushMaxAttempts,
 							progress: (event) => logCreateProgress(policy.id, event)
 						});
 						await insertWorkflowLog(
@@ -1089,7 +1087,7 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 							'success',
 							`已使用账号 ${replenishRuntime.account.name} 创建 VM: ${vmName} 规格 ${replenishmentVmSize} 代理=${createProxyLabel} 资源组=${resourceGroup} IPv4=${result.publicIPv4 || '-'} IPv6=${
 								result.publicIPv6 || '-'
-							} 刷 IP 次数=${result.ipBrushAttempts}`
+							}`
 						);
 						await clearReplenishmentFailure(policy);
 						await saveTrackedVmName(policy, result.name);

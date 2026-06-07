@@ -152,7 +152,6 @@
 			vm_names: vmNames,
 			min_running_count: Number(form.replenish_target_count),
 			replenish_target_count: Number(form.replenish_target_count),
-			ip_brush_max_attempts: Number(form.ip_brush_max_attempts),
 			check_interval_seconds: 60,
 			dns_binding_id: Number(form.dns_binding_id || 0),
 			status_check_enabled: form.status_check_enabled,
@@ -606,21 +605,9 @@
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={form.enable_ipv6} /> 自动补机时同时创建 IPv6 公网地址
 		</label>
-		<div class="grid gap-3 sm:grid-cols-2">
-			<input
-				class="input"
-				bind:value={form.ip_prefix}
-				placeholder="补机目标 IPv4 前缀，留空默认 85.211"
-			/>
-			<input
-				class="input"
-				type="number"
-				bind:value={form.ip_brush_max_attempts}
-				min="1"
-				max="500"
-				placeholder="最大刷 IP 次数"
-			/>
-		</div>
+		<p class="-mt-2 text-xs text-muted">
+			自动补机会直接申请 IPv4 公网 IP；勾选 IPv6 时同步创建 IPv6 公网 IP，不执行创建前刷 IP 段。
+		</p>
 		<textarea
 			class="input min-h-36 font-mono text-xs"
 			bind:value={form.userdata}
@@ -696,7 +683,7 @@
 								: '-'}
 						</p>
 						<p class="text-xs text-muted">
-							IPv6: {workflow.enable_ipv6 ? '是' : '否'} · IPv4 前缀: {workflow.ip_prefix || '-'} · UserData: {workflow.userdata_configured
+							IPv6: {workflow.enable_ipv6 ? '是' : '否'} · UserData: {workflow.userdata_configured
 								? '已配置'
 								: '未配置'}
 						</p>
