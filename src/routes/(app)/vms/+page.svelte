@@ -1173,7 +1173,6 @@
 					}
 				}
 			);
-			operationBrushedIps = fillBrushedIpFromResult(operationBrushedIps, result.public_ipv4 || '');
 			toast = `${vm.name} 已更换 IPv4：${result.old_public_ipv4 || '-'} -> ${result.public_ipv4 || '-'}`;
 			await loadVms();
 		} catch (err) {

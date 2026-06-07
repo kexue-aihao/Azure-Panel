@@ -37,8 +37,6 @@ export const DIRECT_PROXY = Symbol('DIRECT_PROXY');
 export type AzureProxySelection = ProxyRuntimeConfig | typeof DIRECT_PROXY | null;
 
 const DEFAULT_CREATE_IP_PREFIX = '85.211';
-const DEFAULT_REPLACE_IPV4_ATTEMPTS = 10;
-
 export type VmInfo = {
 	name: string;
 	resourceGroup: string;
@@ -5179,80 +5177,81 @@ export async function replaceVmPublicIPv4(
 		oldBinding?.ipConfigName && oldBinding.ipConfigName !== ipConfig.name
 			? ({ ...ipConfig, name: oldBinding.ipConfigName } as NetworkInterfaceIPConfiguration)
 			: ipConfig;
+	if (oldPublicIpId) {
+		await reportCreateVmProgress(progress, 'replace-ip-detach', 'running', '从网卡解绑当前 IPv4 公网 IP', {
+			nicName,
+			oldPublicIpName,
+			oldPublicIPv4,
+			ipConfigName: targetIpConfig.name ?? '',
+			oldPublicIpSource: oldBinding?.source ?? 'none'
+		});
+		await detachPublicIpFromNic(clients, {
+			nicResourceGroup,
+			nicName,
+			nic,
+			ipConfig: targetIpConfig,
+			progress,
+			step: 'replace-ip-detach'
+		});
+		await reportCreateVmProgress(progress, 'replace-ip-detach', 'success', '当前 IPv4 已从网卡解绑', {
+			nicName,
+			oldPublicIpName,
+			oldPublicIPv4
+		});
+
+		await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'running', '删除当前 IPv4 公网 IP 以释放名额', {
+			oldPublicIpName,
+			oldPublicIPv4
+		});
+		await deletePublicIpById(clients, oldPublicIpId);
+		await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'success', '当前 IPv4 公网 IP 已删除', {
+			oldPublicIpName,
+			oldPublicIPv4
+		});
+	}
+
+	const newPublicIpName = resourceName(vmName, `pip4-${Date.now()}`);
 	await reportCreateVmProgress(progress, 'replace-ip-create', 'running', '创建新的 IPv4 公网 IP', {
 		resourceGroup: nicResourceGroup,
 		vmName,
 		oldPublicIPv4,
 		oldPublicIpName,
+		publicIpName: newPublicIpName,
 		ipConfigName: targetIpConfig.name ?? '',
 		oldPublicIpSource: oldBinding?.source ?? 'none'
 	});
-	const created = await createMatchingIPv4PublicIp(clients, {
+	const created = await createPublicIp(clients, {
 		resourceGroup: nicResourceGroup,
 		location: vmLocation,
-		vmName,
-		maxAttempts: DEFAULT_REPLACE_IPV4_ATTEMPTS,
-		nameSalt: String(Date.now()),
-		progress
+		name: newPublicIpName,
+		version: 'IPv4',
+		progress,
+		step: 'replace-ip-create',
+		waitForAddress: true
 	});
-	if (!created.pip.id) throw new Error('新公网 IPv4 创建失败');
+	if (!created.id) throw new Error('新公网 IPv4 创建失败');
 
 	try {
-		const switchMode = await detachOldPublicIpOrSwapDirectly(clients, {
-			resourceGroup,
-			vmName,
+		await reportCreateVmProgress(progress, 'replace-ip-attach', 'running', '绑定新的 IPv4 到网卡', {
+			nicName,
+			publicIpName: parseResourceName(created.id),
+			publicIPv4: publicIpAddressValue(created)
+		});
+		await attachPublicIpToNic(clients, {
 			nicResourceGroup,
 			nicName,
 			nic,
 			ipConfig: targetIpConfig,
-			oldPublicIpId,
-			oldPublicIpName,
-			oldPublicIPv4,
-			newPublicIpId: created.pip.id,
+			publicIpId: created.id,
 			progress,
-			prefix: 'replace-ip'
+			step: 'replace-ip-attach'
 		});
-		if (switchMode !== 'swapped') {
-			if (oldPublicIpId) {
-				await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
-					oldPublicIpName,
-					oldPublicIPv4,
-					mode: switchMode
-				});
-				await deletePublicIpById(clients, oldPublicIpId);
-			}
-
-			await reportCreateVmProgress(progress, 'replace-ip-attach', 'running', '绑定新的 IPv4 到网卡', {
-				nicName,
-				publicIpName: parseResourceName(created.pip.id)
-			});
-			await attachPublicIpToNic(clients, {
-				nicResourceGroup,
-				nicName,
-				nic,
-				ipConfig: targetIpConfig,
-				publicIpId: created.pip.id,
-				progress,
-				step: 'replace-ip-attach'
-			});
-		}
-		if (switchMode === 'swapped') {
-			await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
-				oldPublicIpName,
-				oldPublicIPv4,
-				mode: switchMode
-			});
-			await deletePublicIpById(clients, oldPublicIpId);
-		}
 	} catch (err) {
-		if (oldPublicIpId) {
-			await reportCreateVmProgress(progress, 'replace-ip-recover', 'info', 'IPv4 更换失败，新 IPv4 已保留以便手动恢复', {
-				publicIpName: parseResourceName(created.pip.id),
-				error: formatAzureError(err).slice(0, 800)
-			});
-		} else {
-			await deletePublicIpById(clients, created.pip.id);
-		}
+		await reportCreateVmProgress(progress, 'replace-ip-recover', 'info', 'IPv4 更换绑定失败，新 IPv4 已保留以便手动恢复', {
+			publicIpName: parseResourceName(created.id),
+			publicIPv4: publicIpAddressValue(created),
+			error: formatAzureError(err).slice(0, 800)
+		});
 		throw err;
 	}
 
@@ -5260,11 +5259,11 @@ export async function replaceVmPublicIPv4(
 		nicResourceGroup,
 		nicName,
 		ipConfigName: targetIpConfig.name,
-		fallbackPublicIpId: created.pip.id,
+		fallbackPublicIpId: created.id,
 		progress,
 		step: 'replace-ip-complete'
 	});
-	const createdPublicIPv4 = publicIpAddressValue(created.pip);
+	const createdPublicIPv4 = publicIpAddressValue(created);
 	await reportCreateVmProgress(progress, 'replace-ip-complete', 'success', 'IPv4 更换完成', {
 		oldPublicIPv4,
 		publicIPv4: fresh.publicIPv4 || createdPublicIPv4
@@ -5274,7 +5273,7 @@ export async function replaceVmPublicIPv4(
 		resourceGroup,
 		publicIPv4: fresh.publicIPv4 || createdPublicIPv4,
 		oldPublicIPv4,
-		publicIpName: fresh.publicIpName || parseResourceName(created.pip.id)
+		publicIpName: fresh.publicIpName || parseResourceName(created.id)
 	};
 }
 
