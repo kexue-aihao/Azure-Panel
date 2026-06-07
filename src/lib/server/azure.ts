@@ -1707,13 +1707,130 @@ function isPublicIpResourceIPv6(pip: PublicIPAddress) {
 	return Boolean(pip.ipAddress?.includes(':'));
 }
 
+function rememberPublicIp(ips: { publicIPv4: string; publicIPv6: string }, pip: PublicIPAddress) {
+	const address = pip.ipAddress ?? '';
+	if (!address) return false;
+	if (isPublicIpResourceIPv6(pip)) {
+		if (!ips.publicIPv6) ips.publicIPv6 = address;
+		return Boolean(ips.publicIPv6);
+	}
+	if (!ips.publicIPv4) ips.publicIPv4 = address;
+	return Boolean(ips.publicIPv4);
+}
+
+function publicIpReferencesNic(
+	pip: PublicIPAddress,
+	nics: { nicResourceGroup: string; nicName: string; nic: NetworkInterface }[]
+) {
+	const ipConfigId = normalizeResourceToken(pip.ipConfiguration?.id ?? '');
+	if (!ipConfigId) return false;
+	return nics.some(({ nicName, nic }) => {
+		const nicId = normalizeResourceToken(nic.id ?? '');
+		const normalizedNicName = normalizeResourceToken(nicName || nic.name || '');
+		return (
+			(Boolean(nicId) && ipConfigId.includes(nicId)) ||
+			(Boolean(normalizedNicName) && ipConfigId.includes(`/networkinterfaces/${normalizedNicName}/`))
+		);
+	});
+}
+
+function publicIpNameMatchesVm(pip: PublicIPAddress, vmName: string) {
+	const pipName = normalizeResourceToken(pip.name ?? parseResourceName(pip.id ?? ''));
+	const cleanVmName = normalizeResourceToken(sanitizeResourceName(vmName));
+	const rawVmName = normalizeResourceToken(vmName);
+	return (
+		pipName.startsWith(`${cleanVmName}-pip`) ||
+		pipName.startsWith(`${rawVmName}-pip`) ||
+		(pipName.includes(rawVmName) && pipName.includes('pip'))
+	);
+}
+
+async function collectPublicIpsFromResourceGroup(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		vmName: string;
+		nics: { nicResourceGroup: string; nicName: string; nic: NetworkInterface }[];
+		ips: { publicIPv4: string; publicIPv6: string };
+		progress?: CreateVmProgressReporter;
+		progressStep?: string;
+	}
+) {
+	if (!options.resourceGroup || !options.vmName) return;
+	let fallbackIPv4 = '';
+	let fallbackIPv6 = '';
+	let fallbackIPv4Count = 0;
+	let fallbackIPv6Count = 0;
+	let associatedIPv4 = '';
+	let associatedIPv6 = '';
+	let associatedIPv4Count = 0;
+	let associatedIPv6Count = 0;
+
+	for await (const listed of clients.network.publicIPAddresses.list(options.resourceGroup)) {
+		if (options.ips.publicIPv4 && options.ips.publicIPv6) break;
+		const pipName = listed.name ?? parseResourceName(listed.id ?? '');
+		let pip = listed;
+		if (pipName) {
+			pip = await clients.network.publicIPAddresses
+				.get(options.resourceGroup, pipName)
+				.catch(() => listed);
+		}
+		const linkedToNic = publicIpReferencesNic(pip, options.nics);
+		const nameMatchesVm = publicIpNameMatchesVm(pip, options.vmName);
+		if (!linkedToNic && !nameMatchesVm) {
+			const address = pip.ipAddress ?? '';
+			if (address) {
+				const associatedWithAnyNic =
+					Boolean(pip.ipConfiguration?.id) &&
+					normalizeResourceToken(pip.ipConfiguration?.id ?? '').includes('/networkinterfaces/');
+				if (isPublicIpResourceIPv6(pip)) {
+					fallbackIPv6 = address;
+					fallbackIPv6Count += 1;
+					if (associatedWithAnyNic) {
+						associatedIPv6 = address;
+						associatedIPv6Count += 1;
+					}
+				} else {
+					fallbackIPv4 = address;
+					fallbackIPv4Count += 1;
+					if (associatedWithAnyNic) {
+						associatedIPv4 = address;
+						associatedIPv4Count += 1;
+					}
+				}
+			}
+			continue;
+		}
+		if (options.progress && pipName) {
+			await reportCreateVmProgress(
+				options.progress,
+				options.progressStep ?? 'refresh-ip-public-ip',
+				'running',
+				'Reverse lookup public IP resources from resource group',
+				{
+					publicIpName: pipName,
+					resourceGroup: options.resourceGroup,
+					matchedBy: linkedToNic ? 'nic' : 'name'
+				}
+			);
+		}
+		rememberPublicIp(options.ips, pip);
+	}
+
+	if (!options.ips.publicIPv4 && associatedIPv4Count === 1) options.ips.publicIPv4 = associatedIPv4;
+	if (!options.ips.publicIPv6 && associatedIPv6Count === 1) options.ips.publicIPv6 = associatedIPv6;
+	if (!options.ips.publicIPv4 && fallbackIPv4Count === 1) options.ips.publicIPv4 = fallbackIPv4;
+	if (!options.ips.publicIPv6 && fallbackIPv6Count === 1) options.ips.publicIPv6 = fallbackIPv6;
+}
+
 async function collectPublicIps(
 	clients: AzureClients,
 	vm: {
 		networkProfile?: { networkInterfaces?: { id?: string }[] };
 		name?: string;
 		id?: string;
-	}
+	},
+	resourceGroupHint?: string
 ) {
 	const ips = { publicIPv4: '', publicIPv6: '' };
 	const nicRefs = vm.networkProfile?.networkInterfaces ?? [];
@@ -1736,7 +1853,7 @@ async function collectPublicIps(
 	}
 
 	if (nics.length === 0 && vm.name) {
-		const vmResourceGroup = parseResourceGroup(vm.id ?? '');
+		const vmResourceGroup = resourceGroupHint || parseResourceGroup(vm.id ?? '');
 		if (vmResourceGroup) {
 			try {
 				const resolved = await findVmNetworkInterface(clients, vmResourceGroup, vm.name);
@@ -1764,11 +1881,23 @@ async function collectPublicIps(
 			if (!pipName || !pipResourceGroup) continue;
 			try {
 				const pip = await clients.network.publicIPAddresses.get(pipResourceGroup, pipName);
-				if (isPublicIpResourceIPv6(pip)) ips.publicIPv6 ||= pip.ipAddress ?? '';
-				else ips.publicIPv4 ||= pip.ipAddress ?? '';
+				rememberPublicIp(ips, pip);
 			} catch {
 				// Keep listing resilient even if one public IP disappears during refresh.
 			}
+		}
+	}
+	if ((!ips.publicIPv4 || !ips.publicIPv6) && vm.name) {
+		const vmResourceGroup = resourceGroupHint || parseResourceGroup(vm.id ?? '');
+		try {
+			await collectPublicIpsFromResourceGroup(clients, {
+				resourceGroup: vmResourceGroup,
+				vmName: vm.name,
+				nics,
+				ips
+			});
+		} catch {
+			// Listing VMs should stay resilient even if Public IP reverse lookup is temporarily unavailable.
 		}
 	}
 	return ips;
@@ -1789,7 +1918,7 @@ export async function listVirtualMachines(
 		const power =
 			view.statuses?.find((s) => s.code?.startsWith('PowerState/'))?.code?.replace('PowerState/', '') ??
 			'unknown';
-		const publicIps = await collectPublicIps(clients, vm);
+		const publicIps = await collectPublicIps(clients, vm, rg);
 		items.push({
 			name: vm.name ?? '',
 			resourceGroup: rg,
@@ -1827,6 +1956,7 @@ export async function refreshVmPublicIps(
 
 	let publicIPv4 = '';
 	let publicIPv6 = '';
+	const ips = { publicIPv4, publicIPv6 };
 	let configs: NetworkInterfaceIPConfiguration[] = [];
 	try {
 		configs = await loadNetworkInterfaceIpConfigurations(clients, nicResourceGroup, nicName, nic, {
@@ -1846,11 +1976,22 @@ export async function refreshVmPublicIps(
 			publicIpResourceGroup: pipResourceGroup
 		});
 		const pip = await clients.network.publicIPAddresses.get(pipResourceGroup, pipName);
-		if (isPublicIpResourceIPv6(pip)) publicIPv6 ||= pip.ipAddress ?? '';
-		else publicIPv4 ||= pip.ipAddress ?? '';
+		rememberPublicIp(ips, pip);
 	}
 
-	await reportCreateVmProgress(progress, 'refresh-ip-complete', 'success', '公网 IP 重读完成', {
+	if (!ips.publicIPv4 || !ips.publicIPv6) {
+		await collectPublicIpsFromResourceGroup(clients, {
+			resourceGroup,
+			vmName,
+			nics: [{ nicResourceGroup, nicName, nic }],
+			ips,
+			progress,
+			progressStep: 'refresh-ip-public-ip'
+		}).catch(() => undefined);
+	}
+	publicIPv4 = ips.publicIPv4;
+	publicIPv6 = ips.publicIPv6;
+	await reportCreateVmProgress(progress, 'refresh-ip-complete', 'success', 'Public IP refresh complete', {
 		vmName,
 		publicIPv4: publicIPv4 || '-',
 		publicIPv6: publicIPv6 || '-',
@@ -4245,10 +4386,23 @@ async function createNetworkForVm(
 		nicId: nic.id
 	});
 
+	const createdIps = {
+		publicIPv4: ipv4.pip.ipAddress ?? '',
+		publicIPv6: ipv6?.ipAddress ?? ''
+	};
+	await collectPublicIpsFromResourceGroup(clients, {
+		resourceGroup: options.resourceGroup,
+		vmName: options.vmName,
+		nics: [{ nicResourceGroup: options.resourceGroup, nicName, nic }],
+		ips: createdIps,
+		progress: options.progress,
+		progressStep: 'nic-public-ip'
+	}).catch(() => undefined);
+
 	return {
 		nic,
-		publicIPv4: ipv4.pip.ipAddress ?? '',
-		publicIPv6: ipv6?.ipAddress ?? '',
+		publicIPv4: createdIps.publicIPv4,
+		publicIPv6: createdIps.publicIPv6,
 		ipBrushAttempts: ipv4.attempts,
 		ipBrushMatched: ipv4.matched
 	};
