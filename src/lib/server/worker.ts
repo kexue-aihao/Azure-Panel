@@ -561,7 +561,11 @@ async function pickReplenishmentRuntimeFromPool(options: {
 }
 
 async function logCreateProgress(policyId: number, event: CreateVmProgressEvent) {
-	await insertWorkflowLog(policyId, `create:${event.step}`, event.status, event.message);
+	const detailError =
+		typeof event.detail?.error === 'string' && event.detail.error.trim()
+			? `: ${event.detail.error.trim()}`
+			: '';
+	await insertWorkflowLog(policyId, `create:${event.step}`, event.status, `${event.message}${detailError}`);
 }
 
 async function cleanupFailedReplenishmentResourceGroup(

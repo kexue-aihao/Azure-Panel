@@ -1048,6 +1048,44 @@
 		}
 	}
 
+	async function refreshVmIps(vm: Vm) {
+		if (!accountId) return;
+		ipActionLoading = `${vm.name}:refresh-ip`;
+		beginOperationProgress('重读网卡 IP 配置', vm.name);
+		try {
+			const result = await requestOperationWithProgress<{
+				public_ipv4: string;
+				public_ipv6: string;
+				nic_name: string;
+			}>('/api/user/azure/vm/ip/refresh', {
+				method: 'POST',
+				body: {
+					account_id: accountId,
+					...proxyPayload(),
+					resource_group: vm.resource_group,
+					vm_name: vm.name
+				}
+			});
+			vms = vms.map((item) =>
+				item.name === vm.name && item.resource_group === vm.resource_group
+					? {
+							...item,
+							public_ipv4: result.public_ipv4 || '',
+							public_ipv6: result.public_ipv6 || ''
+						}
+					: item
+			);
+			toast = `${vm.name} 已重读网卡 ${result.nic_name || '-'}，IPv4=${result.public_ipv4 || '-'} IPv6=${result.public_ipv6 || '-'}`;
+			await loadVms();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : '重读 IP 失败';
+			failOperationProgress(message);
+			toast = message;
+		} finally {
+			ipActionLoading = '';
+		}
+	}
+
 	async function brushIp(vm: Vm) {
 		if (!accountId) return;
 		if (!brushIpPrefix.trim()) {
@@ -1926,6 +1964,13 @@
 								disabled={vmActionBusy(vm.name)}
 							>
 								{ipActionLoading === `${vm.name}:replace` ? '更换中...' : '换 IPv4'}
+							</button>
+							<button
+								class="btn-secondary"
+								onclick={() => void refreshVmIps(vm)}
+								disabled={vmActionBusy(vm.name)}
+							>
+								{ipActionLoading === `${vm.name}:refresh-ip` ? '重读中...' : '重读 IP'}
 							</button>
 							<button
 								class="btn-secondary"
