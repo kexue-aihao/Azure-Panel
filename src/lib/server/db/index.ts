@@ -5,6 +5,7 @@ import {
 	createPool,
 	type FieldPacket,
 	type Pool,
+	type PoolConnection,
 	type QueryResult,
 	type QueryValues,
 	type RowDataPacket
@@ -20,6 +21,9 @@ import * as mysqlSchema from './schema.mysql';
 export type DbDriver = 'sqlite' | 'mysql';
 export type SqliteDb = ReturnType<typeof drizzleSqlite<typeof sqliteSchema>>;
 export type MysqlDb = ReturnType<typeof drizzleMysql<typeof mysqlSchema>>;
+export type InitDatabaseOptions = {
+	ensureSchema?: boolean;
+};
 
 let driver: DbDriver = 'sqlite';
 let sqliteDb: SqliteDb | null = null;
@@ -247,25 +251,257 @@ function compactSql(sql: string) {
 	return sql.replace(/\s+/g, ' ').trim().slice(0, 120);
 }
 
+function messageFromError(err: unknown) {
+	return err instanceof Error ? err.message : String(err);
+}
+
+function codedError(message: string, code: string) {
+	const err = new Error(message) as Error & { code?: string };
+	err.code = code;
+	return err;
+}
+
+function safeReleaseMysqlConnection(connection: PoolConnection | null) {
+	if (!connection) return;
+	try {
+		connection.release();
+	} catch (err) {
+		console.warn('[db] Failed to release MySQL connection:', err);
+	}
+}
+
+function safeDestroyMysqlConnection(connection: PoolConnection | null) {
+	if (!connection) return;
+	try {
+		connection.destroy();
+	} catch (err) {
+		console.warn('[db] Failed to destroy MySQL connection:', err);
+	}
+}
+
+async function safeCloseMysqlPool(pool: Pool | null) {
+	if (!pool) return;
+	const timeoutMs = readPositiveIntEnv('MYSQL_POOL_CLOSE_TIMEOUT_MS', 3_000);
+	try {
+		await Promise.race([
+			pool.end(),
+			new Promise<void>((_, reject) => {
+				setTimeout(
+					() =>
+						reject(
+							codedError(
+								`mysql-pool:close timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+								'MYSQL_INIT_TIMEOUT'
+							)
+						),
+					timeoutMs
+				);
+			})
+		]);
+	} catch (err) {
+		console.warn('[db] Failed to close MySQL pool after startup failure:', err);
+	}
+}
+
+function mysqlInitTimeoutError(step: string, timeoutMs: number) {
+	return codedError(
+		`${step} timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+		'MYSQL_INIT_TIMEOUT'
+	);
+}
+
+async function getMysqlInitConnection(pool: Pool, step: string) {
+	const timeoutMs = readPositiveIntEnv('MYSQL_CONNECT_TIMEOUT_MS', 5_000);
+	markStartupStep(`${step}:connect`);
+	return await new Promise<PoolConnection>((resolve, reject) => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			settled = true;
+			reject(mysqlInitTimeoutError(`${step}:connect`, timeoutMs));
+		}, timeoutMs);
+
+		void pool.getConnection().then(
+			(connection) => {
+				if (settled) {
+					safeDestroyMysqlConnection(connection);
+					return;
+				}
+				settled = true;
+				clearTimeout(timer);
+				resolve(connection);
+			},
+			(err) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				reject(err);
+			}
+		);
+	});
+}
+
+async function runMysqlInitQuery<T extends QueryResult>(
+	connection: PoolConnection,
+	sql: string,
+	values: QueryValues | undefined,
+	step: string,
+	timeoutMs = readPositiveIntEnv('MYSQL_INIT_QUERY_TIMEOUT_MS', 8_000)
+): Promise<[T, FieldPacket[]]> {
+	markStartupStep(step);
+	return await new Promise<[T, FieldPacket[]]>((resolve, reject) => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			settled = true;
+			safeDestroyMysqlConnection(connection);
+			reject(mysqlInitTimeoutError(step, timeoutMs));
+		}, timeoutMs);
+
+		void connection
+			.query<T>({
+				sql,
+				values,
+				timeout: timeoutMs
+			})
+			.then(
+				(result) => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timer);
+					resolve(result);
+				},
+				(err) => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timer);
+					reject(err);
+				}
+			);
+	});
+}
+
+async function mysqlStartupPing(pool: Pool) {
+	let connection: PoolConnection | null = null;
+	try {
+		connection = await getMysqlInitConnection(pool, 'mysql-schema:ping');
+		const timeoutMs = readPositiveIntEnv('MYSQL_INIT_PING_TIMEOUT_MS', 5_000);
+		markStartupStep('mysql-schema:ping');
+		await new Promise<void>((resolve, reject) => {
+			let settled = false;
+			const timer = setTimeout(() => {
+				settled = true;
+				safeDestroyMysqlConnection(connection);
+				reject(mysqlInitTimeoutError('mysql-schema:ping', timeoutMs));
+			}, timeoutMs);
+
+			void connection?.ping().then(
+				() => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timer);
+					resolve();
+				},
+				(err) => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timer);
+					reject(err);
+				}
+			);
+		});
+	} catch (err) {
+		const code = (err as { code?: string }).code;
+		const wrapped = new Error(
+			`mysql-schema:ping failed${code ? ` (${code})` : ''}: ${messageFromError(err)}`
+		);
+		(wrapped as Error & { code?: string }).code = code;
+		throw wrapped;
+	} finally {
+		safeReleaseMysqlConnection(connection);
+	}
+}
+
+async function withMysqlSchemaLock<T>(pool: Pool, fn: () => Promise<T>): Promise<T> {
+	const lockName = readEnv('MYSQL_SCHEMA_LOCK_NAME') ?? 'azure-panel:schema:init';
+	const lockWaitSeconds = readPositiveIntEnv('MYSQL_SCHEMA_LOCK_TIMEOUT_SECONDS', 15);
+	let connection: PoolConnection | null = null;
+	let locked = false;
+
+	try {
+		connection = await getMysqlInitConnection(pool, 'mysql-schema:lock');
+		const [rows] = await runMysqlInitQuery<RowDataPacket[]>(
+			connection,
+			'SELECT GET_LOCK(?, ?) AS locked',
+			[lockName, lockWaitSeconds],
+			'mysql-schema:lock',
+			(lockWaitSeconds + 3) * 1000
+		);
+		locked = Number(rows[0]?.locked ?? 0) === 1;
+		if (!locked) {
+			throw codedError(
+				`mysql-schema:lock failed: another process is still initializing schema after ${lockWaitSeconds} seconds`,
+				'MYSQL_SCHEMA_LOCK_TIMEOUT'
+			);
+		}
+
+		return await fn();
+	} finally {
+		if (connection && locked) {
+			await runMysqlInitQuery(
+				connection,
+				'SELECT RELEASE_LOCK(?)',
+				[lockName],
+				'mysql-schema:unlock',
+				3_000
+			).catch((err) => {
+				console.warn('[db] Failed to release MySQL schema lock:', err);
+			});
+		}
+		safeReleaseMysqlConnection(connection);
+	}
+}
+
+function setMysqlSessionTimezone(connection: unknown) {
+	const rawConnection =
+		(connection as { connection?: unknown } | null | undefined)?.connection ?? connection;
+	const query = (rawConnection as { query?: unknown } | null | undefined)?.query;
+	if (typeof query !== 'function') return;
+
+	try {
+		const result = (query as (sql: string, cb: (err: unknown) => void) => unknown).call(
+			rawConnection,
+			"SET time_zone = '+08:00'",
+			(err: unknown) => {
+				if (err) console.warn('[db] Failed to set MySQL session time_zone +08:00:', err);
+			}
+		);
+		if (result && typeof (result as { catch?: unknown }).catch === 'function') {
+			void (result as Promise<unknown>).catch((err) => {
+				console.warn('[db] Failed to set MySQL session time_zone +08:00:', err);
+			});
+		}
+	} catch (err) {
+		console.warn('[db] Failed to set MySQL session time_zone +08:00:', err);
+	}
+}
+
 async function mysqlInitQuery<T extends QueryResult = QueryResult>(
 	pool: Pool,
 	sql: string,
 	values?: QueryValues,
 	step = `mysql:${compactSql(sql)}`
 ): Promise<[T, FieldPacket[]]> {
-	markStartupStep(step);
+	let connection: PoolConnection | null = null;
 	try {
-		return await pool.query<T>({
-			sql,
-			values,
-			timeout: readPositiveIntEnv('MYSQL_INIT_QUERY_TIMEOUT_MS', 10_000)
-		});
+		connection = await getMysqlInitConnection(pool, step);
+		return await runMysqlInitQuery<T>(connection, sql, values, step);
 	} catch (err) {
 		const code = (err as { code?: string }).code;
 		const message = err instanceof Error ? err.message : String(err);
 		const wrapped = new Error(`${step} 失败${code ? ` (${code})` : ''}: ${message}`);
 		(wrapped as Error & { code?: string }).code = code;
 		throw wrapped;
+	} finally {
+		safeReleaseMysqlConnection(connection);
 	}
 }
 
@@ -374,7 +610,11 @@ function ensureSqliteAdminUsers(sqlite: Database.Database) {
 }
 
 async function ensureMysqlSchema(pool: Pool) {
-	await mysqlInitQuery(pool, 'SELECT 1', undefined, 'mysql-schema:ping');
+	await mysqlStartupPing(pool);
+	await withMysqlSchemaLock(pool, () => ensureMysqlSchemaAfterLock(pool));
+}
+
+async function ensureMysqlSchemaAfterLock(pool: Pool) {
 	for (const [index, statement] of MYSQL_SCHEMA_STATEMENTS.entries()) {
 		await mysqlInitQuery(
 			pool,
@@ -573,7 +813,8 @@ async function ensureMysqlSchema(pool: Pool) {
 	);
 }
 
-export async function initDatabase() {
+export async function initDatabase(options: InitDatabaseOptions = {}) {
+	const ensureSchema = options.ensureSchema ?? true;
 	driver = resolveDriver();
 
 	if (driver === 'mysql') {
@@ -581,26 +822,31 @@ export async function initDatabase() {
 		const port = Number(readEnv('MYSQL_PORT') ?? '3306');
 		const user = readEnv('MYSQL_USER') ?? 'azure_panel';
 		const database = readEnv('MYSQL_DATABASE') ?? 'azure_panel';
-		mysqlPool = createPool({
+		const pool = createPool({
 			host,
 			port,
 			user,
 			password: readEnv('MYSQL_PASSWORD') ?? '',
 			database,
 			timezone: '+08:00',
-			connectTimeout: readPositiveIntEnv('MYSQL_CONNECT_TIMEOUT_MS', 10_000),
+			connectTimeout: readPositiveIntEnv('MYSQL_CONNECT_TIMEOUT_MS', 5_000),
 			waitForConnections: true,
-			connectionLimit: 10
+			connectionLimit: readPositiveIntEnv('MYSQL_CONNECTION_LIMIT', 4)
 		});
-		mysqlPool.on('connection', (connection) => {
-			void connection.query("SET time_zone = '+08:00'").catch((err) => {
-				console.warn('[db] Failed to set MySQL session time_zone +08:00:', err);
-			});
-		});
-		mysqlDb = drizzleMysql(mysqlPool, { schema: mysqlSchema, mode: 'default' }) as unknown as MysqlDb;
-		await ensureMysqlSchema(mysqlPool);
-		console.log(`[db] Connected to MySQL: ${user}@${host}:${port}/${database}`);
-		return;
+		mysqlPool = pool;
+		pool.on('connection', setMysqlSessionTimezone);
+		mysqlDb = drizzleMysql(pool, { schema: mysqlSchema, mode: 'default' }) as unknown as MysqlDb;
+		try {
+			await mysqlStartupPing(pool);
+			if (ensureSchema) await withMysqlSchemaLock(pool, () => ensureMysqlSchemaAfterLock(pool));
+			console.log(`[db] Connected to MySQL: ${user}@${host}:${port}/${database}`);
+			return;
+		} catch (err) {
+			await safeCloseMysqlPool(pool);
+			if (mysqlPool === pool) mysqlPool = null;
+			mysqlDb = null;
+			throw err;
+		}
 	}
 
 	const configuredPath = readEnv('SQLITE_PATH') ?? './data/azure-panel.db';

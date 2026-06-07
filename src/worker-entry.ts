@@ -10,7 +10,7 @@ import { startWorker } from './lib/server/worker';
 loadDotEnv();
 process.env.ENABLE_EMBEDDED_WORKER = 'false';
 
-await initDatabase();
+await initDatabase({ ensureSchema: false });
 startWorker();
 
 process.on('SIGTERM', () => process.exit(0));

@@ -22,6 +22,8 @@ if (getDotEnvError()) {
 let initialized = false;
 let initializationPromise: Promise<void> | null = null;
 let startupErrorReported = false;
+let lastInitializationFailedAt = 0;
+let lastInitializationError: unknown = null;
 
 function reportStartupError(message: string, err: unknown) {
 	if (startupErrorReported) return;
@@ -30,11 +32,13 @@ function reportStartupError(message: string, err: unknown) {
 }
 
 function readTimeoutMs(key: string, fallback: number) {
+	if (key === 'STARTUP_INIT_TIMEOUT_MS' && !readEnv(key)) return 0;
 	const value = Number(readEnv(key));
 	return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string) {
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	return Promise.race([
 		promise,
@@ -50,13 +54,22 @@ function startInitialization() {
 	if (initialized) return Promise.resolve();
 	if (initializationPromise) return initializationPromise;
 
+	const retryDelayMs = readTimeoutMs('STARTUP_RETRY_DELAY_MS', 30_000);
+	if (lastInitializationFailedAt && Date.now() - lastInitializationFailedAt < retryDelayMs) {
+		const retryInMs = Math.max(0, retryDelayMs - (Date.now() - lastInitializationFailedAt));
+		const message = `Startup failed recently; retry will be allowed in ${Math.ceil(retryInMs / 1000)} seconds`;
+		return Promise.reject(lastInitializationError ?? new Error(message));
+	}
+
 	markStartupInitializing('startup:begin');
+	lastInitializationError = null;
+	startupErrorReported = false;
 	initializationPromise = (async () => {
 		const envError = getDotEnvError();
 		if (envError) throw envError;
 
 		markStartupStep('database:init');
-		await withTimeout(initDatabase(), readTimeoutMs('STARTUP_INIT_TIMEOUT_MS', 60_000), '服务初始化');
+		await initDatabase();
 		// aaPanel 生产环境建议用 Supervisor 独立进程跑补机，设置 ENABLE_EMBEDDED_WORKER=false
 		if (isEmbeddedWorkerEnabled()) {
 			markStartupStep('worker:start');
@@ -66,6 +79,8 @@ function startInitialization() {
 		markStartupReady();
 	})().catch((err) => {
 		initializationPromise = null;
+		lastInitializationFailedAt = Date.now();
+		lastInitializationError = err;
 		markStartupFailed(err);
 		reportStartupError('[startup] service initialization failed', err);
 		throw err;
@@ -80,6 +95,7 @@ function waitForStartup(promise: Promise<void>, timeoutMs = 15_000) {
 
 export const handle: Handle = async ({ event, resolve }) => {
 	const initialization = startInitialization();
+	void initialization.catch(() => undefined);
 	if (event.url.pathname === '/api/health') {
 		return resolve(event);
 	}
