@@ -144,7 +144,7 @@ fix_env_file_permissions ".env"
 
 # ---------- 安装依赖 & 构建 ----------
 if env_uses_mysql ".env"; then
-	repair_mysql_from_env ".env" "$APP_DIR" || warn "MySQL 自检/修复未完成，后续健康检查可能失败"
+	repair_mysql_from_env ".env" "$APP_DIR" || warn "MySQL 端口/账号连接或 aaPanel 数据库识别未通过，请检查 .env 中 MYSQL_* 配置"
 fi
 
 ensure_proxy_cores

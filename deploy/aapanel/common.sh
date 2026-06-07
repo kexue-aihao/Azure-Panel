@@ -610,6 +610,66 @@ test_mysql_app_connection() {
 	fi
 }
 
+aapanel_database_record_exists() {
+	local mysql_database="$1"
+	local panel_db="/www/server/panel/data/default.db"
+	local panel_py=""
+
+	[[ -f "$panel_db" ]] || return 1
+	for panel_py in /www/server/panel/pyenv/bin/python3 /usr/bin/python3 python3; do
+		if [[ -x "$panel_py" ]] || command -v "$panel_py" >/dev/null 2>&1; then
+			break
+		fi
+		panel_py=""
+	done
+	[[ -n "$panel_py" ]] || return 1
+
+	AAPANEL_DB_NAME="$mysql_database" "$panel_py" - <<'PY' >/dev/null 2>&1
+import os
+import sqlite3
+import sys
+
+name = os.environ.get("AAPANEL_DB_NAME", "")
+if not name:
+    sys.exit(1)
+
+try:
+    conn = sqlite3.connect("/www/server/panel/data/default.db")
+    cur = conn.cursor()
+    table = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='databases'"
+    ).fetchone()
+    if not table:
+        sys.exit(1)
+    row = cur.execute("SELECT 1 FROM databases WHERE name=? LIMIT 1", (name,)).fetchone()
+    sys.exit(0 if row else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+verify_mysql_database_ready() {
+	local mysql_host="$1"
+	local mysql_port="$2"
+	local mysql_user="$3"
+	local mysql_password="$4"
+	local mysql_database="$5"
+
+	if ! test_mysql_app_connection "$mysql_host" "$mysql_port" "$mysql_user" "$mysql_password" "$mysql_database"; then
+		warn "数据库验收未通过：MySQL 端口/账号无法连接 ${mysql_user}@${mysql_host}:${mysql_port}/${mysql_database}"
+		return 1
+	fi
+
+	log "数据库端口/账号连接通过: ${mysql_user}@${mysql_host}:${mysql_port}/${mysql_database}"
+	if aapanel_database_record_exists "$mysql_database"; then
+		log "aaPanel 数据库列表已识别: ${mysql_database}"
+	else
+		warn "aaPanel 数据库列表暂未识别 ${mysql_database}；数据库连接已通过，数据库本身判定成功"
+	fi
+	log "数据库验收完成：数据库不是网站，不依赖 /api/health 判定"
+	return 0
+}
+
 import_mysql_schema() {
 	local schema_file="$1"
 	local mysql_host="$2"
@@ -673,6 +733,9 @@ repair_mysql_from_env() {
 	register_aapanel_database_record \
 		"$mysql_host" "$mysql_port" "$mysql_user" "$mysql_password" "$mysql_database" \
 		"${DOMAIN:-Azure Panel}"
+
+	verify_mysql_database_ready "$mysql_host" "$mysql_port" "$mysql_user" "$mysql_password" "$mysql_database" \
+		|| return 1
 }
 
 npm_install_with_registry() {
@@ -1308,7 +1371,7 @@ health_check() {
 		done
 		[[ -n "$status" ]] && warn "健康检查 HTTP 状态: $status"
 		[[ -n "$body" ]] && warn "健康检查响应: $body"
-		warn "健康检查未通过或响应超时，请查看 aaPanel Node 项目日志、端口 ${port} 是否被正确监听，以及 MySQL 是否可连接"
+		warn "健康检查未通过或响应超时，请查看 aaPanel Node 项目日志，以及端口 ${port} 是否被正确监听；数据库状态以前面的 MySQL 端口/账号验收为准"
 		return 1
 	fi
 	warn "未安装 curl，跳过健康检查"

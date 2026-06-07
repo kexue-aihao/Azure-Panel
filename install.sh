@@ -238,6 +238,9 @@ setup_mysql() {
 		"$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD" "$MYSQL_DATABASE" \
 		"${DOMAIN:-Azure Panel}"
 
+	verify_mysql_database_ready "$MYSQL_HOST" "$MYSQL_PORT" "$MYSQL_USER" "$MYSQL_PASSWORD" "$MYSQL_DATABASE" \
+		|| die "数据库验收失败：MySQL 端口/账号不可连接"
+
 	mkdir -p "${APP_DIR}/deploy/aapanel/generated"
 	cat >"$cred_file" <<EOF
 # Azure Panel 数据库凭据（install.sh 自动生成，请妥善保管）
