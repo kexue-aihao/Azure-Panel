@@ -1,11 +1,19 @@
 import Database from 'better-sqlite3';
 import { drizzle as drizzleSqlite } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzleMysql } from 'drizzle-orm/mysql2';
-import { createPool, type Pool, type RowDataPacket } from 'mysql2/promise';
+import {
+	createPool,
+	type FieldPacket,
+	type Pool,
+	type QueryResult,
+	type QueryValues,
+	type RowDataPacket
+} from 'mysql2/promise';
 import { mkdirSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { getConfiguredAdminEmails } from '../admin';
 import { getProjectRoot, readEnv } from '../runtime-env';
+import { markStartupStep } from '../startup-state';
 import * as sqliteSchema from './schema';
 import * as mysqlSchema from './schema.mysql';
 
@@ -230,20 +238,121 @@ export function getDb() {
 	return { db: getSqliteDb(), driver: 'sqlite' as const };
 }
 
+function readPositiveIntEnv(key: string, fallback: number) {
+	const value = Number(readEnv(key));
+	return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function compactSql(sql: string) {
+	return sql.replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+async function mysqlInitQuery<T extends QueryResult = QueryResult>(
+	pool: Pool,
+	sql: string,
+	values?: QueryValues,
+	step = `mysql:${compactSql(sql)}`
+): Promise<[T, FieldPacket[]]> {
+	markStartupStep(step);
+	try {
+		return await pool.query<T>({
+			sql,
+			values,
+			timeout: readPositiveIntEnv('MYSQL_INIT_QUERY_TIMEOUT_MS', 10_000)
+		});
+	} catch (err) {
+		const code = (err as { code?: string }).code;
+		const message = err instanceof Error ? err.message : String(err);
+		const wrapped = new Error(`${step} 失败${code ? ` (${code})` : ''}: ${message}`);
+		(wrapped as Error & { code?: string }).code = code;
+		throw wrapped;
+	}
+}
+
+function countFromRows(rows: RowDataPacket[]) {
+	return Number(rows[0]?.count ?? 0);
+}
+
+async function mysqlColumnExists(pool: Pool, table: string, column: string) {
+	const [rows] = await mysqlInitQuery<RowDataPacket[]>(
+		pool,
+		`SELECT COUNT(*) AS count
+		 FROM information_schema.COLUMNS
+		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+		[table, column],
+		`mysql-schema:check-column:${table}.${column}`
+	);
+	return countFromRows(rows) > 0;
+}
+
+async function addMysqlColumnIfMissing(
+	pool: Pool,
+	table: string,
+	column: string,
+	definition: string
+) {
+	if (await mysqlColumnExists(pool, table, column)) return;
+	await mysqlInitQuery(
+		pool,
+		`ALTER TABLE ${table} ADD COLUMN ${definition}`,
+		undefined,
+		`mysql-schema:add-column:${table}.${column}`
+	).catch((err) => {
+		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+	});
+}
+
+async function mysqlIndexExists(pool: Pool, table: string, index: string) {
+	const [rows] = await mysqlInitQuery<RowDataPacket[]>(
+		pool,
+		`SELECT COUNT(*) AS count
+		 FROM information_schema.STATISTICS
+		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`,
+		[table, index],
+		`mysql-schema:check-index:${table}.${index}`
+	);
+	return countFromRows(rows) > 0;
+}
+
+async function createMysqlIndexIfMissing(
+	pool: Pool,
+	table: string,
+	index: string,
+	createSql: string
+) {
+	if (await mysqlIndexExists(pool, table, index)) return;
+	await mysqlInitQuery(pool, createSql, undefined, `mysql-schema:create-index:${table}.${index}`).catch(
+		(err) => {
+			if ((err as { code?: string }).code !== 'ER_DUP_KEYNAME') throw err;
+		}
+	);
+}
+
 async function ensureMysqlAdminUsers(pool: Pool) {
 	const adminEmails = getConfiguredAdminEmails();
 	for (const email of adminEmails) {
-		await pool.query("UPDATE users SET role = 'admin' WHERE LOWER(email) = ?", [email]);
+		await mysqlInitQuery(
+			pool,
+			"UPDATE users SET role = 'admin' WHERE LOWER(email) = ?",
+			[email],
+			'mysql-schema:admin-users:update-configured'
+		);
 	}
 
-	const [rows] = await pool.query<RowDataPacket[]>(
-		"SELECT COUNT(*) AS count FROM users WHERE role = 'admin'"
+	const [rows] = await mysqlInitQuery<RowDataPacket[]>(
+		pool,
+		"SELECT COUNT(*) AS count FROM users WHERE role = 'admin'",
+		undefined,
+		'mysql-schema:admin-users:count'
 	);
 	const adminCount = Number(rows[0]?.count ?? 0);
 	if (adminCount > 0) return;
 
-	await pool.query(
-		"UPDATE users SET role = 'admin' WHERE id = (SELECT id FROM (SELECT id FROM users ORDER BY id ASC LIMIT 1) first_user)"
+	await mysqlInitQuery(
+		pool,
+		"UPDATE users SET role = 'admin' WHERE id = (SELECT id FROM (SELECT id FROM users ORDER BY id ASC LIMIT 1) first_user)",
+		undefined,
+		'mysql-schema:admin-users:promote-first'
 	);
 }
 
@@ -265,141 +374,203 @@ function ensureSqliteAdminUsers(sqlite: Database.Database) {
 }
 
 async function ensureMysqlSchema(pool: Pool) {
-	await pool.query('SELECT 1');
-	for (const statement of MYSQL_SCHEMA_STATEMENTS) {
-		await pool.query(statement);
+	await mysqlInitQuery(pool, 'SELECT 1', undefined, 'mysql-schema:ping');
+	for (const [index, statement] of MYSQL_SCHEMA_STATEMENTS.entries()) {
+		await mysqlInitQuery(
+			pool,
+			statement,
+			undefined,
+			`mysql-schema:create-table:${index + 1}/${MYSQL_SCHEMA_STATEMENTS.length}`
+		);
 	}
-	await pool
-		.query("ALTER TABLE users ADD COLUMN role varchar(16) NOT NULL DEFAULT 'user'")
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query('ALTER TABLE users ADD COLUMN disabled tinyint(1) NOT NULL DEFAULT 0')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool.query("UPDATE users SET role = 'user' WHERE role IS NULL OR role = ''");
-	await pool.query('UPDATE users SET disabled = 0 WHERE disabled IS NULL');
-	await pool.query('CREATE INDEX users_role_idx ON users (role)').catch((err) => {
-		if ((err as { code?: string }).code !== 'ER_DUP_KEYNAME') throw err;
-	});
-	await pool.query('CREATE INDEX users_disabled_idx ON users (disabled)').catch((err) => {
-		if ((err as { code?: string }).code !== 'ER_DUP_KEYNAME') throw err;
-	});
+
+	await addMysqlColumnIfMissing(pool, 'users', 'role', "role varchar(16) NOT NULL DEFAULT 'user'");
+	await addMysqlColumnIfMissing(
+		pool,
+		'users',
+		'disabled',
+		'disabled tinyint(1) NOT NULL DEFAULT 0'
+	);
+	await mysqlInitQuery(
+		pool,
+		"UPDATE users SET role = 'user' WHERE role IS NULL OR role = ''",
+		undefined,
+		'mysql-schema:users:normalize-role'
+	);
+	await mysqlInitQuery(
+		pool,
+		'UPDATE users SET disabled = 0 WHERE disabled IS NULL',
+		undefined,
+		'mysql-schema:users:normalize-disabled'
+	);
+	await createMysqlIndexIfMissing(
+		pool,
+		'users',
+		'users_role_idx',
+		'CREATE INDEX users_role_idx ON users (role)'
+	);
+	await createMysqlIndexIfMissing(
+		pool,
+		'users',
+		'users_disabled_idx',
+		'CREATE INDEX users_disabled_idx ON users (disabled)'
+	);
 	await ensureMysqlAdminUsers(pool);
-	await pool.query('ALTER TABLE azure_accounts ADD COLUMN proxy_url_encrypted text NULL').catch((err) => {
-		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-	});
-	await pool.query('ALTER TABLE azure_accounts ADD COLUMN proxy_profile_id int NULL').catch((err) => {
-		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-	});
-	await pool.query('ALTER TABLE azure_accounts ADD COLUMN vm_region_cache text NULL').catch((err) => {
-		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-	});
-	await pool.query('ALTER TABLE azure_accounts ADD COLUMN vm_image_cache text NULL').catch((err) => {
-		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-	});
-	await pool.query('ALTER TABLE azure_accounts ADD COLUMN vm_provider_cache text NULL').catch((err) => {
-		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-	});
-	await pool
-		.query('CREATE INDEX azure_accounts_proxy_profile_id_idx ON azure_accounts (proxy_profile_id)')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_KEYNAME') throw err;
-		});
-	await pool
-		.query("ALTER TABLE proxy_profiles ADD COLUMN managed_core varchar(16) DEFAULT ''")
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query('ALTER TABLE proxy_profiles ADD COLUMN share_link_encrypted text NULL')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query('ALTER TABLE dns_configs ADD COLUMN username_encrypted text NULL')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query('ALTER TABLE dns_configs ADD COLUMN password_encrypted text NULL')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query('ALTER TABLE workflow_policies ADD COLUMN userdata_encrypted text NULL')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool.query("UPDATE workflow_policies SET userdata_encrypted = '' WHERE userdata_encrypted IS NULL");
-	await pool
-		.query('ALTER TABLE workflow_policies ADD COLUMN enable_ipv6 tinyint(1) NOT NULL DEFAULT 0')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query("ALTER TABLE workflow_policies ADD COLUMN ip_prefix varchar(32) NOT NULL DEFAULT ''")
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query(
-			'ALTER TABLE workflow_policies ADD COLUMN ip_brush_max_attempts int NOT NULL DEFAULT 30'
-		)
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	let addedReplenishTargetCount = false;
-	await pool
-		.query('ALTER TABLE workflow_policies ADD COLUMN replenish_target_count int NOT NULL DEFAULT 1')
-		.then(() => {
-			addedReplenishTargetCount = true;
-		})
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool.query(
-		addedReplenishTargetCount
+
+	await addMysqlColumnIfMissing(
+		pool,
+		'azure_accounts',
+		'proxy_url_encrypted',
+		'proxy_url_encrypted text NULL'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'azure_accounts',
+		'proxy_profile_id',
+		'proxy_profile_id int NULL'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'azure_accounts',
+		'vm_region_cache',
+		'vm_region_cache text NULL'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'azure_accounts',
+		'vm_image_cache',
+		'vm_image_cache text NULL'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'azure_accounts',
+		'vm_provider_cache',
+		'vm_provider_cache text NULL'
+	);
+	await createMysqlIndexIfMissing(
+		pool,
+		'azure_accounts',
+		'azure_accounts_proxy_profile_id_idx',
+		'CREATE INDEX azure_accounts_proxy_profile_id_idx ON azure_accounts (proxy_profile_id)'
+	);
+
+	await addMysqlColumnIfMissing(
+		pool,
+		'proxy_profiles',
+		'managed_core',
+		"managed_core varchar(16) DEFAULT ''"
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'proxy_profiles',
+		'share_link_encrypted',
+		'share_link_encrypted text NULL'
+	);
+
+	await addMysqlColumnIfMissing(
+		pool,
+		'dns_configs',
+		'username_encrypted',
+		'username_encrypted text NULL'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'dns_configs',
+		'password_encrypted',
+		'password_encrypted text NULL'
+	);
+
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'userdata_encrypted',
+		'userdata_encrypted text NULL'
+	);
+	await mysqlInitQuery(
+		pool,
+		"UPDATE workflow_policies SET userdata_encrypted = '' WHERE userdata_encrypted IS NULL",
+		undefined,
+		'mysql-schema:workflow-policies:normalize-userdata'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'enable_ipv6',
+		'enable_ipv6 tinyint(1) NOT NULL DEFAULT 0'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'ip_prefix',
+		"ip_prefix varchar(32) NOT NULL DEFAULT ''"
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'ip_brush_max_attempts',
+		'ip_brush_max_attempts int NOT NULL DEFAULT 30'
+	);
+	const hadReplenishTargetCount = await mysqlColumnExists(
+		pool,
+		'workflow_policies',
+		'replenish_target_count'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'replenish_target_count',
+		'replenish_target_count int NOT NULL DEFAULT 1'
+	);
+	await mysqlInitQuery(
+		pool,
+		!hadReplenishTargetCount
 			? 'UPDATE workflow_policies SET replenish_target_count = GREATEST(min_running_count, 1)'
-			: 'UPDATE workflow_policies SET replenish_target_count = 1 WHERE replenish_target_count IS NULL OR replenish_target_count < 1'
+			: 'UPDATE workflow_policies SET replenish_target_count = 1 WHERE replenish_target_count IS NULL OR replenish_target_count < 1',
+		undefined,
+		'mysql-schema:workflow-policies:normalize-replenish-target'
 	);
-	await pool
-		.query('ALTER TABLE workflow_policies ADD COLUMN status_check_enabled tinyint(1) NOT NULL DEFAULT 1')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query(
-			"ALTER TABLE workflow_policies ADD COLUMN status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled'"
-		)
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool.query(
-		"UPDATE workflow_policies SET status_trigger_states = 'banned,warning,warned,disabled' WHERE LOWER(REPLACE(status_trigger_states, ' ', '')) = 'banned,warning,warned'"
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'status_check_enabled',
+		'status_check_enabled tinyint(1) NOT NULL DEFAULT 1'
 	);
-	await pool
-		.query('ALTER TABLE workflow_policies ADD COLUMN dns_binding_id int NOT NULL DEFAULT 0')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query("ALTER TABLE workflow_policies ADD COLUMN last_account_status varchar(64) NOT NULL DEFAULT ''")
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query('ALTER TABLE workflow_policies ADD COLUMN last_status_checked_at timestamp NULL DEFAULT NULL')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
-	await pool
-		.query('ALTER TABLE notification_settings ADD COLUMN telegram_group_chat_ids text NULL')
-		.catch((err) => {
-			if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
-		});
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'status_trigger_states',
+		"status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled'"
+	);
+	await mysqlInitQuery(
+		pool,
+		"UPDATE workflow_policies SET status_trigger_states = 'banned,warning,warned,disabled' WHERE LOWER(REPLACE(status_trigger_states, ' ', '')) = 'banned,warning,warned'",
+		undefined,
+		'mysql-schema:workflow-policies:normalize-trigger-states'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'dns_binding_id',
+		'dns_binding_id int NOT NULL DEFAULT 0'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'last_account_status',
+		"last_account_status varchar(64) NOT NULL DEFAULT ''"
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'last_status_checked_at',
+		'last_status_checked_at timestamp NULL DEFAULT NULL'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'notification_settings',
+		'telegram_group_chat_ids',
+		'telegram_group_chat_ids text NULL'
+	);
 }
 
 export async function initDatabase() {
@@ -417,6 +588,7 @@ export async function initDatabase() {
 			password: readEnv('MYSQL_PASSWORD') ?? '',
 			database,
 			timezone: '+08:00',
+			connectTimeout: readPositiveIntEnv('MYSQL_CONNECT_TIMEOUT_MS', 10_000),
 			waitForConnections: true,
 			connectionLimit: 10
 		});
