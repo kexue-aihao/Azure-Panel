@@ -3056,6 +3056,7 @@ async function createPublicIp(
 		progress?: CreateVmProgressReporter;
 		step?: string;
 		progressDetail?: CreateVmProgressEvent['detail'];
+		waitForAddress?: boolean;
 	}
 ): Promise<PublicIPAddress> {
 	const step = options.step ?? `public-ip-${options.version.toLowerCase()}`;
@@ -3119,9 +3120,8 @@ async function createPublicIp(
 			throw state.error;
 		}
 		const pip = poller.getResult() ?? (await clients.network.publicIPAddresses.get(options.resourceGroup, options.name));
-		const ready = pip.ipAddress
-			? pip
-			: await waitForPublicIpAddress(clients, options.resourceGroup, options.name, {
+		const ready = options.waitForAddress === true && !pip.ipAddress
+			? await waitForPublicIpAddress(clients, options.resourceGroup, options.name, {
 					attempts: options.version === 'IPv4' ? 30 : 20,
 					delayMs: 1500,
 					progress: options.progress,
@@ -3131,7 +3131,8 @@ async function createPublicIp(
 						version: options.version,
 						ddosProtection: Boolean(options.ddosProtectionPlanId)
 					})
-				});
+				})
+			: pip;
 		if (!ready.id) throw new Error(`Azure 未返回 ${options.version} 公网 IP 资源 ID`);
 		await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, withPublicIpDetail({
 			name: options.name,
@@ -3224,6 +3225,7 @@ async function createMatchingIPv4PublicIp(
 				ddosProtectionPlanId: options.ddosProtectionPlanId,
 				progress: options.progress,
 				step: 'public-ipv4',
+				waitForAddress: true,
 				progressDetail: {
 					attempt,
 					maxAttempts,
@@ -4422,16 +4424,26 @@ async function createNetworkForVm(
 
 	let ipv6: PublicIPAddress | null = null;
 	if (options.enableIpv6) {
-		ipv6 = await createPublicIp(clients, {
-			resourceGroup: options.resourceGroup,
-			location: options.location,
-			name: resourceName(options.vmName, 'pip6'),
-			version: 'IPv6',
-			ddosProtectionPlanId: ddosPlan?.id,
-			progress: options.progress,
-			step: 'public-ipv6'
-		});
-		if (!ipv6.id) throw new Error('IPv6 公网 IP 创建失败');
+		const ipv6Name = resourceName(options.vmName, 'pip6');
+		try {
+			ipv6 = await createPublicIp(clients, {
+				resourceGroup: options.resourceGroup,
+				location: options.location,
+				name: ipv6Name,
+				version: 'IPv6',
+				progress: options.progress,
+				step: 'public-ipv6'
+			});
+			if (!ipv6.id) throw new Error('IPv6 公网 IP 创建失败');
+		} catch (err) {
+			const message = formatAzureError(err);
+			await deletePublicIpByName(clients, options.resourceGroup, ipv6Name).catch(() => undefined);
+			await reportCreateVmProgress(options.progress, 'public-ipv6', 'info', 'IPv6 公网 IP 创建失败，已降级为仅 IPv4 继续创建', {
+				name: ipv6Name,
+				error: message.length > 800 ? `${message.slice(0, 800)}...` : message
+			});
+			ipv6 = null;
+		}
 	}
 	await reportCreateVmProgress(options.progress, 'subnet', 'running', '读取子网信息并准备网卡配置', {
 		vnetName,

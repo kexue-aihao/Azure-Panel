@@ -1581,7 +1581,7 @@
 		<div>
 			<h2 class="text-lg font-medium">创建 VM</h2>
 			<p class="mt-1 text-sm text-muted">
-				创建时会自动随机生成资源组和 VM 名称，默认可同时创建 IPv4/IPv6，UserData 会作为 cloud-init 首次启动脚本注入。填写 IPv4 前缀后会先刷到匹配公网 IP 再建机。
+				创建时会自动随机生成资源组和 VM 名称，直接申请 IPv4 公网 IP，可选同步创建 IPv6，UserData 会作为 cloud-init 首次启动脚本注入。
 			</p>
 		</div>
 		<div class="grid gap-3 md:grid-cols-2">
@@ -1688,7 +1688,7 @@
 			启用 Azure 加速网络
 		</label>
 		<p class="-mt-2 text-xs text-muted">
-			创建 VM 时会直接申请 IPv4 公网 IP；勾选 IPv6 时同步创建 IPv6 公网 IP，不再执行创建前刷 IP 段。
+			创建 VM 时会直接申请 IPv4 公网 IP；勾选 IPv6 时会尝试同步创建 IPv6，若 Azure 暂不支持则自动降级为仅 IPv4 继续创建。
 		</p>
 		<div>
 			<label class="mb-1 block text-xs text-muted" for="create-open-ports">入站放行端口</label>
