@@ -37,6 +37,7 @@ export const DIRECT_PROXY = Symbol('DIRECT_PROXY');
 export type AzureProxySelection = ProxyRuntimeConfig | typeof DIRECT_PROXY | null;
 
 const DEFAULT_CREATE_IP_PREFIX = '85.211';
+const DEFAULT_REPLACE_IPV4_ATTEMPTS = 10;
 
 export type VmInfo = {
 	name: string;
@@ -3443,7 +3444,7 @@ async function createMatchingIPv4PublicIp(
 	}
 ): Promise<{ pip: PublicIPAddress; attempts: number; matched: boolean }> {
 	const targetPrefix = normalizeIpPrefix(options.targetPrefix);
-	const maxAttempts = targetPrefix ? normalizeAttempts(options.maxAttempts) : 1;
+	const maxAttempts = targetPrefix ? normalizeAttempts(options.maxAttempts) : normalizeAttempts(options.maxAttempts, 1);
 	const salt = options.nameSalt ?? String(Date.now());
 	await reportCreateVmProgress(
 		options.progress,
@@ -5190,6 +5191,7 @@ export async function replaceVmPublicIPv4(
 		resourceGroup: nicResourceGroup,
 		location: vmLocation,
 		vmName,
+		maxAttempts: DEFAULT_REPLACE_IPV4_ATTEMPTS,
 		nameSalt: String(Date.now()),
 		progress
 	});
