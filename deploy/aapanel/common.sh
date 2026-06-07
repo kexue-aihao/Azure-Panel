@@ -1012,7 +1012,7 @@ release_app_port() {
 
 is_app_healthy() {
 	local port="$1"
-	command -v curl >/dev/null 2>&1 && curl -fsS "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1
+	command -v curl >/dev/null 2>&1 && curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1
 }
 
 aapanel_project_exists() {
@@ -1290,15 +1290,15 @@ health_check() {
 	log "健康检查 http://127.0.0.1:${port}/api/health ..."
 	sleep 2
 	if command -v curl >/dev/null 2>&1; then
-		if curl -fsS "http://127.0.0.1:${port}/api/health" >/dev/null; then
+		if curl -fsS --connect-timeout 3 --max-time 12 "http://127.0.0.1:${port}/api/health" >/dev/null; then
 			log "健康检查通过 ✓"
 			return 0
 		fi
-		body="$(curl -sS "http://127.0.0.1:${port}/api/health" 2>&1 || true)"
-		status="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}/api/health" 2>/dev/null || true)"
+		body="$(curl -sS --connect-timeout 3 --max-time 8 "http://127.0.0.1:${port}/api/health" 2>&1 || true)"
+		status="$(curl -sS --connect-timeout 3 --max-time 8 -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}/api/health" 2>/dev/null || true)"
 		[[ -n "$status" ]] && warn "健康检查 HTTP 状态: $status"
 		[[ -n "$body" ]] && warn "健康检查响应: $body"
-		warn "健康检查未通过，请查看 aaPanel Node 项目日志或 /www/wwwlogs/ 下日志"
+		warn "健康检查未通过或响应超时，请查看 aaPanel Node 项目日志、端口 ${port} 是否被正确监听，以及 MySQL 是否可连接"
 		return 1
 	fi
 	warn "未安装 curl，跳过健康检查"
