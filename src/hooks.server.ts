@@ -3,6 +3,12 @@ import { json } from '@sveltejs/kit';
 import { initDatabase } from '$lib/server/db';
 import { isEmbeddedWorkerEnabled } from '$lib/server/env';
 import { getDotEnvError, getDotEnvPath, loadDotEnv } from '$lib/server/runtime-env';
+import {
+	getStartupStatus,
+	markStartupFailed,
+	markStartupInitializing,
+	markStartupReady
+} from '$lib/server/startup-state';
 import { startWorker } from '$lib/server/worker';
 
 loadDotEnv();
@@ -13,44 +19,74 @@ if (getDotEnvError()) {
 }
 
 let initialized = false;
+let initializationPromise: Promise<void> | null = null;
 let startupErrorReported = false;
 
-export const handle: Handle = async ({ event, resolve }) => {
-	if (!initialized) {
-		const envError = getDotEnvError();
-		if (envError) {
-			if (!startupErrorReported) {
-				console.error('[startup] .env load failed', envError);
-				startupErrorReported = true;
-			}
-			if (event.url.pathname.startsWith('/api/')) {
-				return json(
-					{ message: `服务初始化失败: 无法读取 .env (${envError.message})` },
-					{ status: 500 }
-				);
-			}
-			throw envError;
-		}
+function reportStartupError(message: string, err: unknown) {
+	if (startupErrorReported) return;
+	console.error(message, err);
+	startupErrorReported = true;
+}
 
-		try {
+function startInitialization() {
+	if (initialized) return Promise.resolve();
+	if (initializationPromise) return initializationPromise;
+
+	markStartupInitializing();
+	initializationPromise = (async () => {
+		const envError = getDotEnvError();
+		if (envError) throw envError;
+
 			await initDatabase();
 			// aaPanel 生产环境建议用 Supervisor 独立进程跑补机，设置 ENABLE_EMBEDDED_WORKER=false
 			if (isEmbeddedWorkerEnabled()) {
 				startWorker();
 			}
 			initialized = true;
-		} catch (err) {
-			console.error('[startup] database initialization failed', err);
-			if (event.url.pathname.startsWith('/api/')) {
-				return json(
-					{
-						message:
-							err instanceof Error ? `服务初始化失败: ${err.message}` : '服务初始化失败'
-					},
-					{ status: 500 }
-				);
-			}
+			markStartupReady();
+		})().catch((err) => {
+			initializationPromise = null;
+			markStartupFailed(err);
+			reportStartupError('[startup] service initialization failed', err);
 			throw err;
+		});
+	void initializationPromise.catch(() => undefined);
+	return initializationPromise;
+}
+
+function waitForStartup(promise: Promise<void>, timeoutMs = 15_000) {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	return Promise.race([
+		promise,
+		new Promise<void>((_, reject) => {
+			timer = setTimeout(
+				() => reject(new Error(`服务初始化超过 ${Math.round(timeoutMs / 1000)} 秒仍未完成`)),
+				timeoutMs
+			);
+		})
+	]).finally(() => {
+		if (timer) clearTimeout(timer);
+	});
+}
+
+export const handle: Handle = async ({ event, resolve }) => {
+	const initialization = startInitialization();
+	if (event.url.pathname === '/api/health') {
+		return resolve(event);
+	}
+
+	if (!initialized) {
+		try {
+			await waitForStartup(initialization);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			return json(
+				{
+					message: `服务初始化失败: ${message}`,
+					startup: getStartupStatus()
+				},
+				{ status: 503 }
+			);
 		}
 	}
 	return resolve(event);

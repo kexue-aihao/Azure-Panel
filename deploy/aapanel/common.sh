@@ -1286,16 +1286,26 @@ restart_supervisor_programs() {
 
 health_check() {
 	local port="$1"
-	local body status
+	local body status attempt max_attempts interval url
+	max_attempts="${HEALTHCHECK_RETRIES:-12}"
+	interval="${HEALTHCHECK_INTERVAL:-5}"
+	url="http://127.0.0.1:${port}/api/health"
 	log "健康检查 http://127.0.0.1:${port}/api/health ..."
 	sleep 2
 	if command -v curl >/dev/null 2>&1; then
-		if curl -fsS --connect-timeout 3 --max-time 12 "http://127.0.0.1:${port}/api/health" >/dev/null; then
-			log "健康检查通过 ✓"
-			return 0
-		fi
-		body="$(curl -sS --connect-timeout 3 --max-time 8 "http://127.0.0.1:${port}/api/health" 2>&1 || true)"
-		status="$(curl -sS --connect-timeout 3 --max-time 8 -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}/api/health" 2>/dev/null || true)"
+		for attempt in $(seq 1 "$max_attempts"); do
+			if curl -fsS --connect-timeout 3 --max-time 8 "$url" >/dev/null; then
+				log "健康检查通过 ✓"
+				return 0
+			fi
+			body="$(curl -sS --connect-timeout 3 --max-time 6 "$url" 2>&1 || true)"
+			status="$(curl -sS --connect-timeout 3 --max-time 6 -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || true)"
+			if [[ "$attempt" -lt "$max_attempts" ]]; then
+				warn "健康检查未就绪 (${attempt}/${max_attempts})，HTTP 状态: ${status:-000}，${interval}s 后重试"
+				[[ -n "$body" ]] && warn "当前响应: $body"
+				sleep "$interval"
+			fi
+		done
 		[[ -n "$status" ]] && warn "健康检查 HTTP 状态: $status"
 		[[ -n "$body" ]] && warn "健康检查响应: $body"
 		warn "健康检查未通过或响应超时，请查看 aaPanel Node 项目日志、端口 ${port} 是否被正确监听，以及 MySQL 是否可连接"
