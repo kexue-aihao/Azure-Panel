@@ -1,3 +1,4 @@
+import { getUserAccount } from '$lib/server/accounts';
 import { encryptSecret } from '$lib/server/crypto';
 import { DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES } from '$lib/server/azure';
 import { deleteWorkflow, findWorkflowByUser, updateWorkflow } from '$lib/server/db/repo';
@@ -13,6 +14,12 @@ export const PUT: RequestHandler = async (event) => {
 	const body = await event.request.json();
 	const updates: Record<string, unknown> = {};
 
+	if (body.account_id !== undefined) {
+		const accountId = Number(body.account_id);
+		if (!accountId) return fail('请从 Azure 号池选择触发检测账号');
+		await getUserAccount(user.id, accountId);
+		updates.accountId = accountId;
+	}
 	if (body.name !== undefined) updates.name = String(body.name);
 	if (body.resource_group !== undefined) updates.resourceGroup = String(body.resource_group);
 	if (body.location !== undefined) updates.location = String(body.location);
@@ -43,7 +50,35 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.admin_password) updates.adminPasswordEncrypted = encryptSecret(String(body.admin_password));
 
 	const updated = await updateWorkflow(policyId, updates);
-	return ok({ id: updated?.id, enabled: updated?.enabled, name: updated?.name });
+	return ok({
+		id: updated?.id,
+		account_id: updated?.accountId,
+		name: updated?.name,
+		enabled: updated?.enabled,
+		resource_group: updated?.resourceGroup,
+		location: updated?.location,
+		vm_names: JSON.parse(updated?.vmNamesJson || '[]'),
+		min_running_count: updated?.minRunningCount,
+		replenish_target_count: updated?.replenishTargetCount,
+		auto_start: updated?.autoStart,
+		auto_create: updated?.autoCreate,
+		vm_size: updated?.vmSize,
+		image_reference: updated?.imageReference,
+		name_prefix: updated?.namePrefix,
+		admin_username: updated?.adminUsername,
+		userdata_configured: Boolean(updated?.userdataEncrypted),
+		enable_ipv6: updated?.enableIpv6,
+		ip_prefix: updated?.ipPrefix,
+		ip_brush_max_attempts: updated?.ipBrushMaxAttempts,
+		check_interval_seconds: updated?.checkIntervalSeconds,
+		status_check_enabled: updated?.statusCheckEnabled,
+		status_trigger_states: updated?.statusTriggerStates,
+		dns_binding_id: updated?.dnsBindingId,
+		last_account_status: updated?.lastAccountStatus,
+		last_status_checked_at: updated?.lastStatusCheckedAt,
+		last_run_at: updated?.lastRunAt,
+		created_at: updated?.createdAt
+	});
 };
 
 export const DELETE: RequestHandler = async (event) => {

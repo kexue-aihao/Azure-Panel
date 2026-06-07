@@ -1,3 +1,4 @@
+import { formatBeijingDateTime } from '$lib/server/beijing-time';
 import { listUnifiedExecutionLogs } from '$lib/server/db/repo';
 import { ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
@@ -17,7 +18,7 @@ export const GET: RequestHandler = async (event) => {
 			message: log.message,
 			resource_group: log.resourceGroup,
 			vm_name: log.vmName,
-			created_at: log.createdAt
+			created_at: formatBeijingDateTime(log.createdAt)
 		}))
 	);
 };

@@ -1894,24 +1894,61 @@ export async function listProviderStatuses(
 
 export async function registerResourceProviders(
 	clients: AzureClients,
-	namespaces = DEFAULT_PROVIDER_NAMESPACES
+	namespaces = DEFAULT_PROVIDER_NAMESPACES,
+	progress?: CreateVmProgressReporter
 ): Promise<AzureProviderStatus[]> {
 	const statuses: AzureProviderStatus[] = [];
-	for (const namespace of namespaces) {
+	for (const [index, namespace] of namespaces.entries()) {
+		const step = `provider-${namespace.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+		const detail = {
+			namespace,
+			index: index + 1,
+			total: namespaces.length
+		};
 		try {
+			await reportCreateVmProgress(progress, `${step}-check`, 'running', `检查 ${namespace} 注册状态`, detail);
 			const provider = await clients.resources.providers.get(namespace).catch(() => null);
 			if (provider?.registrationState?.toLowerCase() === 'registered') {
-				statuses.push(providerToStatus(provider, namespace));
+				const status = providerToStatus(provider, namespace);
+				statuses.push(status);
+				await reportCreateVmProgress(progress, `${step}-check`, 'success', `${namespace} 已注册，跳过提交`, {
+					...detail,
+					registrationState: status.registrationState
+				});
 				continue;
 			}
-			statuses.push(providerToStatus(await clients.resources.providers.register(namespace), namespace));
+			await reportCreateVmProgress(progress, `${step}-register`, 'running', `提交 ${namespace} 注册请求`, {
+				...detail,
+				registrationState: provider?.registrationState ?? 'NotRegistered'
+			});
+			const status = providerToStatus(await clients.resources.providers.register(namespace), namespace);
+			statuses.push(status);
+			const state = status.registrationState.toLowerCase();
+			await reportCreateVmProgress(
+				progress,
+				`${step}-register`,
+				state === 'registered' ? 'success' : state === 'registering' ? 'info' : 'success',
+				state === 'registering'
+					? `${namespace} 已提交注册，等待 Azure 后台生效`
+					: `${namespace} 注册状态：${status.registrationState || '-'}`,
+				{
+					...detail,
+					registrationState: status.registrationState
+				}
+			);
 		} catch (err) {
-			statuses.push({
+			const message = err instanceof Error ? err.message : 'Failed';
+			const status = {
 				namespace,
-				registrationState: err instanceof Error ? err.message : 'Failed',
+				registrationState: message,
 				registrationPolicy: '',
 				resourceTypeCount: 0,
 				locations: []
+			};
+			statuses.push(status);
+			await reportCreateVmProgress(progress, `${step}-register`, 'error', `${namespace} 注册失败: ${message}`, {
+				...detail,
+				registrationState: message
 			});
 		}
 	}

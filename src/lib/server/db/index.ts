@@ -416,8 +416,14 @@ export async function initDatabase() {
 			user,
 			password: readEnv('MYSQL_PASSWORD') ?? '',
 			database,
+			timezone: '+08:00',
 			waitForConnections: true,
 			connectionLimit: 10
+		});
+		mysqlPool.on('connection', (connection) => {
+			void connection.query("SET time_zone = '+08:00'").catch((err) => {
+				console.warn('[db] Failed to set MySQL session time_zone +08:00:', err);
+			});
 		});
 		mysqlDb = drizzleMysql(mysqlPool, { schema: mysqlSchema, mode: 'default' }) as unknown as MysqlDb;
 		await ensureMysqlSchema(mysqlPool);

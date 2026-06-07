@@ -106,13 +106,6 @@
 		if (status === 'info') return 'bg-blue-900/50 text-blue-300';
 		return 'bg-red-900/50 text-red-300';
 	}
-
-	function formatBeijingTime(value: string) {
-		const date = new Date(value);
-		if (Number.isNaN(date.getTime())) return value || '-';
-		const parts = beijingDateParts(date);
-		return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
-	}
 </script>
 
 <div class="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -152,7 +145,7 @@
 				{#each logs as log}
 					<tr class="border-b border-border/60">
 						<td class="whitespace-nowrap p-3 font-mono text-xs tabular-nums">
-							{formatBeijingTime(log.created_at)}
+							{log.created_at || '-'}
 						</td>
 						<td class="p-3">{sourceText(log.source)}</td>
 						<td class="p-3">

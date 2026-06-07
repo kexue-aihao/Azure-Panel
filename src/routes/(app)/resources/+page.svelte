@@ -78,6 +78,14 @@
 		| { type: 'progress'; event: ResourceGroupDeleteProgressEvent }
 		| { type: 'result'; result: ResourceGroupDeleteStreamResult }
 		| { type: 'error'; message: string };
+	type ProviderRegisterStreamResult = {
+		subscription_id: string;
+		providers: ProviderStatus[];
+	};
+	type ProviderRegisterStreamMessage =
+		| { type: 'progress'; event: ResourceGroupDeleteProgressEvent }
+		| { type: 'result'; result: ProviderRegisterStreamResult }
+		| { type: 'error'; message: string };
 
 	let accounts = $state<Account[]>([]);
 	let subscriptions = $state<Subscription[]>([]);
@@ -100,6 +108,8 @@
 	let selectedResourceGroups = $state<string[]>([]);
 	let deleteProgress = $state<ResourceGroupDeleteProgressEvent[]>([]);
 	let deleteResults = $state<ResourceGroupDeleteResult[]>([]);
+	let providerProgress = $state<ResourceGroupDeleteProgressEvent[]>([]);
+	let providerProgressResult = $state<ProviderRegisterStreamResult | null>(null);
 	let toast = $state('');
 	let createAiForm = $state({
 		resource_group: '',
@@ -137,6 +147,8 @@
 	);
 	const recentDeleteProgress = $derived(deleteProgress.slice(-12).reverse());
 	const deleteProgressPercent = $derived(resourceGroupDeleteProgressPercent(deleteProgress));
+	const recentProviderProgress = $derived(providerProgress.slice(-12).reverse());
+	const providerProgressPercentValue = $derived(providerRegistrationProgressPercent(providerProgress));
 
 	function params(extra: Record<string, string> = {}) {
 		const query = new URLSearchParams({
@@ -175,6 +187,17 @@
 		deleteProgress = [...deleteProgress, event].slice(-240);
 	}
 
+	function mergeProviderProgress(event: ResourceGroupDeleteProgressEvent) {
+		const index = providerProgress.findIndex((item) => item.step === event.step);
+		if (index === -1) {
+			providerProgress = [...providerProgress, event].slice(-240);
+			return;
+		}
+		providerProgress = providerProgress.map((item, itemIndex) =>
+			itemIndex === index ? { ...item, ...event } : item
+		);
+	}
+
 	function progressDetailNumber(
 		detail: ResourceGroupDeleteProgressEvent['detail'],
 		key: string
@@ -203,8 +226,32 @@
 		return Math.min(95, Math.max(8, Math.round(((finishedGroups.size + currentWeight) / total) * 100)));
 	}
 
+	function providerRegistrationProgressPercent(progress: ResourceGroupDeleteProgressEvent[]) {
+		if (progress.length === 0) return providerLoading ? 8 : 0;
+		if (progress.some((item) => item.step === 'provider-complete' && item.status === 'success')) return 100;
+		if (progress.some((item) => item.step === 'provider-failed' && item.status === 'error')) return 100;
+		const latest = progress.at(-1);
+		if (latest?.step === 'provider-cache') return latest.status === 'success' ? 98 : 95;
+		const total = Math.max(1, progressDetailNumber(latest?.detail, 'total'));
+		const index = progressDetailNumber(latest?.detail, 'index');
+		if (index > 0) {
+			const stepWeight = latest?.status === 'running' ? 0.45 : 0.9;
+			return Math.min(95, Math.max(12, Math.round(12 + ((index - 1 + stepWeight) / total) * 83)));
+		}
+		if (progress.some((item) => item.step === 'provider-auth')) return 12;
+		return 8;
+	}
+
 	function progressFinished(progress: ResourceGroupDeleteProgressEvent[]) {
 		return progress.some((item) => item.step === 'batch-complete') || (!deletingGroups && progress.length > 0);
+	}
+
+	function providerProgressFinished(progress: ResourceGroupDeleteProgressEvent[]) {
+		return (
+			progress.some((item) => item.step === 'provider-complete' && item.status === 'success') ||
+			progress.some((item) => item.step === 'provider-failed' && item.status === 'error') ||
+			(!providerLoading && progress.length > 0 && progress.every((item) => item.status !== 'running'))
+		);
 	}
 
 	function progressTone(progress: ResourceGroupDeleteProgressEvent[]) {
@@ -214,8 +261,21 @@
 		return 'bg-primary';
 	}
 
+	function providerProgressTone(progress: ResourceGroupDeleteProgressEvent[]) {
+		if (progress.some((item) => item.step === 'provider-failed' && item.status === 'error')) return 'bg-red-500';
+		if (progress.some((item) => item.status === 'error')) return 'bg-yellow-500';
+		if (providerProgressFinished(progress)) return 'bg-green-500';
+		return 'bg-primary';
+	}
+
 	function progressAnimation(progress: ResourceGroupDeleteProgressEvent[]) {
 		return !progressFinished(progress) && progress.some((item) => item.status === 'running') ? 'running' : '';
+	}
+
+	function providerProgressAnimation(progress: ResourceGroupDeleteProgressEvent[]) {
+		return !providerProgressFinished(progress) && progress.some((item) => item.status === 'running')
+			? 'running'
+			: '';
 	}
 
 	function progressBadge(status: ProgressStatus) {
@@ -235,6 +295,9 @@
 	function progressDetail(detail?: ResourceGroupDeleteProgressEvent['detail']) {
 		if (!detail) return '';
 		const labels: Record<string, string> = {
+			accountId: '账号',
+			namespace: 'Provider',
+			registrationState: '注册状态',
 			resourceGroup: '资源组',
 			index: '序号',
 			total: '总数',
@@ -313,14 +376,31 @@
 	async function registerProviders() {
 		if (!accountId) return;
 		providerLoading = true;
+		providerProgress = [
+			{
+				step: 'provider-submit',
+				status: 'running',
+				message: '正在提交 Provider 注册请求，页面会实时显示 Azure 返回的执行步骤',
+				detail: { accountId, subscriptionId: subscriptionId || null },
+				timestamp: new Date().toISOString()
+			}
+		];
+		providerProgressResult = null;
 		try {
-			const data = await api<{ providers: ProviderStatus[] }>('/api/user/azure/provider/register', {
-				method: 'POST',
-				body: JSON.stringify({ account_id: accountId, subscription_id: subscriptionId })
-			});
-			providers = data.providers;
-			toast = '已触发资源提供商注册，新账号可能需要等待几分钟生效';
+			const result = await readProviderRegisterStream();
+			providerProgressResult = result;
+			providers = result.providers;
+			const registered = result.providers.filter((provider) =>
+				(provider.registrationState || '').toLowerCase().includes('registered')
+			).length;
+			toast = `Provider 注册流程完成：${registered}/${result.providers.length} 个已注册或已提交`;
 		} catch (err) {
+			mergeProviderProgress({
+				step: 'provider-failed',
+				status: 'error',
+				message: err instanceof Error ? err.message : 'Provider 注册失败',
+				timestamp: new Date().toISOString()
+			});
 			setToastFromError(err, 'Provider 注册失败');
 		} finally {
 			providerLoading = false;
@@ -455,6 +535,60 @@
 	async function copy(value: string) {
 		await navigator.clipboard.writeText(value);
 		toast = '已复制到剪贴板';
+	}
+
+	async function readProviderRegisterStream() {
+		const token = localStorage.getItem('token');
+		const response = await fetch('/api/user/azure/provider/register', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'application/x-ndjson',
+				...(token ? { Authorization: `Bearer ${token}` } : {})
+			},
+			body: JSON.stringify({ account_id: accountId, subscription_id: subscriptionId })
+		});
+		if (!response.ok) {
+			const body = await response.json().catch(() => null);
+			throw new Error(body?.message ?? `Provider 注册请求失败 (${response.status})`);
+		}
+		if (!response.body) throw new Error('浏览器不支持读取 Provider 注册进度流');
+
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = '';
+		let result: ProviderRegisterStreamResult | null = null;
+
+		while (true) {
+			const { value, done } = await reader.read();
+			buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+			const lines = buffer.split('\n');
+			buffer = lines.pop() ?? '';
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				const message = JSON.parse(line) as ProviderRegisterStreamMessage;
+				if (message.type === 'progress') {
+					mergeProviderProgress(message.event);
+				} else if (message.type === 'result') {
+					result = message.result;
+				} else if (message.type === 'error') {
+					throw new Error(message.message);
+				}
+			}
+			if (done) break;
+		}
+		if (buffer.trim()) {
+			const message = JSON.parse(buffer) as ProviderRegisterStreamMessage;
+			if (message.type === 'progress') {
+				mergeProviderProgress(message.event);
+			} else if (message.type === 'result') {
+				result = message.result;
+			} else if (message.type === 'error') {
+				throw new Error(message.message);
+			}
+		}
+		if (!result) throw new Error('Provider 注册流程结束但未返回结果');
+		return result;
 	}
 
 	async function readResourceGroupDeleteStream(resourceGroups: string[]) {
@@ -708,6 +842,64 @@
 				{providerLoading ? '处理中...' : '注册常用 Provider'}
 			</button>
 		</div>
+		{#if providerLoading || providerProgress.length > 0}
+			<div class="rounded-xl border border-primary/30 bg-background/70 p-4">
+				<div class="mb-3 flex flex-wrap items-start justify-between gap-3">
+					<div>
+						<div class="text-sm font-medium">Provider 注册流程</div>
+						<p class="mt-1 text-xs text-muted">
+							正在按顺序检查、提交注册并写入缓存，过程中会实时显示每个 Azure Provider 的状态。
+						</p>
+					</div>
+					<span
+						class={`badge ${
+							providerLoading
+								? 'bg-yellow-900/50 text-yellow-300'
+								: providerProgress.some((item) => item.status === 'error')
+									? 'bg-red-900/50 text-red-300'
+									: 'bg-green-900/50 text-green-300'
+						}`}
+					>
+						{providerLoading ? '进行中' : providerProgress.some((item) => item.status === 'error') ? '有异常' : '已结束'}
+					</span>
+				</div>
+
+				<div class={`progress-track ${providerProgressAnimation(providerProgress) || (providerLoading ? 'running' : '')}`}>
+					<div
+						class={`progress-fill ${providerProgressTone(providerProgress)}`}
+						style={`width: ${providerProgressPercentValue}%`}
+					></div>
+				</div>
+				<div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+					<span>进度：{providerProgressPercentValue}%</span>
+					<span>已记录 {providerProgress.length} 个步骤</span>
+				</div>
+
+				{#if providerProgressResult}
+					<div class="mt-3 rounded-lg border border-border bg-card/70 p-3 text-xs text-muted">
+						订阅 {providerProgressResult.subscription_id} 已返回 {providerProgressResult.providers.length} 个 Provider 状态。
+					</div>
+				{/if}
+
+				<div class="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
+					{#each recentProviderProgress as item}
+						<div class="rounded-lg border border-border/70 bg-card/70 p-3 text-sm">
+							<div class="flex flex-wrap items-center gap-2">
+								<span class={`badge ${progressBadge(item.status)}`}>{progressText(item.status)}</span>
+								<span class="font-mono text-xs text-muted">{item.step}</span>
+								<span>{item.message}</span>
+							</div>
+							{#if progressDetail(item.detail)}
+								<div class="mt-1 break-all text-xs text-muted">{progressDetail(item.detail)}</div>
+							{/if}
+							<div class="mt-1 text-[11px] text-muted">
+								{new Date(item.timestamp).toLocaleString()}
+							</div>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/if}
 		<div class="grid gap-2">
 			{#each providers as provider}
 				<div class="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-sm">
