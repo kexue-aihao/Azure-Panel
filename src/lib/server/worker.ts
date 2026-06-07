@@ -53,6 +53,14 @@ let timer: NodeJS.Timeout | null = null;
 const activePolicies = new Set<number>();
 const activeNotificationUsers = new Set<number>();
 const SUBSCRIPTION_STATUS_TIMEOUT_MS = 30_000;
+const MIN_POLICY_CHECK_INTERVAL_SECONDS = 10;
+const REPLENISHMENT_FAILURE_BASE_COOLDOWN_MS = 5 * 60 * 1000;
+const REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS = 60 * 60 * 1000;
+
+const replenishmentFailureBackoff = new Map<
+	number,
+	{ attempts: number; until: number; message: string }
+>();
 
 type WorkerAccountRuntime = {
 	account: AzureAccount;
@@ -146,6 +154,44 @@ async function saveTrackedVmName(policy: WorkflowPolicy, vmName: string) {
 function safeReplenishTargetCount(policy: WorkflowPolicy) {
 	const count = Number(policy.replenishTargetCount ?? policy.minRunningCount ?? 1);
 	return Number.isFinite(count) && count > 0 ? Math.floor(count) : 1;
+}
+
+function safeCheckIntervalSeconds(policy: WorkflowPolicy) {
+	const seconds = Number(policy.checkIntervalSeconds ?? 60);
+	if (!Number.isFinite(seconds) || seconds <= 0) return 60;
+	return Math.max(MIN_POLICY_CHECK_INTERVAL_SECONDS, Math.floor(seconds));
+}
+
+function shouldRunPolicyStatusCheck(policy: WorkflowPolicy, force: boolean) {
+	if (force || !policy.lastStatusCheckedAt) return true;
+	const intervalMs = safeCheckIntervalSeconds(policy) * 1000;
+	return Date.now() - policy.lastStatusCheckedAt.getTime() >= intervalMs;
+}
+
+function policyReplenishmentCooldown(policyId: number) {
+	const state = replenishmentFailureBackoff.get(policyId);
+	if (!state) return null;
+	if (Date.now() >= state.until) {
+		replenishmentFailureBackoff.delete(policyId);
+		return null;
+	}
+	return state;
+}
+
+function recordReplenishmentFailure(policyId: number, message: string) {
+	const previous = replenishmentFailureBackoff.get(policyId);
+	const attempts = Math.min((previous?.attempts ?? 0) + 1, 8);
+	const cooldownMs = Math.min(
+		REPLENISHMENT_FAILURE_BASE_COOLDOWN_MS * 2 ** (attempts - 1),
+		REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS
+	);
+	const until = Date.now() + cooldownMs;
+	replenishmentFailureBackoff.set(policyId, { attempts, until, message });
+	return { attempts, until, cooldownMs };
+}
+
+function clearReplenishmentFailure(policyId: number) {
+	replenishmentFailureBackoff.delete(policyId);
 }
 
 function policyResourcePrefix(policy: WorkflowPolicy) {
@@ -552,7 +598,8 @@ async function removeAbnormalAccountAfterReplenishment(options: {
 	}
 }
 
-async function runPolicies(policies: WorkflowPolicy[]) {
+async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolean } = {}) {
+	const force = options.force === true;
 	for (const policy of policies) {
 		if (activePolicies.has(policy.id)) continue;
 
@@ -561,6 +608,10 @@ async function runPolicies(policies: WorkflowPolicy[]) {
 		try {
 			if (!policy.statusCheckEnabled) {
 				await insertWorkflowLog(policy.id, 'status_check', 'skipped', '账号状态检测未启用，本轮不执行自动补机');
+				continue;
+			}
+
+			if (!shouldRunPolicyStatusCheck(policy, force)) {
 				continue;
 			}
 
@@ -602,7 +653,22 @@ async function runPolicies(policies: WorkflowPolicy[]) {
 				shouldReplenish ? 'warning' : 'success',
 				`订阅状态: ${status.state}，${shouldReplenish ? '命中补机触发条件' : '未命中补机触发条件，跳过本轮'}`
 			);
-			if (!shouldReplenish) continue;
+			if (!shouldReplenish) {
+				clearReplenishmentFailure(policy.id);
+				continue;
+			}
+
+			const cooldown = policyReplenishmentCooldown(policy.id);
+			if (cooldown) {
+				const remainingSeconds = Math.max(1, Math.ceil((cooldown.until - Date.now()) / 1000));
+				await insertWorkflowLog(
+					policy.id,
+					'auto_create',
+					'skipped',
+					`上一轮补机创建失败，已进入失败冷却，剩余约 ${remainingSeconds} 秒后再重试；上次失败: ${cooldown.message}`
+				);
+				continue;
+			}
 
 			const targetCount = safeReplenishTargetCount(policy);
 			const trackedVmNames = parseVmNames(policy.vmNamesJson);
@@ -716,6 +782,7 @@ async function runPolicies(policies: WorkflowPolicy[]) {
 									result.publicIPv6 || '-'
 								} 刷 IP 次数=${result.ipBrushAttempts}`
 							);
+							clearReplenishmentFailure(policy.id);
 							await saveTrackedVmName(policy, result.name);
 							await notifyReplenishmentSuccess({
 								policy,
@@ -738,6 +805,16 @@ async function runPolicies(policies: WorkflowPolicy[]) {
 								'failed',
 								`补机失败 ${vmName}: ${errorMessage(err)}`
 							);
+							const cooldown = recordReplenishmentFailure(policy.id, errorMessage(err));
+							await insertWorkflowLog(
+								policy.id,
+								'auto_create',
+								'skipped',
+								`补机失败后进入退避冷却，第 ${cooldown.attempts} 次失败，约 ${Math.ceil(
+									cooldown.cooldownMs / 1000
+								)} 秒后再自动重试，避免持续创建 Azure 资源`
+							);
+							break;
 						}
 					}
 				}
@@ -855,7 +932,7 @@ export async function runWorkflowOnce() {
 
 export async function runWorkflowOnceForUser(userId: number, options: { force?: boolean } = {}) {
 	await Promise.all([
-		runPolicies(await listEnabledWorkflowsByUser(userId)),
+		runPolicies(await listEnabledWorkflowsByUser(userId), { force: options.force === true }),
 		runSubscriptionNotificationChecks(options.force === true)
 	]);
 }

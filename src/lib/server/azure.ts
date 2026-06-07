@@ -2441,6 +2441,16 @@ function sleep(ms: number) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function subnetResourceId(clients: AzureClients, resourceGroup: string, vnetName: string, subnetName: string) {
+	return (
+		`/subscriptions/${clients.subscriptionId}` +
+		`/resourceGroups/${resourceGroup}` +
+		'/providers/Microsoft.Network' +
+		`/virtualNetworks/${vnetName}` +
+		`/subnets/${subnetName}`
+	);
+}
+
 function sanitizeResourceName(value: string) {
 	return value.replace(/[^a-zA-Z0-9_.-]/g, '-').replace(/^-+|-+$/g, '') || 'azure-panel';
 }
@@ -2639,32 +2649,43 @@ async function createPublicIp(
 		version: options.version,
 		ddosProtection: Boolean(options.ddosProtectionPlanId)
 	});
-	const pip = await clients.network.publicIPAddresses.beginCreateOrUpdateAndWait(
-		options.resourceGroup,
-		options.name,
-		{
-			location: options.location,
-			publicIPAllocationMethod: 'Static',
-			publicIPAddressVersion: options.version,
-			sku: { name: 'Standard' },
-			...(options.ddosProtectionPlanId
-				? {
-						ddosSettings: {
-							protectionMode: 'Enabled',
-							ddosProtectionPlan: { id: options.ddosProtectionPlanId }
+	try {
+		const pip = await clients.network.publicIPAddresses.beginCreateOrUpdateAndWait(
+			options.resourceGroup,
+			options.name,
+			{
+				location: options.location,
+				publicIPAllocationMethod: 'Static',
+				publicIPAddressVersion: options.version,
+				sku: { name: 'Standard' },
+				...(options.ddosProtectionPlanId
+					? {
+							ddosSettings: {
+								protectionMode: 'Enabled',
+								ddosProtectionPlan: { id: options.ddosProtectionPlanId }
+							}
 						}
-					}
-				: {}),
-			deleteOption: 'Delete'
-		}
-	);
-	const ready = pip.ipAddress ? pip : await waitForPublicIpAddress(clients, options.resourceGroup, options.name);
-	await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, {
-		name: options.name,
-		ip: ready.ipAddress ?? '',
-		ddosProtection: Boolean(options.ddosProtectionPlanId)
-	});
-	return ready;
+					: {}),
+				deleteOption: 'Delete'
+			}
+		);
+		const ready = pip.ipAddress ? pip : await waitForPublicIpAddress(clients, options.resourceGroup, options.name);
+		if (!ready.id) throw new Error(`Azure 未返回 ${options.version} 公网 IP 资源 ID`);
+		await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, {
+			name: options.name,
+			ip: ready.ipAddress ?? '',
+			ddosProtection: Boolean(options.ddosProtectionPlanId)
+		});
+		return ready;
+	} catch (err) {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(options.progress, step, 'error', `${options.version} 公网 IP 创建失败`, {
+			name: options.name,
+			version: options.version,
+			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
+		});
+		throw new Error(`${options.version} 公网 IP 创建失败 ${options.name}: ${message}`);
+	}
 }
 
 async function deletePublicIpById(clients: AzureClients, publicIpId?: string) {
@@ -2719,7 +2740,9 @@ async function createMatchingIPv4PublicIp(
 			location: options.location,
 			name,
 			version: 'IPv4',
-			ddosProtectionPlanId: options.ddosProtectionPlanId
+			ddosProtectionPlanId: options.ddosProtectionPlanId,
+			progress: options.progress,
+			step: 'public-ipv4'
 		});
 		const address = pip.ipAddress ?? '';
 		const matched = !targetPrefix || address.startsWith(targetPrefix);
@@ -3058,14 +3081,25 @@ async function createNetworkSecurityGroupForVm(
 		nsgName,
 		openPorts: openPorts.join(',')
 	});
-	const nsg = await clients.network.networkSecurityGroups.beginCreateOrUpdateAndWait(
-		options.resourceGroup,
-		nsgName,
-		{
-			location: options.location,
-			securityRules
-		}
-	);
+	let nsg: NetworkSecurityGroup;
+	try {
+		nsg = await clients.network.networkSecurityGroups.beginCreateOrUpdateAndWait(
+			options.resourceGroup,
+			nsgName,
+			{
+				location: options.location,
+				securityRules
+			}
+		);
+	} catch (err) {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(options.progress, 'nsg', 'error', '网络安全组创建失败', {
+			nsgName,
+			openPorts: openPorts.join(','),
+			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
+		});
+		throw new Error(`网络安全组创建失败 ${nsgName}: ${message}`);
+	}
 	if (!nsg.id) throw new Error('网络安全组创建失败');
 	await reportCreateVmProgress(options.progress, 'nsg', 'success', '网络安全组已创建并配置入站规则', {
 		nsgName,
@@ -3323,9 +3357,18 @@ async function createNetworkForVm(
 		resourceGroup: options.resourceGroup,
 		location: options.location
 	});
-	await clients.resources.resourceGroups.createOrUpdate(options.resourceGroup, {
-		location: options.location
-	});
+	try {
+		await clients.resources.resourceGroups.createOrUpdate(options.resourceGroup, {
+			location: options.location
+		});
+	} catch (err) {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(options.progress, 'resource-group', 'error', '资源组创建或确认失败', {
+			resourceGroup: options.resourceGroup,
+			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
+		});
+		throw new Error(`资源组创建或确认失败 ${options.resourceGroup}: ${message}`);
+	}
 	await reportCreateVmProgress(options.progress, 'resource-group', 'success', '资源组已就绪', {
 		resourceGroup: options.resourceGroup
 	});
@@ -3354,13 +3397,23 @@ async function createNetworkForVm(
 			planId: ddosPlan.id ?? ''
 		});
 	}
-	await clients.network.virtualNetworks.beginCreateOrUpdateAndWait(options.resourceGroup, vnetName, {
-		location: options.location,
-		addressSpace: { addressPrefixes },
-		subnets: [{ name: subnetName, addressPrefixes: subnetAddressPrefixes }],
-		enableDdosProtection: Boolean(ddosPlan),
-		...(ddosPlan?.id ? { ddosProtectionPlan: { id: ddosPlan.id } } : {})
-	});
+	try {
+		await clients.network.virtualNetworks.beginCreateOrUpdateAndWait(options.resourceGroup, vnetName, {
+			location: options.location,
+			addressSpace: { addressPrefixes },
+			subnets: [{ name: subnetName, addressPrefixes: subnetAddressPrefixes }],
+			enableDdosProtection: Boolean(ddosPlan),
+			...(ddosPlan?.id ? { ddosProtectionPlan: { id: ddosPlan.id } } : {})
+		});
+	} catch (err) {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(options.progress, 'vnet', 'error', '虚拟网络和子网创建失败', {
+			vnetName,
+			subnetName,
+			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
+		});
+		throw new Error(`虚拟网络和子网创建失败 ${vnetName}: ${message}`);
+	}
 	await reportCreateVmProgress(options.progress, 'vnet', 'success', '虚拟网络和子网已创建', {
 		vnetName,
 		subnetName,
@@ -3384,8 +3437,7 @@ async function createNetworkForVm(
 		resourceGroup: options.resourceGroup,
 		location: options.location,
 		vmName: options.vmName,
-		targetPrefix: normalizeCreateIpPrefix(options.ipPrefix),
-		maxAttempts: options.ipBrushMaxAttempts,
+		maxAttempts: 1,
 		ddosProtectionPlanId: ddosPlan?.id,
 		fallbackToLastOnMiss: true,
 		progress: options.progress
@@ -3405,10 +3457,46 @@ async function createNetworkForVm(
 		vnetName,
 		subnetName
 	});
-	const vnet = await clients.network.virtualNetworks.get(options.resourceGroup, vnetName);
-	const subnetId = vnet.subnets?.[0]?.id;
-	if (!subnetId || !ipv4.pip.id) throw new Error('网络资源创建失败');
-	if (options.enableIpv6 && !ipv6?.id) throw new Error('IPv6 公网 IP 创建失败');
+	let vnet: { subnets?: Array<{ name?: string; id?: string }> };
+	try {
+		vnet = await clients.network.virtualNetworks.get(options.resourceGroup, vnetName);
+	} catch (err) {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(options.progress, 'subnet', 'error', '读取虚拟网络子网失败', {
+			vnetName,
+			subnetName,
+			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
+		});
+		throw new Error(`读取虚拟网络子网失败 ${vnetName}/${subnetName}: ${message}`);
+	}
+	let subnetId =
+		vnet.subnets?.find((subnet) => subnet.name === subnetName)?.id ??
+		vnet.subnets?.[0]?.id ??
+		'';
+	if (!subnetId) {
+		subnetId = subnetResourceId(clients, options.resourceGroup, vnetName, subnetName);
+		await reportCreateVmProgress(
+			options.progress,
+			'subnet',
+			'info',
+			'Azure 未返回子网 ID，已按标准 ARM 资源路径继续',
+			{ subnetId }
+		);
+	}
+	if (!ipv4.pip.id) {
+		await reportCreateVmProgress(options.progress, 'public-ipv4', 'error', 'IPv4 公网 IP 创建后未返回资源 ID', {
+			publicIpName: ipv4.pip.name ?? '',
+			ip: ipv4.pip.ipAddress ?? ''
+		});
+		throw new Error(`IPv4 公网 IP 创建后未返回资源 ID: ${ipv4.pip.name ?? '-'}`);
+	}
+	if (options.enableIpv6 && !ipv6?.id) {
+		await reportCreateVmProgress(options.progress, 'public-ipv6', 'error', 'IPv6 公网 IP 创建后未返回资源 ID', {
+			publicIpName: ipv6?.name ?? '',
+			ip: ipv6?.ipAddress ?? ''
+		});
+		throw new Error(`IPv6 公网 IP 创建后未返回资源 ID: ${ipv6?.name ?? '-'}`);
+	}
 	await reportCreateVmProgress(options.progress, 'subnet', 'success', '子网信息已确认', {
 		subnetId
 	});
@@ -3439,15 +3527,28 @@ async function createNetworkForVm(
 		ipv4: ipv4.pip.ipAddress ?? '',
 		ipv6: ipv6?.ipAddress ?? ''
 	});
-	const nic = await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
-		options.resourceGroup,
-		nicName,
-		{
-			location: options.location,
-			networkSecurityGroup: { id: nsg.id },
-			ipConfigurations
-		}
-	);
+	let nic: NetworkInterface;
+	try {
+		nic = await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
+			options.resourceGroup,
+			nicName,
+			{
+				location: options.location,
+				networkSecurityGroup: { id: nsg.id },
+				ipConfigurations
+			}
+		);
+	} catch (err) {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(options.progress, 'nic', 'error', '网卡创建失败', {
+			nicName,
+			subnetId,
+			ipv4PublicIpId: ipv4.pip.id,
+			ipv6PublicIpId: ipv6?.id ?? '',
+			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
+		});
+		throw new Error(`网卡创建失败 ${nicName}: ${message}`);
+	}
 	if (!nic.id) throw new Error('网卡创建失败');
 
 	await reportCreateVmProgress(options.progress, 'nic', 'success', '网卡已创建', {
@@ -3522,35 +3623,98 @@ export async function createVmAdvanced(
 		vmSize,
 		location
 	});
-	await clients.compute.virtualMachines.beginCreateOrUpdateAndWait(resourceGroup, vmName, {
-		location,
-		hardwareProfile: { vmSize },
-		storageProfile: {
-			imageReference: { publisher, offer, sku, version }
-		},
-		osProfile: {
-			computerName: vmName,
-			adminUsername,
-			adminPassword,
-			customData
-		},
-		userData: customData,
-		networkProfile: {
-			networkInterfaces: [{ id: network.nic.id, primary: true }]
-		}
-	});
+	try {
+		await clients.compute.virtualMachines.beginCreateOrUpdateAndWait(resourceGroup, vmName, {
+			location,
+			hardwareProfile: { vmSize },
+			storageProfile: {
+				imageReference: { publisher, offer, sku, version }
+			},
+			osProfile: {
+				computerName: vmName,
+				adminUsername,
+				adminPassword,
+				customData
+			},
+			userData: customData,
+			networkProfile: {
+				networkInterfaces: [{ id: network.nic.id, primary: true }]
+			}
+		});
+	} catch (err) {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(options.progress, 'vm', 'error', 'Azure VM 实例创建失败', {
+			vmName,
+			vmSize,
+			location,
+			imageReference,
+			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
+		});
+		throw new Error(`Azure VM 实例创建失败 ${vmName}: ${message}`);
+	}
 	await reportCreateVmProgress(options.progress, 'vm', 'success', 'Azure VM 实例已创建', {
 		vmName
 	});
+
+	let publicIPv4 = network.publicIPv4;
+	let ipBrushAttempts = network.ipBrushAttempts;
+	let ipBrushMatched = network.ipBrushMatched;
+	const postCreateIpPrefix = normalizeCreateIpPrefix(options.ipPrefix);
+	const postCreateIpBrushMaxAttempts = normalizeAttempts(options.ipBrushMaxAttempts);
+	await reportCreateVmProgress(
+		options.progress,
+		'post-create-ip-brush',
+		'running',
+		`VM 已创建，开始后置刷 IPv4 前缀 ${postCreateIpPrefix}`,
+		{
+			vmName,
+			targetPrefix: postCreateIpPrefix,
+			maxAttempts: postCreateIpBrushMaxAttempts,
+			currentIPv4: publicIPv4
+		}
+	);
+	try {
+		const brushed = await brushVmPublicIPv4Prefix(clients, {
+			resourceGroup,
+			vmName,
+			ipPrefix: postCreateIpPrefix,
+			maxAttempts: postCreateIpBrushMaxAttempts,
+			progress: options.progress
+		});
+		publicIPv4 = brushed.publicIPv4 || publicIPv4;
+		ipBrushAttempts = brushed.attempts;
+		ipBrushMatched = brushed.matched;
+		await reportCreateVmProgress(options.progress, 'post-create-ip-brush', 'success', '后置刷 IPv4 已完成', {
+			vmName,
+			publicIPv4,
+			targetPrefix: postCreateIpPrefix,
+			attempts: ipBrushAttempts,
+			matched: ipBrushMatched
+		});
+	} catch (err) {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(
+			options.progress,
+			'post-create-ip-brush',
+			'info',
+			'后置刷 IPv4 未完成，保留当前已创建 VM 和当前公网 IP 继续',
+			{
+				vmName,
+				publicIPv4,
+				targetPrefix: postCreateIpPrefix,
+				error: message.length > 800 ? `${message.slice(0, 800)}...` : message
+			}
+		);
+	}
 
 	const result = {
 		name: vmName,
 		resourceGroup,
 		location,
-		publicIPv4: network.publicIPv4,
+		publicIPv4,
 		publicIPv6: network.publicIPv6,
-		ipBrushAttempts: network.ipBrushAttempts,
-		ipBrushMatched: network.ipBrushMatched
+		ipBrushAttempts,
+		ipBrushMatched
 	};
 	await reportCreateVmProgress(options.progress, 'complete', 'success', '创建流程完成', {
 		vmName,
@@ -3683,16 +3847,24 @@ export async function brushVmPublicIPv4Prefix(
 		targetPrefix,
 		maxAttempts: options.maxAttempts,
 		nameSalt: String(Date.now()),
+		fallbackToLastOnMiss: true,
 		progress: options.progress
 	});
 	if (!created.pip.id) throw new Error('匹配公网 IPv4 创建失败');
 
 	try {
-		await reportCreateVmProgress(options.progress, 'brush-ip-attach', 'running', '绑定命中的 IPv4 到网卡', {
-			nicName,
-			publicIpName: parseResourceName(created.pip.id),
-			attempts: created.attempts
-		});
+		await reportCreateVmProgress(
+			options.progress,
+			'brush-ip-attach',
+			'running',
+			created.matched ? '绑定命中的 IPv4 到网卡' : '未命中目标前缀，绑定最后一次刷到的 IPv4 到网卡',
+			{
+				nicName,
+				publicIpName: parseResourceName(created.pip.id),
+				attempts: created.attempts,
+				matched: created.matched
+			}
+		);
 		await attachPublicIpToNic(clients, {
 			nicResourceGroup,
 			nicName,
@@ -3717,7 +3889,8 @@ export async function brushVmPublicIPv4Prefix(
 	await reportCreateVmProgress(options.progress, 'brush-ip-complete', 'success', '刷 IPv4 段完成', {
 		publicIPv4: fresh.ipAddress ?? created.pip.ipAddress ?? '',
 		targetPrefix,
-		attempts: created.attempts
+		attempts: created.attempts,
+		matched: created.matched
 	});
 	return {
 		vmName: options.vmName,
@@ -3727,6 +3900,6 @@ export async function brushVmPublicIPv4Prefix(
 		publicIpName: fresh.name ?? parseResourceName(created.pip.id),
 		targetPrefix,
 		attempts: created.attempts,
-		matched: true
+		matched: created.matched
 	};
 }
