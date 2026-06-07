@@ -29,7 +29,7 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.replenish_target_count !== undefined)
 		updates.replenishTargetCount = Math.max(1, Number(body.replenish_target_count) || 1);
 	if (body.auto_start !== undefined) updates.autoStart = Boolean(body.auto_start);
-	if (body.auto_create !== undefined) updates.autoCreate = Boolean(body.auto_create);
+	updates.autoCreate = true;
 	if (body.vm_size !== undefined) updates.vmSize = String(body.vm_size);
 	if (body.image_reference !== undefined) updates.imageReference = String(body.image_reference);
 	if (body.name_prefix !== undefined) updates.namePrefix = String(body.name_prefix);
@@ -39,8 +39,7 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.ip_prefix !== undefined) updates.ipPrefix = String(body.ip_prefix);
 	if (body.ip_brush_max_attempts !== undefined)
 		updates.ipBrushMaxAttempts = Number(body.ip_brush_max_attempts);
-	if (body.check_interval_seconds !== undefined)
-		updates.checkIntervalSeconds = Math.max(1, Number(body.check_interval_seconds) || 120);
+	if (body.check_interval_seconds !== undefined) updates.checkIntervalSeconds = 60;
 	if (body.status_check_enabled !== undefined)
 		updates.statusCheckEnabled = Boolean(body.status_check_enabled);
 	if (body.status_trigger_states !== undefined)
@@ -61,7 +60,7 @@ export const PUT: RequestHandler = async (event) => {
 		min_running_count: updated?.minRunningCount,
 		replenish_target_count: updated?.replenishTargetCount,
 		auto_start: updated?.autoStart,
-		auto_create: updated?.autoCreate,
+		auto_create: true,
 		vm_size: updated?.vmSize,
 		image_reference: updated?.imageReference,
 		name_prefix: updated?.namePrefix,

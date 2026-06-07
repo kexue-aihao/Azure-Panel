@@ -151,7 +151,7 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	minRunningCount: integer('min_running_count').notNull().default(1),
 	replenishTargetCount: integer('replenish_target_count').notNull().default(1),
 	autoStart: integer('auto_start', { mode: 'boolean' }).notNull().default(true),
-	autoCreate: integer('auto_create', { mode: 'boolean' }).notNull().default(false),
+	autoCreate: integer('auto_create', { mode: 'boolean' }).notNull().default(true),
 	vmSize: text('vm_size').notNull().default('Standard_B1s'),
 	imageReference: text('image_reference')
 		.notNull()
@@ -163,7 +163,7 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	enableIpv6: integer('enable_ipv6', { mode: 'boolean' }).notNull().default(false),
 	ipPrefix: text('ip_prefix').notNull().default(''),
 	ipBrushMaxAttempts: integer('ip_brush_max_attempts').notNull().default(30),
-	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(120),
+	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(60),
 	statusCheckEnabled: integer('status_check_enabled', { mode: 'boolean' }).notNull().default(true),
 	statusTriggerStates: text('status_trigger_states').notNull().default('banned,warning,warned,disabled'),
 	dnsBindingId: integer('dns_binding_id').notNull().default(0),

@@ -72,7 +72,7 @@
 			min_running_count: 1,
 			replenish_target_count: 1,
 			auto_start: true,
-			auto_create: false,
+			auto_create: true,
 			vm_size: 'Standard_B1s',
 			image_reference: 'Canonical:ubuntu-24_04-lts:server:latest',
 			name_prefix: 'auto-vm',
@@ -82,7 +82,7 @@
 			enable_ipv6: true,
 			ip_prefix: '',
 			ip_brush_max_attempts: 30,
-			check_interval_seconds: '',
+			check_interval_seconds: 60,
 			status_check_enabled: true,
 			status_trigger_states: 'banned,warning,warned,disabled',
 			dns_binding_id: ''
@@ -153,9 +153,10 @@
 			min_running_count: Number(form.replenish_target_count),
 			replenish_target_count: Number(form.replenish_target_count),
 			ip_brush_max_attempts: Number(form.ip_brush_max_attempts),
-			check_interval_seconds: Number(form.check_interval_seconds),
+			check_interval_seconds: 60,
 			dns_binding_id: Number(form.dns_binding_id || 0),
-			status_check_enabled: form.status_check_enabled
+			status_check_enabled: form.status_check_enabled,
+			auto_create: true
 		};
 
 		if (editingWorkflowId) {
@@ -179,7 +180,7 @@
 			min_running_count: workflow.min_running_count,
 			replenish_target_count: workflow.replenish_target_count || workflow.min_running_count || 1,
 			auto_start: workflow.auto_start,
-			auto_create: workflow.auto_create,
+			auto_create: true,
 			vm_size: workflow.vm_size || 'Standard_B1s',
 			image_reference: workflow.image_reference || 'Canonical:ubuntu-24_04-lts:server:latest',
 			name_prefix: workflow.name_prefix || 'auto-vm',
@@ -187,9 +188,7 @@
 			enable_ipv6: workflow.enable_ipv6,
 			ip_prefix: workflow.ip_prefix || '',
 			ip_brush_max_attempts: workflow.ip_brush_max_attempts || 30,
-			check_interval_seconds: workflow.check_interval_seconds
-				? String(workflow.check_interval_seconds)
-				: '',
+			check_interval_seconds: 60,
 			status_check_enabled: workflow.status_check_enabled,
 			status_trigger_states: workflow.status_trigger_states || 'banned,warning,warned,disabled',
 			dns_binding_id: workflow.dns_binding_id ? String(workflow.dns_binding_id) : ''
@@ -524,10 +523,7 @@
 			<input type="checkbox" bind:checked={form.auto_start} /> 自动启动已停止的 VM
 		</label>
 		<label class="flex items-center gap-2 text-sm">
-			<input type="checkbox" bind:checked={form.auto_create} /> 数量不足时自动创建新 VM
-		</label>
-		<label class="flex items-center gap-2 text-sm">
-			<input type="checkbox" bind:checked={form.status_check_enabled} /> 自动定时检测账号/订阅状态
+			<input type="checkbox" bind:checked={form.status_check_enabled} /> 每 60 秒检测正在使用账号订阅状态，异常立即触发补机
 		</label>
 		<button class="btn-secondary" type="button" disabled={checkingStatus} onclick={() => void checkAccountStatus()}>
 			{checkingStatus ? '检测中...' : '检测触发账号状态'}
@@ -642,13 +638,9 @@
 				</option>
 			{/each}
 		</select>
-		<input
-			class="input"
-			type="number"
-			bind:value={form.check_interval_seconds}
-			min="1"
-			placeholder="定时检测间隔（秒，留空默认 120）"
-		/>
+		<p class="rounded-lg border border-border bg-background/70 px-3 py-2 text-xs text-muted">
+			补机触发逻辑固定为每 60 秒检测一次当前正在使用账号的订阅状态；检测到 banned、warning、warned 或 disabled 后立即按账号添加顺序选择号池账号补机。
+		</p>
 		<div class="flex flex-wrap gap-2">
 			<button class="btn-primary" type="submit" disabled={savingWorkflow}>
 				{savingWorkflow ? '保存中...' : editingWorkflowId ? '保存策略修改' : '创建策略'}
@@ -692,9 +684,7 @@
 							系统: {workflow.image_reference || '-'}
 						</p>
 						<p class="text-xs text-muted">
-							自动开机: {workflow.auto_start ? '是' : '否'} · 自动补机: {workflow.auto_create
-								? '是'
-								: '否'} · 间隔 {workflow.check_interval_seconds}s
+							自动开机: {workflow.auto_start ? '是' : '否'} · 自动补机: 异常立即创建 · 订阅检测 60s
 						</p>
 						<p class="text-xs text-muted">
 							状态检测: {workflow.status_check_enabled ? '开启' : '关闭'} · 触发状态: banned / warning / warned / disabled ·

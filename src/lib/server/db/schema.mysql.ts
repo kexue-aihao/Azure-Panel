@@ -120,7 +120,7 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	minRunningCount: int('min_running_count').notNull().default(1),
 	replenishTargetCount: int('replenish_target_count').notNull().default(1),
 	autoStart: boolean('auto_start').notNull().default(true),
-	autoCreate: boolean('auto_create').notNull().default(false),
+	autoCreate: boolean('auto_create').notNull().default(true),
 	vmSize: varchar('vm_size', { length: 64 }).notNull().default('Standard_B1s'),
 	imageReference: varchar('image_reference', { length: 255 })
 		.notNull()
@@ -132,7 +132,7 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	enableIpv6: boolean('enable_ipv6').notNull().default(false),
 	ipPrefix: varchar('ip_prefix', { length: 32 }).notNull().default(''),
 	ipBrushMaxAttempts: int('ip_brush_max_attempts').notNull().default(30),
-	checkIntervalSeconds: int('check_interval_seconds').notNull().default(120),
+	checkIntervalSeconds: int('check_interval_seconds').notNull().default(60),
 	statusCheckEnabled: boolean('status_check_enabled').notNull().default(true),
 	statusTriggerStates: varchar('status_trigger_states', { length: 120 })
 		.notNull()

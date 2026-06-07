@@ -11,7 +11,6 @@ export const POST: RequestHandler = async (event) => {
 	const accountId = Number(body.account_id);
 	if (!accountId) return fail('请从 Azure 号池选择触发检测账号');
 	await getUserAccount(user.id, accountId);
-	const checkIntervalSeconds = Number(body.check_interval_seconds);
 	const minRunningCount = Math.max(0, Number(body.min_running_count ?? 1) || 0);
 	const replenishTargetCount = Math.max(
 		1,
@@ -29,7 +28,7 @@ export const POST: RequestHandler = async (event) => {
 		minRunningCount,
 		replenishTargetCount,
 		autoStart: body.auto_start !== false,
-		autoCreate: Boolean(body.auto_create),
+		autoCreate: true,
 		vmSize: String(body.vm_size ?? 'Standard_B1s'),
 		imageReference: String(body.image_reference ?? 'Canonical:ubuntu-24_04-lts:server:latest'),
 		namePrefix: String(body.name_prefix ?? 'auto-vm'),
@@ -39,8 +38,7 @@ export const POST: RequestHandler = async (event) => {
 		enableIpv6: Boolean(body.enable_ipv6),
 		ipPrefix: String(body.ip_prefix ?? ''),
 		ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 30),
-		checkIntervalSeconds:
-			Number.isFinite(checkIntervalSeconds) && checkIntervalSeconds > 0 ? checkIntervalSeconds : 120,
+		checkIntervalSeconds: 60,
 		statusCheckEnabled: body.status_check_enabled !== false,
 		statusTriggerStates: DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES,
 		dnsBindingId: Number(body.dns_binding_id ?? 0) || 0
@@ -57,7 +55,7 @@ export const POST: RequestHandler = async (event) => {
 		min_running_count: policy.minRunningCount,
 		replenish_target_count: policy.replenishTargetCount,
 		auto_start: policy.autoStart,
-		auto_create: policy.autoCreate,
+		auto_create: true,
 		vm_size: policy.vmSize,
 		image_reference: policy.imageReference,
 		name_prefix: policy.namePrefix,

@@ -17,7 +17,7 @@ export const GET: RequestHandler = async (event) => {
 			min_running_count: p.minRunningCount,
 			replenish_target_count: p.replenishTargetCount,
 			auto_start: p.autoStart,
-			auto_create: p.autoCreate,
+			auto_create: true,
 			vm_size: p.vmSize,
 			image_reference: p.imageReference,
 			name_prefix: p.namePrefix,

@@ -52,6 +52,7 @@ import {
 let timer: NodeJS.Timeout | null = null;
 const activePolicies = new Set<number>();
 const activeNotificationUsers = new Set<number>();
+const VM_LIST_NEXT_TIMEOUT_MS = 20_000;
 
 type WorkerAccountRuntime = {
 	account: AzureAccount;
@@ -82,6 +83,20 @@ function errorMessage(err: unknown) {
 	return err instanceof Error ? err.message : String(err);
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+	let timerId: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_, reject) => {
+				timerId = setTimeout(() => reject(new Error(message)), timeoutMs);
+			})
+		]);
+	} finally {
+		if (timerId) clearTimeout(timerId);
+	}
+}
+
 function normalizedNotificationState(state?: string | null) {
 	const normalized = String(state ?? '').trim().toLowerCase();
 	return normalized === 'warned' ? 'warning' : normalized;
@@ -94,15 +109,6 @@ function shuffle<T>(items: T[]) {
 		[result[i], result[j]] = [result[j], result[i]];
 	}
 	return result;
-}
-
-function safeIntervalSeconds(value: number) {
-	return Number.isFinite(value) && value > 0 ? value : 120;
-}
-
-function shouldRun(policy: { lastRunAt: Date | null; checkIntervalSeconds: number }, force: boolean) {
-	if (force || !policy.lastRunAt) return true;
-	return Date.now() - policy.lastRunAt.getTime() >= safeIntervalSeconds(policy.checkIntervalSeconds) * 1000;
 }
 
 function shouldRunNotificationCheck(settings: {
@@ -149,23 +155,36 @@ async function collectTrackedVms(
 
 	for (const runtime of runtimes) {
 		try {
-			for await (const vm of runtime.clients.compute.virtualMachines.listAll()) {
-				if (!vm.name) continue;
-				const resourceGroup = resourceGroupFromId(vm.id);
-				if (!resourceGroup) continue;
-				const lowerName = vm.name.toLowerCase();
-				const isConfigured = configuredNameSet.size > 0 && configuredNameSet.has(lowerName);
-				const isPolicyCreated = lowerName.startsWith(`${prefix}-`);
-				if (isConfigured || isPolicyCreated) {
-					tracked.push({
-						name: vm.name,
-						resourceGroup,
-						vmSize: vm.hardwareProfile?.vmSize ?? '',
-						accountId: runtime.account.id,
-						accountName: runtime.account.name,
-						clients: runtime.clients
-					});
+			const iterator = runtime.clients.compute.virtualMachines.listAll()[Symbol.asyncIterator]();
+			try {
+				while (true) {
+					const next = await withTimeout(
+						iterator.next(),
+						VM_LIST_NEXT_TIMEOUT_MS,
+						`账号 ${runtime.account.name} VM 列表读取超时`
+					);
+					if (next.done) break;
+					const vm = next.value;
+					if (!vm.name) continue;
+					const resourceGroup = resourceGroupFromId(vm.id);
+					if (!resourceGroup) continue;
+					const lowerName = vm.name.toLowerCase();
+					const isConfigured = configuredNameSet.size > 0 && configuredNameSet.has(lowerName);
+					const isPolicyCreated = lowerName.startsWith(`${prefix}-`);
+					if (isConfigured || isPolicyCreated) {
+						tracked.push({
+							name: vm.name,
+							resourceGroup,
+							vmSize: vm.hardwareProfile?.vmSize ?? '',
+							accountId: runtime.account.id,
+							accountName: runtime.account.name,
+							clients: runtime.clients
+						});
+					}
 				}
+			} finally {
+				const close = (iterator as { return?: () => Promise<unknown> }).return;
+				await close?.call(iterator).catch(() => undefined);
 			}
 		} catch (err) {
 			await insertWorkflowLog(
@@ -523,9 +542,8 @@ async function syncWorkflowDns(options: {
 	}
 }
 
-async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
+async function runPolicies(policies: WorkflowPolicy[]) {
 	for (const policy of policies) {
-		if (!shouldRun(policy, force)) continue;
 		if (activePolicies.has(policy.id)) continue;
 
 		activePolicies.add(policy.id);
@@ -573,7 +591,10 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 
 			const targetCount = safeReplenishTargetCount(policy);
 			const accountPoolRuntimes = await collectAccountPoolRuntimes(policy, account, { bootProxyPool });
-			const tracked = await collectTrackedVms(policy, accountPoolRuntimes);
+			const replenishRuntimes = accountPoolRuntimes.filter(
+				(runtime) => runtime.account.id !== account.id
+			);
+			const tracked = await collectTrackedVms(policy, replenishRuntimes);
 			let running = 0;
 			const runningVms: TrackedVm[] = [];
 			const stopped: TrackedVm[] = [];
@@ -593,7 +614,7 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 				policy.id,
 				'inspect',
 				'success',
-				`已跟踪本策略补机 VM ${tracked.length} 台，运行中 ${running} 台，停止 ${stopped.length} 台，目标 ${targetCount} 台，补机规格 ${replenishmentVmSize}`
+				`已跟踪健康号池中的本策略补机 VM ${tracked.length} 台，运行中 ${running} 台，停止 ${stopped.length} 台，目标 ${targetCount} 台，补机规格 ${replenishmentVmSize}`
 			);
 
 			if (policy.autoStart) {
@@ -620,7 +641,32 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 			}
 
 			const deficit = Math.max(targetCount - running, 0);
-			if (deficit > 0 && policy.autoCreate) {
+			await insertWorkflowLog(
+				policy.id,
+				'auto_create',
+				deficit > 0 ? 'running' : 'skipped',
+				`补机计划已计算：触发账号=${account.name}，订阅状态=${status.state}，健康运行=${running}，目标=${targetCount}，需新建=${deficit}`
+			);
+			if (deficit <= 0) {
+				await insertWorkflowLog(
+					policy.id,
+					'auto_create',
+					'skipped',
+					'健康号池中已有补机数量满足目标，本轮不再创建新 VM'
+				);
+				continue;
+			}
+
+			if (!policy.autoCreate) {
+				await insertWorkflowLog(
+					policy.id,
+					'auto_create',
+					'warning',
+					'策略未开启“自动创建新 VM”，但当前订阅异常已命中补机条件，将按补机策略立即创建'
+				);
+			}
+
+			if (deficit > 0) {
 				const password = decryptSecret(policy.adminPasswordEncrypted);
 				const userdata = decryptSecret(policy.userdataEncrypted ?? '');
 				if (!password) {
@@ -628,6 +674,12 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 				} else {
 					let accountPoolCursor = 0;
 					for (let i = 0; i < deficit; i++) {
+						await insertWorkflowLog(
+							policy.id,
+							'auto_create',
+							'running',
+							`准备创建第 ${i + 1}/${deficit} 台补机，按账号添加顺序选择可用号池账号`
+						);
 						const replenishRuntime = await pickReplenishmentRuntime(
 							policy,
 							accountPoolRuntimes,
@@ -813,12 +865,12 @@ async function runSubscriptionNotificationChecks(force = false) {
 }
 
 export async function runWorkflowOnce() {
-	await Promise.all([runPolicies(await listEnabledWorkflows(), false), runSubscriptionNotificationChecks()]);
+	await Promise.all([runPolicies(await listEnabledWorkflows()), runSubscriptionNotificationChecks()]);
 }
 
 export async function runWorkflowOnceForUser(userId: number, options: { force?: boolean } = {}) {
 	await Promise.all([
-		runPolicies(await listEnabledWorkflowsByUser(userId), options.force === true),
+		runPolicies(await listEnabledWorkflowsByUser(userId)),
 		runSubscriptionNotificationChecks(options.force === true)
 	]);
 }
