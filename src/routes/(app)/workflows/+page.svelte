@@ -80,9 +80,9 @@
 			admin_password: '',
 			userdata: '',
 			enable_ipv6: true,
-			ip_prefix: '',
-			ip_brush_max_attempts: 10,
-			check_interval_seconds: 60,
+			ip_prefix: '85.211',
+			ip_brush_max_attempts: 30,
+			check_interval_seconds: 10,
 			status_check_enabled: true,
 			status_trigger_states: 'banned,warning,warned,disabled',
 			dns_binding_id: ''
@@ -152,7 +152,7 @@
 			vm_names: vmNames,
 			min_running_count: Number(form.replenish_target_count),
 			replenish_target_count: Number(form.replenish_target_count),
-			check_interval_seconds: 60,
+			check_interval_seconds: 10,
 			dns_binding_id: Number(form.dns_binding_id || 0),
 			status_check_enabled: form.status_check_enabled,
 			auto_create: true
@@ -185,9 +185,9 @@
 			name_prefix: workflow.name_prefix || 'auto-vm',
 			admin_username: workflow.admin_username || 'azureuser',
 			enable_ipv6: workflow.enable_ipv6,
-			ip_prefix: workflow.ip_prefix || '',
-			ip_brush_max_attempts: workflow.ip_brush_max_attempts || 10,
-			check_interval_seconds: 60,
+			ip_prefix: workflow.ip_prefix || '85.211',
+			ip_brush_max_attempts: workflow.ip_brush_max_attempts || 30,
+			check_interval_seconds: 10,
 			status_check_enabled: workflow.status_check_enabled,
 			status_trigger_states: workflow.status_trigger_states || 'banned,warning,warned,disabled',
 			dns_binding_id: workflow.dns_binding_id ? String(workflow.dns_binding_id) : ''
@@ -364,6 +364,10 @@
 			toast = '请先从 Azure 号池选择触发检测账号';
 			return;
 		}
+		if (!form.dns_binding_id) {
+			toast = '请先选择自动补机完成后要解析的 DNS 绑定';
+			return;
+		}
 
 		savingWorkflow = true;
 		try {
@@ -522,7 +526,7 @@
 			<input type="checkbox" bind:checked={form.auto_start} /> 自动启动已停止的 VM
 		</label>
 		<label class="flex items-center gap-2 text-sm">
-			<input type="checkbox" bind:checked={form.status_check_enabled} /> 每 60 秒检测正在使用账号订阅状态，异常立即触发补机，上一轮补机未完成时跳过本轮
+			<input type="checkbox" bind:checked={form.status_check_enabled} /> 每 10 秒检测正在使用账号订阅状态，异常立即触发补机，上一轮补机未完成时跳过本轮
 		</label>
 		<button class="btn-secondary" type="button" disabled={checkingStatus} onclick={() => void checkAccountStatus()}>
 			{checkingStatus ? '检测中...' : '检测触发账号状态'}
@@ -606,7 +610,7 @@
 			<input type="checkbox" bind:checked={form.enable_ipv6} /> 自动补机时同时创建 IPv6 公网地址
 		</label>
 		<p class="-mt-2 text-xs text-muted">
-			自动补机会直接申请 IPv4 公网 IP；勾选 IPv6 时同步创建 IPv6 公网 IP，不执行创建前刷 IP 段。
+			自动补机会默认刷 IPv4 前缀 85.211，最多尝试 30 次；成功后同步创建/更新 DNS 解析。
 		</p>
 		<textarea
 			class="input min-h-36 font-mono text-xs"
@@ -617,8 +621,8 @@
 					: `#cloud-config\nruncmd:\n  - curl -fsSL https://example.com/install.sh | bash`
 			}
 		></textarea>
-		<select class="input" bind:value={form.dns_binding_id}>
-			<option value="">补机完成后 DNS 解析绑定（可选）</option>
+		<select class="input" bind:value={form.dns_binding_id} required>
+			<option value="">请选择补机完成后 DNS 解析绑定（必选）</option>
 			{#each dnsBindings as binding}
 				<option value={binding.id} disabled={!binding.enabled}>
 					{binding.name} · {binding.fqdn}{binding.enabled ? '' : '（已停用）'}
@@ -626,7 +630,7 @@
 			{/each}
 		</select>
 		<p class="rounded-lg border border-border bg-background/70 px-3 py-2 text-xs text-muted">
-			补机触发逻辑固定为每 60 秒检测一次当前正在使用账号的订阅状态；检测到 banned、warning、warned 或 disabled 后立即按账号添加顺序选择号池账号补机；上一轮补机流程未完成前不会再次触发检测。
+			补机触发逻辑固定为每 10 秒检测一次当前正在使用账号的订阅状态；检测到 banned、warning、warned 或 disabled 后立即按账号添加顺序选择号池账号补机；补机会刷 IPv4 前缀 85.211，默认最多 30 次；上一轮补机流程未完成前不会再次触发检测。
 		</p>
 		<div class="flex flex-wrap gap-2">
 			<button class="btn-primary" type="submit" disabled={savingWorkflow}>
@@ -671,7 +675,7 @@
 							系统: {workflow.image_reference || '-'}
 						</p>
 						<p class="text-xs text-muted">
-							自动开机: {workflow.auto_start ? '是' : '否'} · 自动补机: 异常立即创建 · 订阅检测 60s
+							自动开机: {workflow.auto_start ? '是' : '否'} · 自动补机: 异常立即创建 · 订阅检测 10s · IPv4 前缀 {workflow.ip_prefix || '85.211'} / {workflow.ip_brush_max_attempts || 30} 次
 						</p>
 						<p class="text-xs text-muted">
 							状态检测: {workflow.status_check_enabled ? '开启' : '关闭'} · 触发状态: banned / warning / warned / disabled ·

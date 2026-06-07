@@ -59,6 +59,9 @@ const activePolicies = new Set<number>();
 const activeNotificationUsers = new Set<number>();
 const SUBSCRIPTION_STATUS_TIMEOUT_MS = 30_000;
 const MIN_POLICY_CHECK_INTERVAL_SECONDS = 10;
+const DEFAULT_POLICY_CHECK_INTERVAL_SECONDS = 10;
+const DEFAULT_REPLENISHMENT_IP_PREFIX = '85.211';
+const DEFAULT_REPLENISHMENT_IP_BRUSH_ATTEMPTS = 30;
 const REPLENISHMENT_FAILURE_BASE_COOLDOWN_MS = 5 * 60 * 1000;
 const REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS = 60 * 60 * 1000;
 const REPLENISHMENT_FLOW_LOCK_TIMEOUT_MS = 6 * 60 * 60 * 1000;
@@ -163,9 +166,18 @@ function safeReplenishTargetCount(policy: WorkflowPolicy) {
 }
 
 function safeCheckIntervalSeconds(policy: WorkflowPolicy) {
-	const seconds = Number(policy.checkIntervalSeconds ?? 60);
-	if (!Number.isFinite(seconds) || seconds <= 0) return 60;
+	const seconds = Number(policy.checkIntervalSeconds ?? DEFAULT_POLICY_CHECK_INTERVAL_SECONDS);
+	if (!Number.isFinite(seconds) || seconds <= 0) return DEFAULT_POLICY_CHECK_INTERVAL_SECONDS;
 	return Math.max(MIN_POLICY_CHECK_INTERVAL_SECONDS, Math.floor(seconds));
+}
+
+function replenishmentIpPrefix(policy: WorkflowPolicy) {
+	return String(policy.ipPrefix || DEFAULT_REPLENISHMENT_IP_PREFIX).trim() || DEFAULT_REPLENISHMENT_IP_PREFIX;
+}
+
+function replenishmentIpBrushMaxAttempts(policy: WorkflowPolicy) {
+	const attempts = Number(policy.ipBrushMaxAttempts ?? DEFAULT_REPLENISHMENT_IP_BRUSH_ATTEMPTS);
+	return Number.isFinite(attempts) && attempts > 0 ? Math.floor(attempts) : DEFAULT_REPLENISHMENT_IP_BRUSH_ATTEMPTS;
 }
 
 function shouldRunPolicyStatusCheck(policy: WorkflowPolicy, force: boolean) {
@@ -958,6 +970,16 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 				continue;
 			}
 
+			if (!policy.dnsBindingId) {
+				await insertWorkflowLog(
+					policy.id,
+					'dns_sync',
+					'failed',
+					'自动补机要求必须指定 DNS 解析绑定，请先在补机策略中选择要同步的域名'
+				);
+				continue;
+			}
+
 			const cooldown = activeReplenishmentCooldown(policy);
 			if (cooldown) {
 				const remainingSeconds = Math.max(1, Math.ceil((cooldown.until - Date.now()) / 1000));
@@ -974,12 +996,14 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 			const trackedVmNames = parseVmNames(policy.vmNamesJson);
 			const trackedCount = trackedVmNames.length;
 			const replenishmentVmSize = policy.vmSize;
+			const ipPrefix = replenishmentIpPrefix(policy);
+			const ipBrushMaxAttempts = replenishmentIpBrushMaxAttempts(policy);
 			const deficit = Math.max(targetCount - trackedCount, 0);
 			await insertWorkflowLog(
 				policy.id,
 				'auto_create',
 				deficit > 0 ? 'running' : 'skipped',
-				`订阅异常已触发补机计划：触发账号=${account.name}，订阅状态=${status.state}，已记录补机=${trackedCount}，目标=${targetCount}，需新建=${deficit}，规格=${replenishmentVmSize}`
+				`订阅异常已触发补机计划：触发账号=${account.name}，订阅状态=${status.state}，已记录补机=${trackedCount}，目标=${targetCount}，需新建=${deficit}，规格=${replenishmentVmSize}，刷 IPv4 前缀=${ipPrefix}，最大次数=${ipBrushMaxAttempts}`
 			);
 			if (deficit <= 0) {
 				await insertWorkflowLog(
@@ -1079,6 +1103,8 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 							adminPassword: password,
 							enableIpv6: policy.enableIpv6,
 							customData: userdata,
+							ipPrefix,
+							ipBrushMaxAttempts,
 							progress: (event) => logCreateProgress(policy.id, event)
 						});
 						await insertWorkflowLog(

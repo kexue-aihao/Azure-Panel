@@ -167,9 +167,9 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		admin_password_encrypted text NOT NULL,
 		userdata_encrypted text NOT NULL,
 		enable_ipv6 tinyint(1) NOT NULL DEFAULT 0,
-		ip_prefix varchar(32) NOT NULL DEFAULT '',
-		ip_brush_max_attempts int NOT NULL DEFAULT 10,
-		check_interval_seconds int NOT NULL DEFAULT 60,
+		ip_prefix varchar(32) NOT NULL DEFAULT '85.211',
+		ip_brush_max_attempts int NOT NULL DEFAULT 30,
+		check_interval_seconds int NOT NULL DEFAULT 10,
 		status_check_enabled tinyint(1) NOT NULL DEFAULT 1,
 		status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled',
 		dns_binding_id int NOT NULL DEFAULT 0,
@@ -965,19 +965,19 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 		pool,
 		'workflow_policies',
 		'ip_prefix',
-		"ip_prefix varchar(32) NOT NULL DEFAULT ''"
+		"ip_prefix varchar(32) NOT NULL DEFAULT '85.211'"
 	);
 	await addMysqlColumnIfMissing(
 		pool,
 		'workflow_policies',
 		'ip_brush_max_attempts',
-		'ip_brush_max_attempts int NOT NULL DEFAULT 10'
+		'ip_brush_max_attempts int NOT NULL DEFAULT 30'
 	);
 	await addMysqlColumnIfMissing(
 		pool,
 		'workflow_policies',
 		'check_interval_seconds',
-		'check_interval_seconds int NOT NULL DEFAULT 60'
+		'check_interval_seconds int NOT NULL DEFAULT 10'
 	);
 	const hadReplenishTargetCount = await mysqlColumnExists(
 		pool,
@@ -1024,7 +1024,19 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 	);
 	await mysqlInitQuery(
 		pool,
-		'UPDATE workflow_policies SET check_interval_seconds = 60 WHERE check_interval_seconds <> 60',
+		"UPDATE workflow_policies SET ip_prefix = '85.211' WHERE ip_prefix IS NULL OR TRIM(ip_prefix) = ''",
+		undefined,
+		'mysql-schema:workflow-policies:normalize-ip-prefix'
+	);
+	await mysqlInitQuery(
+		pool,
+		'UPDATE workflow_policies SET ip_brush_max_attempts = 30 WHERE ip_brush_max_attempts IS NULL OR ip_brush_max_attempts < 1',
+		undefined,
+		'mysql-schema:workflow-policies:normalize-ip-brush-attempts'
+	);
+	await mysqlInitQuery(
+		pool,
+		'UPDATE workflow_policies SET check_interval_seconds = 10 WHERE check_interval_seconds <> 10',
 		undefined,
 		'mysql-schema:workflow-policies:normalize-check-interval'
 	);
@@ -1266,9 +1278,9 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 			admin_password_encrypted TEXT NOT NULL DEFAULT '',
 			userdata_encrypted TEXT NOT NULL DEFAULT '',
 			enable_ipv6 INTEGER NOT NULL DEFAULT 0,
-			ip_prefix TEXT NOT NULL DEFAULT '',
-			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 10,
-			check_interval_seconds INTEGER NOT NULL DEFAULT 60,
+			ip_prefix TEXT NOT NULL DEFAULT '85.211',
+			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30,
+			check_interval_seconds INTEGER NOT NULL DEFAULT 10,
 			status_check_enabled INTEGER NOT NULL DEFAULT 1,
 			status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned,disabled',
 			dns_binding_id INTEGER NOT NULL DEFAULT 0,
@@ -1365,16 +1377,16 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN enable_ipv6 INTEGER NOT NULL DEFAULT 0');
 	}
 	if (!workflowColumns.some((column) => column.name === 'ip_prefix')) {
-		sqlite.exec("ALTER TABLE workflow_policies ADD COLUMN ip_prefix TEXT NOT NULL DEFAULT ''");
+		sqlite.exec("ALTER TABLE workflow_policies ADD COLUMN ip_prefix TEXT NOT NULL DEFAULT '85.211'");
 	}
 	if (!workflowColumns.some((column) => column.name === 'ip_brush_max_attempts')) {
 		sqlite.exec(
-			'ALTER TABLE workflow_policies ADD COLUMN ip_brush_max_attempts INTEGER NOT NULL DEFAULT 10'
+			'ALTER TABLE workflow_policies ADD COLUMN ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30'
 		);
 	}
 	if (!workflowColumns.some((column) => column.name === 'check_interval_seconds')) {
 		sqlite.exec(
-			'ALTER TABLE workflow_policies ADD COLUMN check_interval_seconds INTEGER NOT NULL DEFAULT 60'
+			'ALTER TABLE workflow_policies ADD COLUMN check_interval_seconds INTEGER NOT NULL DEFAULT 10'
 		);
 	}
 	if (!workflowColumns.some((column) => column.name === 'replenish_target_count')) {
@@ -1399,7 +1411,9 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	sqlite.exec(
 		"UPDATE workflow_policies SET status_trigger_states = 'banned,warning,warned,disabled' WHERE lower(replace(status_trigger_states, ' ', '')) = 'banned,warning,warned'"
 	);
-	sqlite.exec('UPDATE workflow_policies SET check_interval_seconds = 60 WHERE check_interval_seconds <> 60');
+	sqlite.exec("UPDATE workflow_policies SET ip_prefix = '85.211' WHERE ip_prefix IS NULL OR trim(ip_prefix) = ''");
+	sqlite.exec('UPDATE workflow_policies SET ip_brush_max_attempts = 30 WHERE ip_brush_max_attempts IS NULL OR ip_brush_max_attempts < 1');
+	sqlite.exec('UPDATE workflow_policies SET check_interval_seconds = 10 WHERE check_interval_seconds <> 10');
 	if (!workflowColumns.some((column) => column.name === 'dns_binding_id')) {
 		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN dns_binding_id INTEGER NOT NULL DEFAULT 0');
 	}

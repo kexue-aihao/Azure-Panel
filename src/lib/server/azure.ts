@@ -128,6 +128,8 @@ export type CreateVmOptions = {
 	openPorts?: string | string[];
 	enableDdosProtection?: boolean;
 	customData?: string;
+	ipPrefix?: string;
+	ipBrushMaxAttempts?: number;
 	progress?: CreateVmProgressReporter;
 };
 
@@ -4770,6 +4772,8 @@ async function createNetworkForVm(
 		enableAcceleratedNetworking?: boolean;
 		openPorts?: string | string[];
 		enableDdosProtection?: boolean;
+		ipPrefix?: string;
+		ipBrushMaxAttempts?: number;
 		progress?: CreateVmProgressReporter;
 	}
 ) {
@@ -4863,15 +4867,33 @@ async function createNetworkForVm(
 		progress: options.progress
 	});
 
-	const ipv4 = await createPublicIp(clients, {
-		resourceGroup: options.resourceGroup,
-		location: options.location,
-		name: resourceName(options.vmName, 'pip4'),
-		version: 'IPv4',
-		ddosProtectionPlanId: ddosPlan?.id,
-		progress: options.progress,
-		step: 'public-ipv4'
-	});
+	const createIpPrefix = normalizeIpPrefix(options.ipPrefix);
+	const ipv4Result = createIpPrefix
+		? await createMatchingIPv4PublicIp(clients, {
+				resourceGroup: options.resourceGroup,
+				location: options.location,
+				vmName: options.vmName,
+				targetPrefix: createIpPrefix,
+				maxAttempts: options.ipBrushMaxAttempts,
+				ddosProtectionPlanId: ddosPlan?.id,
+				nameSalt: String(Date.now()),
+				fallbackToLastOnMiss: true,
+				progress: options.progress
+			})
+		: {
+				pip: await createPublicIp(clients, {
+					resourceGroup: options.resourceGroup,
+					location: options.location,
+					name: resourceName(options.vmName, 'pip4'),
+					version: 'IPv4',
+					ddosProtectionPlanId: ddosPlan?.id,
+					progress: options.progress,
+					step: 'public-ipv4'
+				}),
+				attempts: 0,
+				matched: false
+			};
+	const ipv4 = ipv4Result.pip;
 	if (!ipv4.id) throw new Error('IPv4 公网 IP 创建失败');
 
 	let ipv6: PublicIPAddress | null = null;
@@ -5016,8 +5038,8 @@ async function createNetworkForVm(
 		nic,
 		publicIPv4: createdIps.publicIPv4,
 		publicIPv6: createdIps.publicIPv6,
-		ipBrushAttempts: 0,
-		ipBrushMatched: false
+		ipBrushAttempts: ipv4Result.attempts,
+		ipBrushMatched: ipv4Result.matched
 	};
 }
 
@@ -5070,6 +5092,8 @@ export async function createVmAdvanced(
 		enableAcceleratedNetworking: options.enableAcceleratedNetworking === true,
 		openPorts: options.openPorts,
 		enableDdosProtection: options.enableDdosProtection === true,
+		ipPrefix: options.ipPrefix,
+		ipBrushMaxAttempts: options.ipBrushMaxAttempts,
 		progress: options.progress
 	});
 
@@ -5177,39 +5201,6 @@ export async function replaceVmPublicIPv4(
 		oldBinding?.ipConfigName && oldBinding.ipConfigName !== ipConfig.name
 			? ({ ...ipConfig, name: oldBinding.ipConfigName } as NetworkInterfaceIPConfiguration)
 			: ipConfig;
-	if (oldPublicIpId) {
-		await reportCreateVmProgress(progress, 'replace-ip-detach', 'running', '从网卡解绑当前 IPv4 公网 IP', {
-			nicName,
-			oldPublicIpName,
-			oldPublicIPv4,
-			ipConfigName: targetIpConfig.name ?? '',
-			oldPublicIpSource: oldBinding?.source ?? 'none'
-		});
-		await detachPublicIpFromNic(clients, {
-			nicResourceGroup,
-			nicName,
-			nic,
-			ipConfig: targetIpConfig,
-			progress,
-			step: 'replace-ip-detach'
-		});
-		await reportCreateVmProgress(progress, 'replace-ip-detach', 'success', '当前 IPv4 已从网卡解绑', {
-			nicName,
-			oldPublicIpName,
-			oldPublicIPv4
-		});
-
-		await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'running', '删除当前 IPv4 公网 IP 以释放名额', {
-			oldPublicIpName,
-			oldPublicIPv4
-		});
-		await deletePublicIpById(clients, oldPublicIpId);
-		await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'success', '当前 IPv4 公网 IP 已删除', {
-			oldPublicIpName,
-			oldPublicIPv4
-		});
-	}
-
 	const newPublicIpName = resourceName(vmName, `pip4-${Date.now()}`);
 	await reportCreateVmProgress(progress, 'replace-ip-create', 'running', '创建新的 IPv4 公网 IP', {
 		resourceGroup: nicResourceGroup,
@@ -5232,20 +5223,45 @@ export async function replaceVmPublicIPv4(
 	if (!created.id) throw new Error('新公网 IPv4 创建失败');
 
 	try {
-		await reportCreateVmProgress(progress, 'replace-ip-attach', 'running', '绑定新的 IPv4 到网卡', {
-			nicName,
-			publicIpName: parseResourceName(created.id),
-			publicIPv4: publicIpAddressValue(created)
-		});
-		await attachPublicIpToNic(clients, {
+		const switchMode = await detachOldPublicIpOrSwapDirectly(clients, {
+			resourceGroup,
+			vmName,
 			nicResourceGroup,
 			nicName,
 			nic,
 			ipConfig: targetIpConfig,
-			publicIpId: created.id,
+			oldPublicIpId,
+			oldPublicIpName,
+			oldPublicIPv4,
+			newPublicIpId: created.id,
 			progress,
-			step: 'replace-ip-attach'
+			prefix: 'replace-ip'
 		});
+		if (switchMode !== 'swapped') {
+			await reportCreateVmProgress(progress, 'replace-ip-attach', 'running', '绑定新的 IPv4 到网卡', {
+				nicName,
+				publicIpName: parseResourceName(created.id),
+				publicIPv4: publicIpAddressValue(created),
+				mode: switchMode
+			});
+			await attachPublicIpToNic(clients, {
+				nicResourceGroup,
+				nicName,
+				nic,
+				ipConfig: targetIpConfig,
+				publicIpId: created.id,
+				progress,
+				step: 'replace-ip-attach'
+			});
+		}
+		if (oldPublicIpId) {
+			await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
+				oldPublicIpName,
+				oldPublicIPv4,
+				mode: switchMode
+			});
+			await deletePublicIpById(clients, oldPublicIpId);
+		}
 	} catch (err) {
 		await reportCreateVmProgress(progress, 'replace-ip-recover', 'info', 'IPv4 更换绑定失败，新 IPv4 已保留以便手动恢复', {
 			publicIpName: parseResourceName(created.id),
@@ -5319,43 +5335,6 @@ export async function brushVmPublicIPv4Prefix(
 		oldBinding?.ipConfigName && oldBinding.ipConfigName !== ipConfig.name
 			? ({ ...ipConfig, name: oldBinding.ipConfigName } as NetworkInterfaceIPConfiguration)
 			: ipConfig;
-	if (oldPublicIPv4 && oldPublicIPv4.startsWith(targetPrefix)) {
-		await reportCreateVmProgress(
-			options.progress,
-			'public-ipv4',
-			'success',
-			`当前 IPv4 ${oldPublicIPv4} 已命中目标前缀，无需继续刷 IP`,
-			{
-				attempt: 1,
-				maxAttempts: 1,
-				ip: oldPublicIPv4,
-				targetPrefix,
-				publicIpName: oldPublicIpName || null,
-				matched: true,
-				kept: true,
-				deleted: false,
-				brushRecordOnly: true
-			}
-		);
-		await reportCreateVmProgress(options.progress, 'brush-ip-complete', 'success', '当前 IPv4 已命中目标前缀，无需继续刷 IP', {
-			publicIPv4: oldPublicIPv4,
-			targetPrefix,
-			publicIpName: oldPublicIpName || null,
-			ipConfigName: targetIpConfig.name || null,
-			attempts: 1,
-			matched: true
-		});
-		return {
-			vmName: options.vmName,
-			resourceGroup: options.resourceGroup,
-			publicIPv4: oldPublicIPv4,
-			oldPublicIPv4,
-			publicIpName: oldPublicIpName,
-			targetPrefix,
-			attempts: 1,
-			matched: true
-		};
-	}
 	const created = await createMatchingIPv4PublicIp(clients, {
 		resourceGroup: nicResourceGroup,
 		location: vmLocation,

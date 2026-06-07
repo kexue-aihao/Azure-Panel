@@ -38,13 +38,17 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.enable_ipv6 !== undefined) updates.enableIpv6 = Boolean(body.enable_ipv6);
 	if (body.ip_prefix !== undefined) updates.ipPrefix = String(body.ip_prefix);
 	if (body.ip_brush_max_attempts !== undefined)
-		updates.ipBrushMaxAttempts = Number(body.ip_brush_max_attempts);
-	if (body.check_interval_seconds !== undefined) updates.checkIntervalSeconds = 60;
+		updates.ipBrushMaxAttempts = Number(body.ip_brush_max_attempts) || 30;
+	if (body.check_interval_seconds !== undefined) updates.checkIntervalSeconds = 10;
 	if (body.status_check_enabled !== undefined)
 		updates.statusCheckEnabled = Boolean(body.status_check_enabled);
 	if (body.status_trigger_states !== undefined)
 		updates.statusTriggerStates = DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES;
-	if (body.dns_binding_id !== undefined) updates.dnsBindingId = Number(body.dns_binding_id) || 0;
+	if (body.dns_binding_id !== undefined) {
+		const dnsBindingId = Number(body.dns_binding_id) || 0;
+		if (!dnsBindingId) return fail('自动补机策略必须选择 DNS 解析绑定');
+		updates.dnsBindingId = dnsBindingId;
+	}
 	if (body.enabled !== undefined) updates.enabled = Boolean(body.enabled);
 	if (body.admin_password) updates.adminPasswordEncrypted = encryptSecret(String(body.admin_password));
 

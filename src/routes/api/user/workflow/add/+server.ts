@@ -10,6 +10,8 @@ export const POST: RequestHandler = async (event) => {
 	const body = await event.request.json();
 	const accountId = Number(body.account_id);
 	if (!accountId) return fail('请从 Azure 号池选择触发检测账号');
+	const dnsBindingId = Number(body.dns_binding_id ?? 0) || 0;
+	if (!dnsBindingId) return fail('自动补机策略必须选择 DNS 解析绑定');
 	await getUserAccount(user.id, accountId);
 	const minRunningCount = Math.max(0, Number(body.min_running_count ?? 1) || 0);
 	const replenishTargetCount = Math.max(
@@ -36,12 +38,12 @@ export const POST: RequestHandler = async (event) => {
 		adminPasswordEncrypted: encryptSecret(String(body.admin_password ?? '')),
 		userdataEncrypted: encryptSecret(String(body.userdata ?? '')),
 		enableIpv6: Boolean(body.enable_ipv6),
-		ipPrefix: String(body.ip_prefix ?? ''),
-		ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 10),
-		checkIntervalSeconds: 60,
+		ipPrefix: String(body.ip_prefix ?? '85.211') || '85.211',
+		ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 30) || 30,
+		checkIntervalSeconds: 10,
 		statusCheckEnabled: body.status_check_enabled !== false,
 		statusTriggerStates: DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES,
-		dnsBindingId: Number(body.dns_binding_id ?? 0) || 0
+		dnsBindingId
 	});
 
 	return ok({
