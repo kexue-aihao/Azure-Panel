@@ -503,16 +503,7 @@
 	}
 
 	function isBrushRecordOnly(event: CreateProgressEvent) {
-		return (
-			event.step === 'public-ipv4' &&
-			event.status !== 'error' &&
-			(event.detail?.brushRecordOnly === true ||
-				Boolean(progressDetailString(event.detail, 'ip')) ||
-				Boolean(progressDetailString(event.detail, 'publicIpName')) ||
-				Boolean(progressDetailString(event.detail, 'name')) ||
-				Boolean(progressDetailString(event.detail, 'targetPrefix')) ||
-				Boolean(progressDetailString(event.detail, 'target_prefix')))
-		);
+		return event.step === 'public-ipv4' && event.status !== 'error';
 	}
 
 	function mergeCreateProgress(event: CreateProgressEvent) {

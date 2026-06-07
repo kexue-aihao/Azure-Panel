@@ -3307,7 +3307,7 @@ async function deletePublicIpById(clients: AzureClients, publicIpId?: string) {
 async function deletePublicIpByName(clients: AzureClients, resourceGroup: string, publicIpName: string) {
 	if (!resourceGroup || !publicIpName) return;
 	let lastError: unknown = null;
-	for (let attempt = 1; attempt <= 5; attempt++) {
+	for (let attempt = 1; attempt <= 8; attempt++) {
 		try {
 			await clients.network.publicIPAddresses.beginDeleteAndWait(resourceGroup, publicIpName);
 			return;
@@ -3315,11 +3315,18 @@ async function deletePublicIpByName(clients: AzureClients, resourceGroup: string
 			const statusCode = (err as { statusCode?: number }).statusCode;
 			if (statusCode === 404) return;
 			lastError = err;
-			if (!isTransientAzureReadError(err)) throw err;
-			await sleep(2000 * attempt);
+			if (!isTransientAzureReadError(err) && !isPublicIpDeletePropagationError(err)) throw err;
+			await sleep(2500 * attempt);
 		}
 	}
 	if (lastError) throw lastError;
+}
+
+function isPublicIpDeletePropagationError(err: unknown) {
+	const message = formatAzureError(err).toLowerCase();
+	return /in use|being used|still associated|still attached|cannot be deleted|is referenced|referenced by|publicipaddresscannotbedeleted/.test(
+		message
+	);
 }
 
 async function createMatchingIPv4PublicIp(
@@ -3686,6 +3693,69 @@ function pickNicIPv4Config(
 	return pickNicIPv4ConfigFromList(nic.ipConfigurations ?? [], preferredName);
 }
 
+function cleanSubResource<T extends { id?: string } | undefined>(resource: T): T {
+	if (!resource?.id) return undefined as T;
+	return { id: resource.id } as T;
+}
+
+function cleanSubResourceList<T extends { id?: string }>(resources?: T[]): T[] | undefined {
+	const list = (resources ?? [])
+		.map((resource) => cleanSubResource(resource))
+		.filter((resource): resource is T => Boolean(resource?.id));
+	return list.length ? list : undefined;
+}
+
+function cleanNicIpConfigForUpdate(
+	config: NetworkInterfaceIPConfiguration,
+	publicIpId?: string
+): NetworkInterfaceIPConfiguration {
+	const cleaned: NetworkInterfaceIPConfiguration = {
+		name: config.name,
+		primary: config.primary,
+		privateIPAddress: config.privateIPAddress,
+		privateIPAddressPrefixLength: config.privateIPAddressPrefixLength,
+		privateIPAllocationMethod: config.privateIPAllocationMethod ?? 'Dynamic',
+		privateIPAddressVersion: config.privateIPAddressVersion,
+		subnet: cleanSubResource(config.subnet),
+		publicIPAddress:
+			publicIpId !== undefined
+				? publicIpId
+					? ({ id: publicIpId } as PublicIPAddress)
+					: undefined
+				: cleanSubResource(config.publicIPAddress),
+		applicationSecurityGroups: cleanSubResourceList(config.applicationSecurityGroups),
+		loadBalancerBackendAddressPools: cleanSubResourceList(config.loadBalancerBackendAddressPools),
+		loadBalancerInboundNatRules: cleanSubResourceList(config.loadBalancerInboundNatRules),
+		applicationGatewayBackendAddressPools: cleanSubResourceList(
+			config.applicationGatewayBackendAddressPools
+		),
+		virtualNetworkTaps: cleanSubResourceList(config.virtualNetworkTaps),
+		gatewayLoadBalancer: cleanSubResource(config.gatewayLoadBalancer)
+	};
+	if (!cleaned.privateIPAddress) delete cleaned.privateIPAddress;
+	if (!cleaned.privateIPAddressPrefixLength) delete cleaned.privateIPAddressPrefixLength;
+	return cleaned;
+}
+
+function cleanNicForUpdate(nic: NetworkInterface): NetworkInterface {
+	return {
+		location: nic.location,
+		extendedLocation: nic.extendedLocation,
+		networkSecurityGroup: cleanSubResource(nic.networkSecurityGroup),
+		ipConfigurations: (nic.ipConfigurations ?? []).map((config) => cleanNicIpConfigForUpdate(config)),
+		dnsSettings: nic.dnsSettings,
+		enableAcceleratedNetworking: nic.enableAcceleratedNetworking,
+		disableTcpStateTracking: nic.disableTcpStateTracking,
+		enableIPForwarding: nic.enableIPForwarding,
+		workloadType: nic.workloadType,
+		nicType: nic.nicType,
+		privateLinkService: cleanSubResource(nic.privateLinkService),
+		migrationPhase: nic.migrationPhase,
+		auxiliaryMode: nic.auxiliaryMode,
+		auxiliarySku: nic.auxiliarySku
+	};
+}
+
 function isNicIPv6Config(config: NetworkInterfaceIPConfiguration) {
 	const version = String(config.privateIPAddressVersion ?? '').toLowerCase();
 	if (version === 'ipv6') return true;
@@ -3805,6 +3875,76 @@ async function findVmNetworkInterface(
 	};
 }
 
+async function updateNicIPv4PublicIp(
+	clients: AzureClients,
+	options: {
+		nicResourceGroup: string;
+		nicName: string;
+		nic: NetworkInterface;
+		ipConfig: NetworkInterfaceIPConfiguration;
+		publicIpId?: string;
+		progress?: CreateVmProgressReporter;
+		step?: string;
+		actionLabel?: string;
+	}
+) {
+	const step = options.step ?? 'brush-ip-attach';
+	const actionLabel = options.actionLabel ?? (options.publicIpId ? '绑定公网 IPv4' : '解绑公网 IPv4');
+	let lastError = '';
+	for (let attempt = 1; attempt <= 8; attempt++) {
+		try {
+			const latestNic = await clients.network.networkInterfaces
+				.get(options.nicResourceGroup, options.nicName)
+				.catch(() => options.nic);
+			const latestConfigs = await loadNetworkInterfaceIpConfigurations(
+				clients,
+				options.nicResourceGroup,
+				options.nicName,
+				latestNic
+			).catch(() => latestNic.ipConfigurations ?? []);
+			const latestIpConfig = pickNicIPv4Config(latestNic, options.ipConfig.name) ?? options.ipConfig;
+			const targetName = latestIpConfig.name ?? options.ipConfig.name ?? 'ipconfig-ipv4';
+			const updateNic = cleanNicForUpdate(latestNic);
+			updateNic.ipConfigurations = latestConfigs.map((config) =>
+				config.name === targetName || config === latestIpConfig
+					? cleanNicIpConfigForUpdate({ ...config, name: targetName }, options.publicIpId)
+					: cleanNicIpConfigForUpdate(config)
+			);
+			if (!updateNic.ipConfigurations.some((config) => config.name === targetName)) {
+				updateNic.ipConfigurations.push(
+					cleanNicIpConfigForUpdate({ ...latestIpConfig, name: targetName }, options.publicIpId)
+				);
+			}
+			await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
+				options.nicResourceGroup,
+				options.nicName,
+				updateNic,
+				{ updateIntervalInMs: 3000 }
+			);
+			return;
+		} catch (err) {
+			lastError = formatAzureError(err);
+			await reportCreateVmProgress(
+				options.progress,
+				step,
+				attempt >= 8 ? 'error' : 'info',
+				attempt >= 8
+					? `网卡${actionLabel}失败`
+					: `网卡${actionLabel}暂未完成，等待后重试 ${attempt}/8`,
+				{
+					nicName: options.nicName,
+					attempt,
+					publicIpId: options.publicIpId ?? null,
+					error: lastError.length > 1000 ? `${lastError.slice(0, 1000)}...` : lastError
+				}
+			);
+			if (!isTransientAzureReadError(err) && attempt >= 2) throw err;
+			await sleep(4000);
+		}
+	}
+	throw new Error(`网卡${actionLabel}失败: ${lastError || 'Azure 未返回更新结果'}`);
+}
+
 async function attachPublicIpToNic(
 	clients: AzureClients,
 	options: {
@@ -3817,48 +3957,29 @@ async function attachPublicIpToNic(
 		step?: string;
 	}
 ) {
-	const step = options.step ?? 'brush-ip-attach';
-	let lastError = '';
-	for (let attempt = 1; attempt <= 8; attempt++) {
-		try {
-			const latestNic = await clients.network.networkInterfaces
-				.get(options.nicResourceGroup, options.nicName)
-				.catch(() => options.nic);
-			await loadNetworkInterfaceIpConfigurations(
-				clients,
-				options.nicResourceGroup,
-				options.nicName,
-				latestNic
-			).catch(() => latestNic.ipConfigurations ?? []);
-			const latestIpConfig = pickNicIPv4Config(latestNic, options.ipConfig.name) ?? options.ipConfig;
-			latestIpConfig.publicIPAddress = { id: options.publicIpId };
-			if (!latestNic.ipConfigurations?.some((config) => config.name === latestIpConfig.name)) {
-				latestNic.ipConfigurations = [...(latestNic.ipConfigurations ?? []), latestIpConfig];
-			}
-			await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
-				options.nicResourceGroup,
-				options.nicName,
-				latestNic
-			);
-			return;
-		} catch (err) {
-			lastError = formatAzureError(err);
-			if (!isTransientAzureReadError(err) && attempt >= 2) throw err;
-			await reportCreateVmProgress(
-				options.progress,
-				step,
-				'info',
-				`网卡绑定公网 IPv4 暂未完成，等待后重试 ${attempt}/8`,
-				{
-					nicName: options.nicName,
-					attempt,
-					error: lastError.length > 600 ? `${lastError.slice(0, 600)}...` : lastError
-				}
-			);
-			await sleep(4000);
-		}
+	await updateNicIPv4PublicIp(clients, {
+		...options,
+		publicIpId: options.publicIpId,
+		actionLabel: '绑定公网 IPv4'
+	});
+}
+
+async function detachPublicIpFromNic(
+	clients: AzureClients,
+	options: {
+		nicResourceGroup: string;
+		nicName: string;
+		nic: NetworkInterface;
+		ipConfig: NetworkInterfaceIPConfiguration;
+		progress?: CreateVmProgressReporter;
+		step?: string;
 	}
-	throw new Error(`网卡绑定公网 IPv4 失败: ${lastError || 'Azure 未返回绑定结果'}`);
+) {
+	await updateNicIPv4PublicIp(clients, {
+		...options,
+		publicIpId: '',
+		actionLabel: '解绑旧公网 IPv4'
+	});
 }
 
 async function waitForNicAttachedPublicIPv4(
@@ -4829,6 +4950,27 @@ export async function replaceVmPublicIPv4(
 	if (!created.pip.id) throw new Error('新公网 IPv4 创建失败');
 
 	try {
+		if (oldPublicIpId) {
+			await reportCreateVmProgress(progress, 'replace-ip-detach', 'running', '从网卡解绑旧 IPv4 公网 IP', {
+				nicName,
+				oldPublicIpName,
+				oldPublicIPv4
+			});
+			await detachPublicIpFromNic(clients, {
+				nicResourceGroup,
+				nicName,
+				nic,
+				ipConfig,
+				progress,
+				step: 'replace-ip-detach'
+			});
+		}
+		await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
+			oldPublicIpName,
+			oldPublicIPv4
+		});
+		await deletePublicIpById(clients, oldPublicIpId);
+
 		await reportCreateVmProgress(progress, 'replace-ip-attach', 'running', '绑定新的 IPv4 到网卡', {
 			nicName,
 			publicIpName: parseResourceName(created.pip.id)
@@ -4843,13 +4985,16 @@ export async function replaceVmPublicIPv4(
 			step: 'replace-ip-attach'
 		});
 	} catch (err) {
-		await deletePublicIpById(clients, created.pip.id);
+		if (oldPublicIpId) {
+			await reportCreateVmProgress(progress, 'replace-ip-recover', 'info', 'IPv4 更换失败，新 IPv4 已保留以便手动恢复', {
+				publicIpName: parseResourceName(created.pip.id),
+				error: formatAzureError(err).slice(0, 800)
+			});
+		} else {
+			await deletePublicIpById(clients, created.pip.id);
+		}
 		throw err;
 	}
-	await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
-		oldPublicIpName
-	});
-	await deletePublicIpById(clients, oldPublicIpId);
 
 	const fresh = await waitForNicAttachedPublicIPv4(clients, {
 		nicResourceGroup,
@@ -4919,6 +5064,27 @@ export async function brushVmPublicIPv4Prefix(
 	if (!created.pip.id) throw new Error('匹配公网 IPv4 创建失败');
 
 	try {
+		if (oldPublicIpId) {
+			await reportCreateVmProgress(options.progress, 'brush-ip-detach', 'running', '从网卡解绑旧 IPv4 公网 IP', {
+				nicName,
+				oldPublicIpName,
+				oldPublicIPv4
+			});
+			await detachPublicIpFromNic(clients, {
+				nicResourceGroup,
+				nicName,
+				nic,
+				ipConfig,
+				progress: options.progress,
+				step: 'brush-ip-detach'
+			});
+		}
+		await reportCreateVmProgress(options.progress, 'brush-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
+			oldPublicIpName,
+			oldPublicIPv4
+		});
+		await deletePublicIpById(clients, oldPublicIpId);
+
 		await reportCreateVmProgress(
 			options.progress,
 			'brush-ip-attach',
@@ -4941,13 +5107,16 @@ export async function brushVmPublicIPv4Prefix(
 			step: 'brush-ip-attach'
 		});
 	} catch (err) {
-		await deletePublicIpById(clients, created.pip.id);
+		if (oldPublicIpId) {
+			await reportCreateVmProgress(options.progress, 'brush-ip-recover', 'info', '刷 IPv4 失败，新 IPv4 已保留以便手动恢复', {
+				publicIpName: parseResourceName(created.pip.id),
+				error: formatAzureError(err).slice(0, 800)
+			});
+		} else {
+			await deletePublicIpById(clients, created.pip.id);
+		}
 		throw err;
 	}
-	await reportCreateVmProgress(options.progress, 'brush-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
-		oldPublicIpName
-	});
-	await deletePublicIpById(clients, oldPublicIpId);
 
 	const fresh = await waitForNicAttachedPublicIPv4(clients, {
 		nicResourceGroup,
