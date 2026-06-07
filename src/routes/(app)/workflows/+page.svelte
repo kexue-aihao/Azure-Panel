@@ -470,7 +470,7 @@
 				{/each}
 			</select>
 			<p class="mt-1 text-xs text-muted">
-				这里选择的账号只用于状态触发检测和加载区域/规格/系统；真正自动补机时会从 Azure 号池随机抽取状态正常的账号创建 VM。
+				这里选择的账号只用于状态触发检测和加载区域/规格/系统；真正自动补机时会从 Azure 号池按添加顺序选择状态正常的账号创建 VM。
 			</p>
 		</div>
 		<input class="input" bind:value={form.name} placeholder="策略名称" required />
@@ -518,7 +518,7 @@
 			placeholder="异常时目标补机数量"
 		/>
 		<p class="text-xs text-muted">
-			只有当前触发检测账号的订阅状态为 banned、warning、warned 或 disabled 时才会执行自动补机；补机账号会从 Azure 号池随机抽取正常订阅账号。
+			只有当前触发检测账号的订阅状态为 banned、warning、warned 或 disabled 时才会执行自动补机；补机账号会从 Azure 号池按添加顺序选择正常订阅账号。
 		</p>
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={form.auto_start} /> 自动启动已停止的 VM
@@ -542,7 +542,7 @@
 			>
 				订阅 {statusResult.display_name || statusResult.subscription_id} 当前状态：{statusResult.state}。
 				{statusResult.should_run_workflow
-					? '命中触发条件，会从 Azure 号池随机抽取正常账号补机。'
+					? '命中触发条件，会从 Azure 号池按添加顺序选择正常账号补机。'
 					: '未命中触发条件，不会执行补机。'}
 			</div>
 		{/if}

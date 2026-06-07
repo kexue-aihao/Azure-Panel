@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import type { RowDataPacket } from 'mysql2';
 import { ADMIN_ROLE, USER_ROLE, isConfiguredAdminEmail, normalizeUserRole } from '../admin';
 import { getDriver, getMysqlDb, getSqliteDb, getSqliteRawDb } from './index';
@@ -445,7 +445,11 @@ export async function deleteProxyProfile(userId: number, proxyProfileId: number)
 export async function listAccountsByUser(userId: number): Promise<AzureAccount[]> {
 	if (getDriver() === 'mysql') {
 		const { db } = getMysqlDb();
-		const rows = await db.select().from(mysqlAzureAccounts).where(eq(mysqlAzureAccounts.userId, userId));
+		const rows = await db
+			.select()
+			.from(mysqlAzureAccounts)
+			.where(eq(mysqlAzureAccounts.userId, userId))
+			.orderBy(asc(mysqlAzureAccounts.createdAt), asc(mysqlAzureAccounts.id));
 		return rows as AzureAccount[];
 	}
 
@@ -453,6 +457,7 @@ export async function listAccountsByUser(userId: number): Promise<AzureAccount[]
 		.select()
 		.from(sqliteAzureAccounts)
 		.where(eq(sqliteAzureAccounts.userId, userId))
+		.orderBy(asc(sqliteAzureAccounts.createdAt), asc(sqliteAzureAccounts.id))
 		.all();
 }
 

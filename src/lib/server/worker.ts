@@ -364,7 +364,7 @@ async function collectAccountPoolRuntimes(
 		policy.id,
 		'account_pool',
 		accounts.length > 0 ? 'success' : 'warning',
-		`Azure 号池当前共有 ${accounts.length} 个账号，自动补机会随机抽取正常订阅账号`
+		`Azure 号池当前共有 ${accounts.length} 个账号，自动补机会按添加顺序选择正常订阅账号`
 	);
 	for (const account of accounts) {
 		try {
@@ -390,14 +390,17 @@ async function collectAccountPoolRuntimes(
 async function pickReplenishmentRuntime(
 	policy: WorkflowPolicy,
 	runtimes: WorkerAccountRuntime[],
-	excludedAccountId: number
+	excludedAccountId: number,
+	startIndex = 0
 ): Promise<WorkerAccountRuntime | null> {
-	const candidates = shuffle(runtimes.filter((runtime) => runtime.account.id !== excludedAccountId));
+	const ordered = runtimes.filter((runtime) => runtime.account.id !== excludedAccountId);
+	const offset = ordered.length > 0 ? Math.max(0, startIndex) % ordered.length : 0;
+	const candidates = [...ordered.slice(offset), ...ordered.slice(0, offset)];
 	await insertWorkflowLog(
 		policy.id,
 		'account_pool',
 		candidates.length > 0 ? 'success' : 'warning',
-		`本轮可随机抽取的候选补机账号 ${candidates.length} 个`
+		`本轮可按添加顺序选择的候选补机账号 ${candidates.length} 个`
 	);
 	for (const runtime of candidates) {
 		try {
@@ -411,7 +414,7 @@ async function pickReplenishmentRuntime(
 				policy.id,
 				'account_pool',
 				usable ? 'success' : 'warning',
-				`随机候选补机账号 ${runtime.account.name} 订阅状态 ${status.state}${usable ? '，已选用' : '，跳过'}`
+				`顺序候选补机账号 ${runtime.account.name} 订阅状态 ${status.state}${usable ? '，已选用' : '，跳过'}`
 			);
 			if (usable) return runtime;
 		} catch (err) {
@@ -419,7 +422,7 @@ async function pickReplenishmentRuntime(
 				policy.id,
 				'account_pool',
 				'failed',
-				`随机候选补机账号 ${runtime.account.name} 状态检测失败: ${errorMessage(err)}`
+				`顺序候选补机账号 ${runtime.account.name} 状态检测失败: ${errorMessage(err)}`
 			);
 		}
 	}
@@ -623,11 +626,13 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 				if (!password) {
 					await insertWorkflowLog(policy.id, 'auto_create', 'failed', '未配置管理员密码，无法自动补机');
 				} else {
+					let accountPoolCursor = 0;
 					for (let i = 0; i < deficit; i++) {
 						const replenishRuntime = await pickReplenishmentRuntime(
 							policy,
 							accountPoolRuntimes,
-							account.id
+							account.id,
+							accountPoolCursor
 						);
 						if (!replenishRuntime) {
 							await insertWorkflowLog(
@@ -638,6 +643,13 @@ async function runPolicies(policies: WorkflowPolicy[], force: boolean) {
 							);
 							break;
 						}
+						const orderedCandidates = accountPoolRuntimes.filter(
+							(runtime) => runtime.account.id !== account.id
+						);
+						const selectedIndex = orderedCandidates.findIndex(
+							(runtime) => runtime.account.id === replenishRuntime.account.id
+						);
+						accountPoolCursor = selectedIndex >= 0 ? selectedIndex + 1 : accountPoolCursor + 1;
 						const prefix = policyResourcePrefix(policy);
 						const resourceGroup = randomAzureResourceName(`${prefix}-rg`, 64);
 						const vmName = randomAzureResourceName(prefix, 48);

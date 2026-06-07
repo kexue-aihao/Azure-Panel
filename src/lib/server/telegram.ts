@@ -325,7 +325,7 @@ export function buildAccountPoolCountMessage(input: { poolCount: number; checked
 	return [
 		'Azure Panel 账号池剩余检测',
 		`账号池剩余: ${count} 个`,
-		`状态: ${count > 0 ? '账号池不为空，自动补机会继续随机抽取候选账号' : '账号池为空，请尽快补充账号'}`,
+		`状态: ${count > 0 ? '账号池不为空，自动补机会继续按添加顺序选择候选账号' : '账号池为空，请尽快补充账号'}`,
 		`触发: 手动检测`,
 		`时间: ${(input.checkedAt ?? new Date()).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
 	].join('\n');
