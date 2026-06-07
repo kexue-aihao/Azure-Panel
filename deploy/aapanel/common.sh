@@ -443,6 +443,7 @@ host = os.environ.get("AAPANEL_DB_HOST", "127.0.0.1")
 port = os.environ.get("AAPANEL_DB_PORT", "3306")
 remark = os.environ.get("AAPANEL_DB_REMARK", "Azure Panel")
 accept = "127.0.0.1" if host in ("127.0.0.1", "localhost", "::1") else host
+display_host = "Localhost" if host in ("127.0.0.1", "localhost", "::1") else host
 
 def default_for(column_type):
     t = (column_type or "").lower()
@@ -450,19 +451,92 @@ def default_for(column_type):
         return 0
     return ""
 
+def table_exists(cur, table_name):
+    return cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone() is not None
+
+def table_columns(cur, table_name):
+    if not table_exists(cur, table_name):
+        return []
+    return [row["name"] for row in cur.execute(f"PRAGMA table_info(`{table_name}`)").fetchall()]
+
+def first_column(columns, candidates):
+    for column in candidates:
+        if column in columns:
+            return column
+    return ""
+
+def normalize_host(value):
+    value = str(value or "").strip().lower()
+    if value in ("127.0.0.1", "localhost", "::1", "local", "localhost/mysql"):
+        return "local"
+    return value
+
+def detect_local_database_server_id(cur):
+    columns = table_columns(cur, "database_servers")
+    if not columns or "id" not in columns:
+        return 0
+
+    host_col = first_column(columns, ("db_host", "host", "address", "server", "ip"))
+    port_col = first_column(columns, ("db_port", "port"))
+    name_col = first_column(columns, ("name", "title", "ps"))
+    type_col = first_column(columns, ("db_type", "type", "dtype"))
+    rows = cur.execute("SELECT * FROM database_servers").fetchall()
+    desired_host = normalize_host(host)
+    desired_port = str(port or "3306")
+
+    best_id = 0
+    best_score = -1
+    for item in rows:
+        score = 0
+        item_host = normalize_host(item[host_col]) if host_col else ""
+        item_port = str(item[port_col] or "") if port_col else ""
+        item_name = str(item[name_col] or "").lower() if name_col else ""
+        item_type = str(item[type_col] or "").lower() if type_col else ""
+
+        if item_host == desired_host:
+            score += 4
+        elif desired_host == "local" and (not item_host or "local" in item_name):
+            score += 2
+
+        if item_port == desired_port:
+            score += 2
+        elif not item_port:
+            score += 1
+
+        if item_type in ("0", "mysql", "mariadb", ""):
+            score += 1
+        if "local" in item_name or "localhost" in item_name:
+            score += 1
+
+        if score > best_score:
+            best_score = score
+            best_id = int(item["id"] or 0)
+
+    return best_id if best_score >= 2 else 0
+
 known_values = {
     "name": name,
     "username": user,
     "password": password,
     "accept": accept,
+    "address": display_host,
+    "dataAccess": display_host,
     "ps": remark,
     "addtime": time.strftime("%Y-%m-%d %H:%M:%S"),
     "pid": 0,
     "sid": 0,
     "backup_count": 0,
-    "db_type": "MySQL",
+    # aaPanel backup code uses numeric db_type: 0=local MySQL, 1=external DB, 2=remote server.
+    # Writing "MySQL" here makes backups fail with "unknow database type".
+    "db_type": 0,
     "type": "MySQL",
-    "host": host,
+    "dtype": "MySQL",
+    "codeing": "utf8mb4",
+    "ssl": "",
+    "host": display_host,
     "db_host": host,
     "port": port,
     "db_port": port,
@@ -472,12 +546,13 @@ try:
     conn = sqlite3.connect(panel_db)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    exists = cur.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='databases'"
-    ).fetchone()
-    if not exists:
+    if not table_exists(cur, "databases"):
         print("[aapanel-db] table 'databases' not found; skip")
         raise SystemExit(0)
+
+    local_sid = detect_local_database_server_id(cur)
+    if local_sid:
+        known_values["sid"] = local_sid
 
     columns = cur.execute("PRAGMA table_info(databases)").fetchall()
     column_names = [row["name"] for row in columns]
