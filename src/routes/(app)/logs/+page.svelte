@@ -29,16 +29,20 @@
 		hour12: false
 	});
 
+	function beijingDateParts(date: Date) {
+		return Object.fromEntries(
+			beijingTimeFormatter.formatToParts(date).map((part) => [part.type, part.value])
+		);
+	}
+
 	async function load() {
 		logs = await api<Log[]>('/api/user/workflow/logs');
 	}
 
 	function buildExportFilename() {
 		const now = new Date();
-		const pad = (value: number) => String(value).padStart(2, '0');
-		return `azure-panel-logs-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(
-			now.getDate()
-		)}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.csv`;
+		const parts = beijingDateParts(now);
+		return `azure-panel-logs-${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}${parts.second}.csv`;
 	}
 
 	async function exportLogs() {
@@ -106,10 +110,8 @@
 	function formatBeijingTime(value: string) {
 		const date = new Date(value);
 		if (Number.isNaN(date.getTime())) return value || '-';
-		const parts = Object.fromEntries(
-			beijingTimeFormatter.formatToParts(date).map((part) => [part.type, part.value])
-		);
-		return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+		const parts = beijingDateParts(date);
+		return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 	}
 </script>
 
@@ -132,7 +134,7 @@
 	<table class="w-full text-sm">
 		<thead class="text-muted">
 			<tr class="border-b border-border">
-				<th class="p-3 text-left">时间 (UTC+8)</th>
+				<th class="min-w-[175px] whitespace-nowrap p-3 text-left">时间 (北京时间 UTC+8)</th>
 				<th class="p-3 text-left">来源</th>
 				<th class="p-3 text-left">策略/账号</th>
 				<th class="p-3 text-left">资源</th>
@@ -149,7 +151,9 @@
 			{:else}
 				{#each logs as log}
 					<tr class="border-b border-border/60">
-						<td class="p-3">{formatBeijingTime(log.created_at)}</td>
+						<td class="whitespace-nowrap p-3 font-mono text-xs tabular-nums">
+							{formatBeijingTime(log.created_at)}
+						</td>
 						<td class="p-3">{sourceText(log.source)}</td>
 						<td class="p-3">
 							{#if log.policy_id}

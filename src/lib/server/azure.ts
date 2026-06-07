@@ -853,6 +853,26 @@ async function discoverSubscriptionId(
 	return selected.subscriptionId;
 }
 
+function isProviderRegistrationRequiredError(err: unknown) {
+	const record = err as {
+		code?: unknown;
+		message?: unknown;
+		body?: { error?: { code?: unknown; message?: unknown } };
+	};
+	const text = [
+		record?.code,
+		record?.message,
+		record?.body?.error?.code,
+		record?.body?.error?.message,
+		err instanceof Error ? err.message : ''
+	]
+		.filter(Boolean)
+		.join(' ');
+	return /NoRegisteredProviderFound|MissingSubscriptionRegistration|not\s+registered|register.*resource\s+provider/i.test(
+		text
+	);
+}
+
 export async function validateAzureCredentials(
 	tenantId: string,
 	clientId: string,
@@ -863,8 +883,12 @@ export async function validateAzureCredentials(
 	const clientOptions = azureClientOptions(runtimeProxy);
 	const credential = createProxyAwareCredential(tenantId, clientId, clientSecret, clientOptions);
 	const subscriptionId = await discoverSubscriptionId(credential, clientOptions);
-	const client = new ComputeManagementClient(credential, subscriptionId, clientOptions);
-	await client.virtualMachines.listAll().next();
+	try {
+		const client = new ComputeManagementClient(credential, subscriptionId, clientOptions);
+		await client.virtualMachines.listAll().next();
+	} catch (err) {
+		if (!isProviderRegistrationRequiredError(err)) throw err;
+	}
 	return { subscriptionId };
 }
 

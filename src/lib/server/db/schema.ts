@@ -43,6 +43,7 @@ export const azureAccounts = sqliteTable('azure_accounts', {
 		onDelete: 'set null'
 	}),
 	proxyUrlEncrypted: text('proxy_url_encrypted').default(''),
+	vmRegionCache: text('vm_region_cache').default(''),
 	remark: text('remark').default(''),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()

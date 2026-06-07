@@ -1,4 +1,13 @@
-import { maskProxyUrl, validateAzureCredentials, validateProxyUrl } from '$lib/server/azure';
+import {
+	DEFAULT_PROVIDER_NAMESPACES,
+	createAzureClients,
+	listProviderStatuses,
+	maskProxyUrl,
+	registerResourceProviders,
+	validateAzureCredentials,
+	validateProxyUrl,
+	type AzureProviderStatus
+} from '$lib/server/azure';
 import { ensureClientIpProxyProfile } from '$lib/server/auto-client-ip-proxy';
 import { encryptSecret } from '$lib/server/crypto';
 import {
@@ -22,6 +31,86 @@ import {
 	sendTelegramMessageToTargets
 } from '$lib/server/telegram';
 import type { RequestHandler } from './$types';
+
+type ProviderAutoRegisterResult = {
+	checked: boolean;
+	attempted: boolean;
+	missing: string[];
+	registered: number;
+	pending: number;
+	failed: number;
+	message: string;
+	error: string;
+};
+
+function providerState(provider: AzureProviderStatus) {
+	return (provider.registrationState || '').trim().toLowerCase();
+}
+
+function isProviderRegistered(provider: AzureProviderStatus) {
+	return providerState(provider) === 'registered';
+}
+
+function isProviderRegistrationPending(provider: AzureProviderStatus) {
+	return providerState(provider) === 'registering';
+}
+
+function normalizeAzureProxy(proxy: ProxyRuntimeConfig | string | null): ProxyRuntimeConfig | null {
+	if (!proxy) return null;
+	return typeof proxy === 'string' ? parseProxyUrl(proxy) : proxy;
+}
+
+async function autoRegisterMissingProviders(
+	account: Awaited<ReturnType<typeof insertAccount>>,
+	proxy: ProxyRuntimeConfig | string | null
+): Promise<ProviderAutoRegisterResult> {
+	const baseResult: ProviderAutoRegisterResult = {
+		checked: true,
+		attempted: false,
+		missing: [],
+		registered: 0,
+		pending: 0,
+		failed: 0,
+		message: '常用 Provider 已全部注册',
+		error: ''
+	};
+
+	try {
+		const clients = createAzureClients(account, normalizeAzureProxy(proxy));
+		const statuses = await listProviderStatuses(clients, DEFAULT_PROVIDER_NAMESPACES);
+		const missing = statuses.filter((provider) => !isProviderRegistered(provider));
+		if (missing.length === 0) {
+			return {
+				...baseResult,
+				registered: statuses.length
+			};
+		}
+
+		const registeredProviders = await registerResourceProviders(
+			clients,
+			missing.map((provider) => provider.namespace)
+		);
+		const registered = registeredProviders.filter(isProviderRegistered).length;
+		const pending = registeredProviders.filter(isProviderRegistrationPending).length;
+		const failed = registeredProviders.length - registered - pending;
+		return {
+			checked: true,
+			attempted: true,
+			missing: missing.map((provider) => provider.namespace),
+			registered,
+			pending,
+			failed,
+			message: `已自动处理 ${missing.length} 个缺失 Provider，已注册 ${registered} 个，等待生效 ${pending} 个，失败 ${failed} 个`,
+			error: failed ? registeredProviders.filter((provider) => !isProviderRegistered(provider) && !isProviderRegistrationPending(provider)).map((provider) => `${provider.namespace}: ${provider.registrationState}`).join('；') : ''
+		};
+	} catch (err) {
+		return {
+			...baseResult,
+			message: 'Provider 自动检查/注册失败，但账号已加入号池',
+			error: err instanceof Error ? err.message : String(err)
+		};
+	}
+}
 
 async function validateSavedProxyWithFallback(
 	userId: number,
@@ -122,6 +211,7 @@ export const POST: RequestHandler = async (event) => {
 
 	const publicProxy = proxyProfile ? publicProxyProfile(proxyProfile) : null;
 	const proxyLabel = publicProxy?.label ?? (proxyUrl ? maskProxyUrl(proxyUrl) : '');
+	const providerAutoRegister = await autoRegisterMissingProviders(account, runtimeProxy);
 	const poolCount = (await listAccountsByUser(user.id)).length;
 	let telegramNotified = false;
 	let telegramSent = 0;
@@ -164,6 +254,7 @@ export const POST: RequestHandler = async (event) => {
 		proxy_name: publicProxy?.name ?? '',
 		proxy_label: proxyLabel,
 		pool_count: poolCount,
+		provider_auto_register: providerAutoRegister,
 		telegram_notified: telegramNotified,
 		telegram_sent: telegramSent,
 		telegram_failed: telegramFailed,

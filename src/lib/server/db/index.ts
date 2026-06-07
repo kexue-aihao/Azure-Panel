@@ -57,6 +57,7 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		subscription_id varchar(64) NOT NULL,
 		proxy_profile_id int NULL,
 		proxy_url_encrypted text,
+		vm_region_cache text,
 		remark varchar(255) DEFAULT '',
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
@@ -291,6 +292,9 @@ async function ensureMysqlSchema(pool: Pool) {
 	await pool.query('ALTER TABLE azure_accounts ADD COLUMN proxy_profile_id int NULL').catch((err) => {
 		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
 	});
+	await pool.query('ALTER TABLE azure_accounts ADD COLUMN vm_region_cache text NULL').catch((err) => {
+		if ((err as { code?: string }).code !== 'ER_DUP_FIELDNAME') throw err;
+	});
 	await pool
 		.query('CREATE INDEX azure_accounts_proxy_profile_id_idx ON azure_accounts (proxy_profile_id)')
 		.catch((err) => {
@@ -455,6 +459,7 @@ export async function initDatabase() {
 			subscription_id TEXT NOT NULL,
 			proxy_profile_id INTEGER REFERENCES proxy_profiles(id) ON DELETE SET NULL,
 			proxy_url_encrypted TEXT DEFAULT '',
+			vm_region_cache TEXT DEFAULT '',
 			remark TEXT DEFAULT '',
 			created_at INTEGER NOT NULL
 		);
@@ -588,6 +593,9 @@ export async function initDatabase() {
 	}
 	if (!accountColumns.some((column) => column.name === 'proxy_profile_id')) {
 		sqlite.exec('ALTER TABLE azure_accounts ADD COLUMN proxy_profile_id INTEGER');
+	}
+	if (!accountColumns.some((column) => column.name === 'vm_region_cache')) {
+		sqlite.exec("ALTER TABLE azure_accounts ADD COLUMN vm_region_cache TEXT DEFAULT ''");
 	}
 	const proxyColumns = sqlite.prepare('PRAGMA table_info(proxy_profiles)').all() as Array<{
 		name: string;

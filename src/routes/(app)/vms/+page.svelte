@@ -724,7 +724,7 @@
 		}
 	}
 
-	async function loadRegions() {
+	async function loadRegions(refresh = false) {
 		if (!accountId) {
 			regions = [];
 			regionError = '';
@@ -734,6 +734,7 @@
 		regionError = '';
 		try {
 			const params = new URLSearchParams({ account_id: String(accountId) });
+			if (refresh) params.set('refresh', '1');
 			appendProxyParams(params);
 			regions = await api<AzureRegionOption[]>(`/api/user/azure/region/list?${params}`);
 			if (regions.length && !regions.some((region) => region.name === location)) {
@@ -1379,7 +1380,7 @@
 			>
 				{quotaLoading ? '查询中...' : '查询当前区域配额'}
 			</button>
-			<button class="btn-secondary" onclick={() => void loadRegions()} disabled={!accountId || regionLoading}>
+			<button class="btn-secondary" onclick={() => void loadRegions(true)} disabled={!accountId || regionLoading}>
 				{regionLoading ? '识别区域中...' : '重新识别可开机区域'}
 			</button>
 			<p class="self-center text-xs text-muted">

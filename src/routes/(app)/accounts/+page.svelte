@@ -50,6 +50,16 @@
 	};
 	type AccountAddResult = Account & {
 		pool_count?: number;
+		provider_auto_register?: {
+			checked: boolean;
+			attempted: boolean;
+			missing: string[];
+			registered: number;
+			pending: number;
+			failed: number;
+			message: string;
+			error: string;
+		};
 		telegram_notified?: boolean;
 		telegram_sent?: number;
 		telegram_failed?: number;
@@ -392,7 +402,12 @@
 				: result.telegram_error
 					? `；Telegram 未通知：${result.telegram_error}`
 					: '';
-			toast = `账号已加入 Azure 号池，当前剩余 ${result.pool_count ?? accounts.length + 1} 个账号${notifyStatus}`;
+			const providerStatus = result.provider_auto_register
+				? `；Provider：${result.provider_auto_register.message}${
+						result.provider_auto_register.error ? `（${result.provider_auto_register.error}）` : ''
+					}`
+				: '';
+			toast = `账号已加入 Azure 号池，当前剩余 ${result.pool_count ?? accounts.length + 1} 个账号${providerStatus}${notifyStatus}`;
 			resetForm();
 			quickParsed = null;
 			await load();

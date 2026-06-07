@@ -469,9 +469,13 @@ export async function findAccountByUser(userId: number, accountId: number): Prom
 }
 
 export async function insertAccount(
-	values: Omit<AzureAccount, 'id' | 'createdAt' | 'proxyProfileId' | 'proxyUrlEncrypted'> & {
+	values: Omit<
+		AzureAccount,
+		'id' | 'createdAt' | 'proxyProfileId' | 'proxyUrlEncrypted' | 'vmRegionCache'
+	> & {
 		proxyProfileId?: number | null;
 		proxyUrlEncrypted?: string | null;
+		vmRegionCache?: string | null;
 	}
 ): Promise<AzureAccount> {
 	if (getDriver() === 'mysql') {
@@ -484,6 +488,27 @@ export async function insertAccount(
 	}
 
 	return getSqliteDb().insert(sqliteAzureAccounts).values(values as never).returning().get()!;
+}
+
+export async function updateAccountRegionCache(
+	userId: number,
+	accountId: number,
+	vmRegionCache: string
+): Promise<void> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db
+			.update(mysqlAzureAccounts)
+			.set({ vmRegionCache })
+			.where(and(eq(mysqlAzureAccounts.id, accountId), eq(mysqlAzureAccounts.userId, userId)));
+		return;
+	}
+
+	getSqliteDb()
+		.update(sqliteAzureAccounts)
+		.set({ vmRegionCache })
+		.where(and(eq(sqliteAzureAccounts.id, accountId), eq(sqliteAzureAccounts.userId, userId)))
+		.run();
 }
 
 export async function updateAccountProxy(

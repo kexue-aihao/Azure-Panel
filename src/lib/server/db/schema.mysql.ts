@@ -40,6 +40,7 @@ export const azureAccounts = mysqlTable('azure_accounts', {
 	subscriptionId: varchar('subscription_id', { length: 64 }).notNull(),
 	proxyProfileId: int('proxy_profile_id'),
 	proxyUrlEncrypted: text('proxy_url_encrypted').default(''),
+	vmRegionCache: text('vm_region_cache').default(''),
 	remark: varchar('remark', { length: 255 }).default(''),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });

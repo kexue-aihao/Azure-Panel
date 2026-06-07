@@ -35,6 +35,12 @@ function formatBeijingTime(value: Date | string | number) {
 	return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
+function beijingDateParts(date: Date) {
+	return Object.fromEntries(
+		beijingTimeFormatter.formatToParts(date).map((part) => [part.type, part.value])
+	);
+}
+
 function csvCell(value: unknown) {
 	const text = String(value ?? '');
 	if (!/[",\r\n]/.test(text)) return text;
@@ -46,11 +52,8 @@ function csvLine(values: unknown[]) {
 }
 
 function exportFileName() {
-	const now = new Date();
-	const pad = (value: number) => String(value).padStart(2, '0');
-	const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(
-		now.getHours()
-	)}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+	const parts = beijingDateParts(new Date());
+	const stamp = `${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}${parts.second}`;
 	return `azure-panel-logs-${stamp}.csv`;
 }
 
