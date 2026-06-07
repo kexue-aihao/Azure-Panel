@@ -13,3 +13,4 @@ frontend/assets
 *.db
 *.db-*
 deploy/aapanel/generated/
+.codex/
