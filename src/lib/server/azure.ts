@@ -1002,11 +1002,13 @@ function isVirtualMachineResourceId(resourceId: string, resourceGroup: string, v
 
 function isTransientAzureReadError(err: unknown) {
 	const statusCode = (err as { statusCode?: number }).statusCode;
+	const message = formatAzureError(err).toLowerCase();
 	return (
 		statusCode === 404 ||
 		statusCode === 409 ||
 		statusCode === 429 ||
-		(typeof statusCode === 'number' && statusCode >= 500 && statusCode < 600)
+		(typeof statusCode === 'number' && statusCode >= 500 && statusCode < 600) ||
+		/network error|request_send_error|request send error|socket|timeout|econnreset|etimedout|fetch failed/.test(message)
 	);
 }
 
@@ -3139,7 +3141,11 @@ async function getPrimaryNicAndIPv4Config(
 	clients: AzureClients,
 	resourceGroup: string,
 	vmName: string,
-	progress?: CreateVmProgressReporter
+	progress?: CreateVmProgressReporter,
+	options: {
+		step?: string;
+		allowCreateIPv4Config?: boolean;
+	} = {}
 ): Promise<{
 	vmLocation: string;
 	nicResourceGroup: string;
@@ -3148,6 +3154,7 @@ async function getPrimaryNicAndIPv4Config(
 	ipConfig: NetworkInterfaceIPConfiguration;
 }> {
 	let lastError = '';
+	const step = options.step ?? 'nic-ipv4-prepare';
 	for (let attempt = 1; attempt <= 12; attempt++) {
 		try {
 			const vm = await clients.compute.virtualMachines.get(resourceGroup, vmName);
@@ -3168,21 +3175,21 @@ async function getPrimaryNicAndIPv4Config(
 				nicResourceGroup = resolved.nicResourceGroup;
 			}
 
-			const ipConfig =
-				nic.ipConfigurations?.find(
-					(config) => config.privateIPAddressVersion !== 'IPv6' && config.primary
-				) ??
-				nic.ipConfigurations?.find((config) => config.privateIPAddressVersion !== 'IPv6') ??
-				nic.ipConfigurations?.find((config) => config.name?.toLowerCase().includes('ipv4')) ??
-				nic.ipConfigurations?.[0];
-			if (!ipConfig) throw new Error('未找到网卡 IPv4 配置');
+			const prepared = await ensureNicIPv4Config(clients, {
+				nicResourceGroup,
+				nicName,
+				nic,
+				progress,
+				step,
+				allowCreate: Boolean(options.allowCreateIPv4Config)
+			});
 
 			return {
 				vmLocation: vm.location ?? nic.location ?? '',
 				nicResourceGroup,
 				nicName,
-				nic,
-				ipConfig
+				nic: prepared.nic,
+				ipConfig: prepared.ipConfig
 			};
 		} catch (err) {
 			lastError = formatAzureError(err);
@@ -3191,7 +3198,7 @@ async function getPrimaryNicAndIPv4Config(
 			}
 			await reportCreateVmProgress(
 				progress,
-				'brush-ip-prepare',
+				step,
 				'info',
 				`VM 网卡信息暂未就绪，等待后重试 ${attempt}/12`,
 				{
@@ -3207,19 +3214,128 @@ async function getPrimaryNicAndIPv4Config(
 	throw new Error(`读取 VM 网卡和 IPv4 配置失败: ${lastError || 'Azure 未返回网卡信息'}`);
 }
 
+function isNicIPv4Config(config: NetworkInterfaceIPConfiguration) {
+	const version = String(config.privateIPAddressVersion ?? '').toLowerCase();
+	if (version === 'ipv6') return false;
+	if (version === 'ipv4') return true;
+	const name = String(config.name ?? '').toLowerCase();
+	if (name.includes('ipv6') && !name.includes('ipv4')) return false;
+	return Boolean(config.subnet?.id || config.privateIPAddress || config.publicIPAddress?.id || name.includes('ipv4'));
+}
+
+function pickNicIPv4ConfigFromList(
+	configs: NetworkInterfaceIPConfiguration[],
+	preferredName?: string
+): NetworkInterfaceIPConfiguration | undefined {
+	return (
+		configs.find((config) => preferredName && config.name === preferredName && isNicIPv4Config(config)) ??
+		configs.find((config) => isNicIPv4Config(config) && config.primary) ??
+		configs.find((config) => isNicIPv4Config(config)) ??
+		configs.find((config) => config.name?.toLowerCase().includes('ipv4'))
+	);
+}
+
+async function loadNetworkInterfaceIpConfigurations(
+	clients: AzureClients,
+	nicResourceGroup: string,
+	nicName: string,
+	nic: NetworkInterface
+) {
+	const byName = new Map<string, NetworkInterfaceIPConfiguration>();
+	for (const config of nic.ipConfigurations ?? []) {
+		const key = config.name || `config-${byName.size + 1}`;
+		byName.set(key, config);
+	}
+
+	if (byName.size === 0 || !pickNicIPv4ConfigFromList([...byName.values()])) {
+		for await (const config of clients.network.networkInterfaceIPConfigurations.list(nicResourceGroup, nicName)) {
+			const key = config.name || `config-${byName.size + 1}`;
+			byName.set(key, config);
+		}
+	}
+
+	const configs = [...byName.values()];
+	nic.ipConfigurations = configs;
+	return configs;
+}
+
+async function ensureNicIPv4Config(
+	clients: AzureClients,
+	options: {
+		nicResourceGroup: string;
+		nicName: string;
+		nic: NetworkInterface;
+		progress?: CreateVmProgressReporter;
+		step: string;
+		allowCreate: boolean;
+	}
+): Promise<{ nic: NetworkInterface; ipConfig: NetworkInterfaceIPConfiguration }> {
+	const configs = await loadNetworkInterfaceIpConfigurations(
+		clients,
+		options.nicResourceGroup,
+		options.nicName,
+		options.nic
+	);
+	const ipConfig = pickNicIPv4ConfigFromList(configs);
+	if (ipConfig) return { nic: options.nic, ipConfig };
+	if (!options.allowCreate) throw new Error('未找到网卡 IPv4 配置');
+
+	const subnetId = configs.find((config) => config.subnet?.id)?.subnet?.id ?? '';
+	if (!subnetId) throw new Error('未找到网卡 IPv4 配置，且无法从现有网卡配置确定子网');
+
+	await reportCreateVmProgress(options.progress, options.step, 'info', '未找到 IPv4 网卡配置，正在自动补建 IPv4 配置', {
+		nicName: options.nicName,
+		subnetId
+	});
+	const latestNic = await clients.network.networkInterfaces.get(options.nicResourceGroup, options.nicName);
+	const latestConfigs = await loadNetworkInterfaceIpConfigurations(
+		clients,
+		options.nicResourceGroup,
+		options.nicName,
+		latestNic
+	);
+	const existing = pickNicIPv4ConfigFromList(latestConfigs);
+	if (existing) return { nic: latestNic, ipConfig: existing };
+
+	const configName = latestConfigs.some((config) => config.name === 'ipconfig-ipv4')
+		? `ipconfig-ipv4-${Date.now().toString(36)}`
+		: 'ipconfig-ipv4';
+	const createdConfig: NetworkInterfaceIPConfiguration = {
+		name: configName,
+		primary: true,
+		subnet: { id: subnetId },
+		privateIPAllocationMethod: 'Dynamic',
+		privateIPAddressVersion: 'IPv4'
+	};
+	latestNic.ipConfigurations = [
+		...latestConfigs.map((config) => ({ ...config, primary: false })),
+		createdConfig
+	];
+	const updatedNic = await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
+		options.nicResourceGroup,
+		options.nicName,
+		latestNic
+	);
+	const updatedConfigs = await loadNetworkInterfaceIpConfigurations(
+		clients,
+		options.nicResourceGroup,
+		options.nicName,
+		updatedNic
+	).catch(() => updatedNic.ipConfigurations ?? []);
+	const updatedConfig =
+		updatedConfigs.find((config) => config.name === configName) ?? pickNicIPv4ConfigFromList(updatedConfigs) ?? createdConfig;
+	await reportCreateVmProgress(options.progress, options.step, 'success', 'IPv4 网卡配置已补建', {
+		nicName: options.nicName,
+		ipConfigName: updatedConfig.name ?? configName
+	});
+	return { nic: updatedNic, ipConfig: updatedConfig };
+}
+
 function pickNicIPv4Config(
 	nic: NetworkInterface,
 	preferredName?: string
 ): NetworkInterfaceIPConfiguration | undefined {
-	return (
-		nic.ipConfigurations?.find((config) => preferredName && config.name === preferredName) ??
-		nic.ipConfigurations?.find(
-			(config) => config.privateIPAddressVersion !== 'IPv6' && config.primary
-		) ??
-		nic.ipConfigurations?.find((config) => config.privateIPAddressVersion !== 'IPv6') ??
-		nic.ipConfigurations?.find((config) => config.name?.toLowerCase().includes('ipv4')) ??
-		nic.ipConfigurations?.[0]
-	);
+	return pickNicIPv4ConfigFromList(nic.ipConfigurations ?? [], preferredName);
 }
 
 async function findVmNetworkInterface(
@@ -3276,8 +3392,17 @@ async function attachPublicIpToNic(
 			const latestNic = await clients.network.networkInterfaces
 				.get(options.nicResourceGroup, options.nicName)
 				.catch(() => options.nic);
+			await loadNetworkInterfaceIpConfigurations(
+				clients,
+				options.nicResourceGroup,
+				options.nicName,
+				latestNic
+			).catch(() => latestNic.ipConfigurations ?? []);
 			const latestIpConfig = pickNicIPv4Config(latestNic, options.ipConfig.name) ?? options.ipConfig;
 			latestIpConfig.publicIPAddress = { id: options.publicIpId };
+			if (!latestNic.ipConfigurations?.some((config) => config.name === latestIpConfig.name)) {
+				latestNic.ipConfigurations = [...(latestNic.ipConfigurations ?? []), latestIpConfig];
+			}
 			await clients.network.networkInterfaces.beginCreateOrUpdateAndWait(
 				options.nicResourceGroup,
 				options.nicName,
@@ -3320,6 +3445,12 @@ async function waitForNicAttachedPublicIPv4(
 	for (let attempt = 1; attempt <= 12; attempt++) {
 		try {
 			const nic = await clients.network.networkInterfaces.get(options.nicResourceGroup, options.nicName);
+			await loadNetworkInterfaceIpConfigurations(
+				clients,
+				options.nicResourceGroup,
+				options.nicName,
+				nic
+			).catch(() => nic.ipConfigurations ?? []);
 			const ipConfig = pickNicIPv4Config(nic, options.ipConfigName);
 			const publicIpId = ipConfig?.publicIPAddress?.id ?? options.fallbackPublicIpId ?? '';
 			const publicIpName = parseResourceName(publicIpId);
@@ -4226,7 +4357,8 @@ export async function replaceVmPublicIPv4(
 		clients,
 		resourceGroup,
 		vmName,
-		progress
+		progress,
+		{ step: 'replace-ip-prepare', allowCreateIPv4Config: true }
 	);
 	const oldPublicIpId = ipConfig.publicIPAddress?.id;
 	const oldPublicIpName = oldPublicIpId ? parseResourceName(oldPublicIpId) : '';
@@ -4316,7 +4448,8 @@ export async function brushVmPublicIPv4Prefix(
 		clients,
 		options.resourceGroup,
 		options.vmName,
-		options.progress
+		options.progress,
+		{ step: 'brush-ip-prepare', allowCreateIPv4Config: true }
 	);
 	const oldPublicIpId = ipConfig.publicIPAddress?.id;
 	const oldPublicIpName = oldPublicIpId ? parseResourceName(oldPublicIpId) : '';
