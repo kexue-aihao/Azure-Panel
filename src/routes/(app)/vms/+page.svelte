@@ -105,6 +105,8 @@
 		targetPrefix: string;
 		publicIpName: string;
 		matched: boolean;
+		kept: boolean;
+		deleted: boolean;
 		timestamp: string;
 	};
 	type OperationStreamMessage<T> =
@@ -333,26 +335,74 @@
 	function brushedIpFromEvent(event: CreateProgressEvent): BrushedIpRecord | null {
 		if (event.step !== 'public-ipv4') return null;
 		const ip = progressDetailString(event.detail, 'ip');
-		const targetPrefix = progressDetailString(event.detail, 'targetPrefix');
-		if (!ip || !targetPrefix) return null;
+		const targetPrefix =
+			progressDetailString(event.detail, 'targetPrefix') ||
+			progressDetailString(event.detail, 'target_prefix');
+		if (!ip) return null;
 
 		const attempt = progressDetailNumber(event.detail, 'attempt');
 		const maxAttempts = progressDetailNumber(event.detail, 'maxAttempts') || attempt || 1;
 		const publicIpName =
 			progressDetailString(event.detail, 'publicIpName') ||
 			progressDetailString(event.detail, 'name');
+		const explicitMatched = event.detail?.matched === true;
+		const explicitMissed = event.detail?.matched === false;
 		const matched =
-			event.detail?.matched === true || (event.status === 'success' && ip.startsWith(targetPrefix));
+			explicitMatched || (!explicitMissed && Boolean(targetPrefix) && ip.startsWith(targetPrefix));
+		const kept =
+			event.detail?.kept === true ||
+			(matched && event.status === 'success') ||
+			(explicitMissed && event.detail?.deleted !== true && attempt >= maxAttempts);
+		const deleted = event.detail?.deleted === true;
 		return {
-			key: `${targetPrefix}:${attempt}:${ip}:${publicIpName || '-'}`,
+			key: `${publicIpName || '-'}:${attempt || 0}:${ip}`,
 			attempt,
 			maxAttempts,
 			ip,
 			targetPrefix,
 			publicIpName,
 			matched,
+			kept,
+			deleted,
 			timestamp: event.timestamp
 		};
+	}
+
+	function brushedIpSummary(records: BrushedIpRecord[]) {
+		const targetPrefix = records.find((item) => item.targetPrefix)?.targetPrefix;
+		const prefixText = targetPrefix ? `目标前缀 ${targetPrefix}` : '未指定目标前缀';
+		const matched = records.find((item) => item.matched);
+		if (matched) return `${prefixText}，已命中 ${matched.ip}，记录 ${records.length} 个公网 IP`;
+		const kept = [...records].reverse().find((item) => item.kept);
+		if (kept && targetPrefix) return `${prefixText}，未命中后保留 ${kept.ip}，记录 ${records.length} 个公网 IP`;
+		if (kept) return `${prefixText}，最终使用 ${kept.ip}，记录 ${records.length} 个公网 IP`;
+		const lastMissed = [...records].reverse().find((item) => !item.matched && item.ip);
+		if (lastMissed) return `${prefixText}，最近未命中 ${lastMissed.ip}，记录 ${records.length} 个公网 IP`;
+		return `${prefixText}，已记录 ${records.length} 个公网 IP`;
+	}
+
+	function brushedIpState(records: BrushedIpRecord[]) {
+		if (records.some((item) => item.matched)) return '已命中';
+		const kept = records.find((item) => item.kept);
+		if (kept?.targetPrefix) return '保留最后 IP';
+		if (kept) return '最终 IP';
+		if (records.some((item) => item.deleted)) return '刷段中';
+		return '已刷到';
+	}
+
+	function brushedIpBadgeText(item: BrushedIpRecord) {
+		if (item.matched) return '命中';
+		if (item.kept) return item.targetPrefix ? '未命中保留' : '最终使用';
+		if (item.deleted) return '未命中删除';
+		if (item.targetPrefix) return '待判定';
+		return '已创建';
+	}
+
+	function brushedIpBadgeClass(item: BrushedIpRecord) {
+		if (item.matched) return 'bg-green-900/50 text-green-300';
+		if (item.kept) return 'bg-amber-900/50 text-amber-200';
+		if (item.deleted) return 'bg-slate-800 text-slate-300';
+		return 'bg-blue-900/50 text-blue-200';
 	}
 
 	function upsertBrushedIp(records: BrushedIpRecord[], record: BrushedIpRecord) {
@@ -1730,21 +1780,22 @@
 							<div>
 								<div class="text-sm font-medium text-blue-100">已刷到 IPv4</div>
 								<div class="mt-1 text-xs text-muted">
-									目标前缀 {createBrushedIps[0]?.targetPrefix}，已记录 {createBrushedIps.length} 个公网 IP
+									{brushedIpSummary(createBrushedIps)}
 								</div>
 							</div>
 							<div class="badge bg-blue-900/50 text-blue-200">
-								{createBrushedIps.some((item) => item.matched) ? '已命中' : '刷段中'}
+								{brushedIpState(createBrushedIps)}
 							</div>
 						</div>
 						<div class="mt-3 max-h-36 space-y-2 overflow-y-auto pr-1">
 							{#each createBrushedIps as item}
 								<div class="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-background/70 px-3 py-2 text-xs">
-									<span class={`badge ${item.matched ? 'bg-green-900/50 text-green-300' : 'bg-slate-800 text-slate-300'}`}>
-										{item.matched ? '命中' : '未命中'}
+									<span class={`badge ${brushedIpBadgeClass(item)}`}>
+										{brushedIpBadgeText(item)}
 									</span>
 									<span class="font-mono text-muted">#{item.attempt}/{item.maxAttempts}</span>
-									<span class="font-mono text-blue-100">{item.ip}</span>
+									<span class="text-muted">完整 IPv4</span>
+									<span class="break-all font-mono text-blue-100" title={item.ip}>{item.ip}</span>
 									{#if item.publicIpName}
 										<span class="break-all text-muted">{item.publicIpName}</span>
 									{/if}
@@ -1860,21 +1911,22 @@
 					<div>
 						<div class="text-sm font-medium text-blue-100">已刷到 IPv4</div>
 						<div class="mt-1 text-xs text-muted">
-							目标前缀 {operationBrushedIps[0]?.targetPrefix}，已记录 {operationBrushedIps.length} 个公网 IP
+							{brushedIpSummary(operationBrushedIps)}
 						</div>
 					</div>
 					<div class="badge bg-blue-900/50 text-blue-200">
-						{operationBrushedIps.some((item) => item.matched) ? '已命中' : '刷段中'}
+						{brushedIpState(operationBrushedIps)}
 					</div>
 				</div>
 				<div class="mt-3 max-h-36 space-y-2 overflow-y-auto pr-1">
 					{#each operationBrushedIps as item}
 						<div class="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-background/70 px-3 py-2 text-xs">
-							<span class={`badge ${item.matched ? 'bg-green-900/50 text-green-300' : 'bg-slate-800 text-slate-300'}`}>
-								{item.matched ? '命中' : '未命中'}
+							<span class={`badge ${brushedIpBadgeClass(item)}`}>
+								{brushedIpBadgeText(item)}
 							</span>
 							<span class="font-mono text-muted">#{item.attempt}/{item.maxAttempts}</span>
-							<span class="font-mono text-blue-100">{item.ip}</span>
+							<span class="text-muted">完整 IPv4</span>
+							<span class="break-all font-mono text-blue-100" title={item.ip}>{item.ip}</span>
 							{#if item.publicIpName}
 								<span class="break-all text-muted">{item.publicIpName}</span>
 							{/if}

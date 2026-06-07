@@ -2901,14 +2901,20 @@ async function createPublicIp(
 		ddosProtectionPlanId?: string;
 		progress?: CreateVmProgressReporter;
 		step?: string;
+		progressDetail?: CreateVmProgressEvent['detail'];
 	}
 ): Promise<PublicIPAddress> {
 	const step = options.step ?? `public-ip-${options.version.toLowerCase()}`;
-	await reportCreateVmProgress(options.progress, step, 'running', `创建 ${options.version} 公网 IP`, {
+	const contextDetail = options.progressDetail ?? {};
+	const withPublicIpDetail = (detail: CreateVmProgressEvent['detail'] = {}) => ({
+		...contextDetail,
+		...detail
+	});
+	await reportCreateVmProgress(options.progress, step, 'running', `创建 ${options.version} 公网 IP`, withPublicIpDetail({
 		name: options.name,
 		version: options.version,
 		ddosProtection: Boolean(options.ddosProtectionPlanId)
-	});
+	}));
 	try {
 		const poller = await clients.network.publicIPAddresses.beginCreateOrUpdate(
 			options.resourceGroup,
@@ -2939,11 +2945,11 @@ async function createPublicIp(
 				`${step}-polling`,
 				'running',
 				`${options.version} 公网 IP 创建中，轮询第 ${polls} 次`,
-				{
+				withPublicIpDetail({
 					name: options.name,
 					status: state.status,
 					polls
-				}
+				})
 			);
 			await poller.poll();
 			if (!poller.isDone()) await sleep(2000);
@@ -2951,30 +2957,30 @@ async function createPublicIp(
 		const state = poller.getOperationState();
 		if (state.error) {
 			const stateError = formatAzureError(state.error);
-			await reportCreateVmProgress(options.progress, step, 'error', `${options.version} 公网 IP 长任务失败`, {
+			await reportCreateVmProgress(options.progress, step, 'error', `${options.version} 公网 IP 长任务失败`, withPublicIpDetail({
 				name: options.name,
 				status: state.status,
 				error: stateError.length > 800 ? `${stateError.slice(0, 800)}...` : stateError
-			});
+			}));
 			throw state.error;
 		}
 		const pip = poller.getResult() ?? (await clients.network.publicIPAddresses.get(options.resourceGroup, options.name));
 		const ready = pip.ipAddress ? pip : await waitForPublicIpAddress(clients, options.resourceGroup, options.name);
 		if (!ready.id) throw new Error(`Azure 未返回 ${options.version} 公网 IP 资源 ID`);
-		await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, {
+		await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, withPublicIpDetail({
 			name: options.name,
 			ip: ready.ipAddress ?? '',
 			ddosProtection: Boolean(options.ddosProtectionPlanId),
 			polls
-		});
+		}));
 		return ready;
 	} catch (err) {
 		const message = formatAzureError(err);
-		await reportCreateVmProgress(options.progress, step, 'error', `${options.version} 公网 IP 创建失败`, {
+		await reportCreateVmProgress(options.progress, step, 'error', `${options.version} 公网 IP 创建失败`, withPublicIpDetail({
 			name: options.name,
 			version: options.version,
 			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
-		});
+		}));
 		throw new Error(`${options.version} 公网 IP 创建失败 ${options.name}: ${message}`);
 	}
 }
@@ -3038,6 +3044,8 @@ async function createMatchingIPv4PublicIp(
 		await reportCreateVmProgress(options.progress, 'public-ipv4', 'running', `创建 IPv4 公网 IP，第 ${attempt}/${maxAttempts} 次`, {
 			attempt,
 			maxAttempts,
+			targetPrefix: targetPrefix || null,
+			publicIpName: name,
 			name
 		});
 		let pip: PublicIPAddress;
@@ -3049,7 +3057,16 @@ async function createMatchingIPv4PublicIp(
 				version: 'IPv4',
 				ddosProtectionPlanId: options.ddosProtectionPlanId,
 				progress: options.progress,
-				step: 'public-ipv4'
+				step: 'public-ipv4',
+				progressDetail: {
+					attempt,
+					maxAttempts,
+					targetPrefix: targetPrefix || null,
+					publicIpName: name,
+					matched: null,
+					kept: null,
+					deleted: null
+				}
 			});
 		} catch (err) {
 			lastCreateError = formatAzureError(err);
@@ -3061,6 +3078,7 @@ async function createMatchingIPv4PublicIp(
 				{
 					attempt,
 					maxAttempts,
+					targetPrefix: targetPrefix || null,
 					publicIpName: name,
 					error: lastCreateError.length > 800 ? `${lastCreateError.slice(0, 800)}...` : lastCreateError
 				}
@@ -3082,7 +3100,9 @@ async function createMatchingIPv4PublicIp(
 					ip: address,
 					targetPrefix: targetPrefix || null,
 					publicIpName: name,
-					matched: Boolean(targetPrefix)
+					matched: Boolean(targetPrefix),
+					kept: true,
+					deleted: false
 				}
 			);
 			return { pip, attempts: attempt, matched: Boolean(targetPrefix) };
@@ -3094,7 +3114,7 @@ async function createMatchingIPv4PublicIp(
 				'public-ipv4',
 				'info',
 				`IPv4 ${address || '-'} 未命中 ${targetPrefix}，已达到最大次数，保留该 IP 并继续创建`,
-				{ attempt, maxAttempts, ip: address, targetPrefix, publicIpName: name, matched: false }
+				{ attempt, maxAttempts, ip: address, targetPrefix, publicIpName: name, matched: false, kept: true, deleted: false }
 			);
 			return { pip, attempts: attempt, matched: false };
 		}
@@ -3104,7 +3124,7 @@ async function createMatchingIPv4PublicIp(
 			'public-ipv4',
 			'info',
 			`IPv4 ${address || '-'} 未命中 ${targetPrefix}，删除后继续`,
-			{ attempt, maxAttempts, ip: address, targetPrefix, publicIpName: name, matched: false }
+			{ attempt, maxAttempts, ip: address, targetPrefix, publicIpName: name, matched: false, kept: false, deleted: true }
 		);
 		await deletePublicIpById(clients, pip.id);
 	}
