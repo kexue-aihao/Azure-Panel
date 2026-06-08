@@ -277,15 +277,29 @@ export function buildSubscriptionAlertMessage(input: {
 	displayName: string;
 	state: string;
 	checkedAt?: Date;
+	policyName?: string;
+	triggered?: boolean;
+	result?: string;
+	detail?: string;
 }) {
-	return [
-		'Azure Panel 订阅状态告警',
+	const lines = [
+		input.triggered === true ? 'Azure Panel 订阅状态告警' : 'Azure Panel 订阅状态检测结果',
 		`账号: ${maskAccountName(input.account.name)}`,
 		`订阅: ${maskSubscriptionId(input.subscriptionId || input.account.subscriptionId)}`,
 		`显示名: ${maskMiddle(input.displayName || '-', 2, 2)}`,
 		`状态: ${input.state || 'Unknown'}`,
 		`时间: ${(input.checkedAt ?? new Date()).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
-	].join('\n');
+	];
+	if (input.policyName) lines.splice(1, 0, `策略: ${input.policyName}`);
+	if (input.triggered !== undefined) {
+		lines.splice(
+			lines.length - 1,
+			0,
+			`结果: ${input.result || (input.triggered ? '命中补机触发条件' : '未命中补机触发条件')}`
+		);
+	}
+	if (input.detail) lines.splice(lines.length - 1, 0, `详情: ${input.detail}`);
+	return lines.join('\n');
 }
 
 export function buildReplenishmentMessage(input: {

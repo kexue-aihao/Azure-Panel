@@ -1038,11 +1038,45 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 			});
 			if (!primaryRuntime) continue;
 
-			const status = await getAccountSubscriptionStatusWithTimeout(
-				account,
-				primaryRuntime.proxy,
-				`触发账号 ${account.name}`
-			);
+			let status: Awaited<ReturnType<typeof getAccountSubscriptionStatus>>;
+			try {
+				status = await getAccountSubscriptionStatusWithTimeout(
+					account,
+					primaryRuntime.proxy,
+					`触发账号 ${account.name}`
+				);
+			} catch (err) {
+				const checkError = errorMessage(err);
+				await updateWorkflowStatusCheck(policy.id, {
+					lastAccountStatus: 'check_failed',
+					lastStatusCheckedAt: new Date()
+				});
+				await notifyPolicySubscriptionCheckFailure({
+					policy,
+					account,
+					message: checkError
+				})
+					.then((sent) =>
+						insertWorkflowLog(
+							policy.id,
+							'telegram_notify',
+							sent ? 'success' : 'skipped',
+							sent
+								? '本轮订阅状态查询失败结果已发送到 Telegram'
+								: '未配置 Telegram 通知，跳过本轮订阅状态查询失败结果发送'
+						)
+					)
+					.catch((notifyErr) =>
+						insertWorkflowLog(
+							policy.id,
+							'telegram_notify',
+							'failed',
+							`Telegram 订阅状态查询失败通知发送失败: ${errorMessage(notifyErr)}`
+						)
+					);
+				await insertWorkflowLog(policy.id, 'status_check', 'failed', `订阅状态查询失败: ${checkError}`);
+				continue;
+			}
 			await updateWorkflowStatusCheck(policy.id, {
 				lastAccountStatus: status.state,
 				lastStatusCheckedAt: new Date()
@@ -1055,10 +1089,30 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 			await notifySubscriptionStateIfNeeded({
 				settingsUserId: policy.userId,
 				account,
-				status
-			}).catch((err) => {
-				console.warn('[worker] failed to send subscription status notification:', err);
-			});
+				status,
+				alwaysNotify: true,
+				policyName: policy.name,
+				triggered: shouldReplenish
+			})
+				.then((sent) =>
+					insertWorkflowLog(
+						policy.id,
+						'telegram_notify',
+						sent ? 'success' : 'skipped',
+						sent
+							? `本轮订阅状态 ${status.state} 检测结果已发送到 Telegram`
+							: '未配置 Telegram 通知，跳过本轮订阅状态结果发送'
+					)
+				)
+				.catch((err) => {
+					console.warn('[worker] failed to send subscription status notification:', err);
+					return insertWorkflowLog(
+						policy.id,
+						'telegram_notify',
+						'failed',
+						`Telegram 订阅状态结果通知发送失败: ${errorMessage(err)}`
+					);
+				});
 			await insertWorkflowLog(
 				policy.id,
 				'status_check',
@@ -1328,6 +1382,9 @@ async function notifySubscriptionStateIfNeeded(options: {
 	settingsUserId: number;
 	account: AzureAccount;
 	status: Awaited<ReturnType<typeof getAccountSubscriptionStatus>>;
+	alwaysNotify?: boolean;
+	policyName?: string;
+	triggered?: boolean;
 }) {
 	const now = new Date();
 	const trigger = isAzureSubscriptionTriggerState(
@@ -1345,26 +1402,27 @@ async function notifySubscriptionStateIfNeeded(options: {
 		lastState: normalizedState,
 		lastCheckedAt: now
 	};
+	const triggered = options.triggered ?? trigger;
 
-	if (!trigger) {
+	if (!options.alwaysNotify && !triggered) {
 		await upsertSubscriptionNotificationState(options.settingsUserId, options.account.id, {
 			...baseState,
 			lastNotifiedState: ''
 		});
-		return;
+		return false;
 	}
 
-	const shouldNotify = existing?.lastNotifiedState !== normalizedState;
+	const shouldNotify = options.alwaysNotify || existing?.lastNotifiedState !== normalizedState;
 	if (!shouldNotify) {
 		await upsertSubscriptionNotificationState(options.settingsUserId, options.account.id, baseState);
-		return;
+		return false;
 	}
 
 	const settings = await findNotificationSettingsByUser(options.settingsUserId);
 	const credentials = getTelegramCredentials(settings);
 	if (!credentials) {
 		await upsertSubscriptionNotificationState(options.settingsUserId, options.account.id, baseState);
-		return;
+		return false;
 	}
 
 	await sendTelegramMessageToTargets({
@@ -1375,15 +1433,45 @@ async function notifySubscriptionStateIfNeeded(options: {
 			subscriptionId: options.status.subscriptionId,
 			displayName: options.status.displayName,
 			state: options.status.state,
-			checkedAt: now
+			checkedAt: now,
+			policyName: options.policyName,
+			triggered
 		})
 	});
 
 	await upsertSubscriptionNotificationState(options.settingsUserId, options.account.id, {
 		...baseState,
-		lastNotifiedState: normalizedState,
+		lastNotifiedState: triggered ? normalizedState : '',
 		lastNotifiedAt: now
 	});
+	return true;
+}
+
+async function notifyPolicySubscriptionCheckFailure(options: {
+	policy: WorkflowPolicy;
+	account: AzureAccount;
+	message: string;
+}) {
+	const settings = await findNotificationSettingsByUser(options.policy.userId);
+	const credentials = getTelegramCredentials(settings);
+	if (!credentials) return false;
+
+	await sendTelegramMessageToTargets({
+		token: credentials.token,
+		chatIds: credentials.chatIds,
+		text: buildSubscriptionAlertMessage({
+			account: options.account,
+			subscriptionId: options.account.subscriptionId,
+			displayName: '',
+			state: 'CheckFailed',
+			checkedAt: new Date(),
+			policyName: options.policy.name,
+			triggered: false,
+			result: '订阅状态查询失败',
+			detail: options.message
+		})
+	});
+	return true;
 }
 
 async function runSubscriptionNotificationChecks(force = false) {
