@@ -13,6 +13,8 @@ export const users = mysqlTable('users', {
 	passwordHash: varchar('password_hash', { length: 255 }).notNull(),
 	role: varchar('role', { length: 16 }).notNull().default('user'),
 	disabled: boolean('disabled').notNull().default(false),
+	totpEnabled: boolean('totp_enabled').notNull().default(false),
+	totpSecretEncrypted: text('totp_secret_encrypted').notNull().default(''),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });
 
@@ -43,6 +45,8 @@ export const azureAccounts = mysqlTable('azure_accounts', {
 	vmRegionCache: text('vm_region_cache').default(''),
 	vmImageCache: text('vm_image_cache').default(''),
 	vmProviderCache: text('vm_provider_cache').default(''),
+	subscriptionEnabledAt: timestamp('subscription_enabled_at'),
+	azureRegisteredAt: timestamp('azure_registered_at'),
 	remark: varchar('remark', { length: 255 }).default(''),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });
@@ -132,11 +136,14 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	enableIpv6: boolean('enable_ipv6').notNull().default(false),
 	ipPrefix: varchar('ip_prefix', { length: 32 }).notNull().default('85.211'),
 	ipBrushMaxAttempts: int('ip_brush_max_attempts').notNull().default(30),
-	checkIntervalSeconds: int('check_interval_seconds').notNull().default(10),
+	checkIntervalSeconds: int('check_interval_seconds').notNull().default(60),
 	statusCheckEnabled: boolean('status_check_enabled').notNull().default(true),
 	statusTriggerStates: varchar('status_trigger_states', { length: 120 })
 		.notNull()
 		.default('banned,warning,warned,disabled'),
+	replenishmentAccountOrder: varchar('replenishment_account_order', { length: 32 })
+		.notNull()
+		.default('pool_added_at'),
 	dnsBindingId: int('dns_binding_id').notNull().default(0),
 	lastAccountStatus: varchar('last_account_status', { length: 64 }).notNull().default(''),
 	lastStatusCheckedAt: timestamp('last_status_checked_at'),

@@ -6,6 +6,8 @@ export const users = sqliteTable('users', {
 	passwordHash: text('password_hash').notNull(),
 	role: text('role').notNull().default('user'),
 	disabled: integer('disabled', { mode: 'boolean' }).notNull().default(false),
+	totpEnabled: integer('totp_enabled', { mode: 'boolean' }).notNull().default(false),
+	totpSecretEncrypted: text('totp_secret_encrypted').notNull().default(''),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()
 		.$defaultFn(() => new Date())
@@ -46,6 +48,8 @@ export const azureAccounts = sqliteTable('azure_accounts', {
 	vmRegionCache: text('vm_region_cache').default(''),
 	vmImageCache: text('vm_image_cache').default(''),
 	vmProviderCache: text('vm_provider_cache').default(''),
+	subscriptionEnabledAt: integer('subscription_enabled_at', { mode: 'timestamp' }),
+	azureRegisteredAt: integer('azure_registered_at', { mode: 'timestamp' }),
 	remark: text('remark').default(''),
 	createdAt: integer('created_at', { mode: 'timestamp' })
 		.notNull()
@@ -163,9 +167,12 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	enableIpv6: integer('enable_ipv6', { mode: 'boolean' }).notNull().default(false),
 	ipPrefix: text('ip_prefix').notNull().default('85.211'),
 	ipBrushMaxAttempts: integer('ip_brush_max_attempts').notNull().default(30),
-	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(10),
+	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(60),
 	statusCheckEnabled: integer('status_check_enabled', { mode: 'boolean' }).notNull().default(true),
 	statusTriggerStates: text('status_trigger_states').notNull().default('banned,warning,warned,disabled'),
+	replenishmentAccountOrder: text('replenishment_account_order')
+		.notNull()
+		.default('pool_added_at'),
 	dnsBindingId: integer('dns_binding_id').notNull().default(0),
 	lastAccountStatus: text('last_account_status').notNull().default(''),
 	lastStatusCheckedAt: integer('last_status_checked_at', { mode: 'timestamp' }),

@@ -5,6 +5,13 @@ import { insertWorkflow } from '$lib/server/db/repo';
 import { fail, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
+function normalizeAccountOrder(value: unknown) {
+	const raw = String(value ?? '').trim();
+	return ['pool_added_at', 'subscription_enabled_at', 'azure_registered_at'].includes(raw)
+		? raw
+		: 'pool_added_at';
+}
+
 export const POST: RequestHandler = async (event) => {
 	const user = await requireUser(event);
 	const body = await event.request.json();
@@ -40,9 +47,10 @@ export const POST: RequestHandler = async (event) => {
 		enableIpv6: Boolean(body.enable_ipv6),
 		ipPrefix: String(body.ip_prefix ?? '85.211') || '85.211',
 		ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 30) || 30,
-		checkIntervalSeconds: 10,
+		checkIntervalSeconds: 60,
 		statusCheckEnabled: body.status_check_enabled !== false,
 		statusTriggerStates: DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES,
+		replenishmentAccountOrder: normalizeAccountOrder(body.replenishment_account_order),
 		dnsBindingId
 	});
 
@@ -69,6 +77,7 @@ export const POST: RequestHandler = async (event) => {
 		check_interval_seconds: policy.checkIntervalSeconds,
 		status_check_enabled: policy.statusCheckEnabled,
 		status_trigger_states: policy.statusTriggerStates,
+		replenishment_account_order: policy.replenishmentAccountOrder,
 		dns_binding_id: policy.dnsBindingId,
 		last_account_status: policy.lastAccountStatus,
 		last_status_checked_at: policy.lastStatusCheckedAt,

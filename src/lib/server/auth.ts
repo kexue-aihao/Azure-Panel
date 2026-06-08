@@ -53,7 +53,8 @@ export function serializeUserForClient(user: User) {
 		email: user.email,
 		role: user.role,
 		is_admin: isAdminUser(user),
-		disabled: Boolean(user.disabled)
+		disabled: Boolean(user.disabled),
+		totp_enabled: Boolean(user.totpEnabled)
 	};
 }
 

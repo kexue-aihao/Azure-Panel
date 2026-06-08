@@ -172,6 +172,7 @@
 	let proxyProfileId = $state('');
 	let brushIpPrefix = $state('85.211');
 	let brushMaxAttempts = $state(30);
+	let brushDnsBindingId = $state('');
 	let firewallForm = $state({
 		name: '',
 		protocol: 'Tcp',
@@ -209,6 +210,7 @@
 	const createSizeSelectId = 'create-size-select';
 	const imageSelectId = 'image-select';
 	const dnsBindingSelectId = 'dns-binding-select';
+	const brushDnsBindingSelectId = 'brush-dns-binding-select';
 	const RANDOM_PASSWORD_LENGTH = 12;
 	const PASSWORD_LOWER = 'abcdefghijklmnopqrstuvwxyz';
 	const PASSWORD_UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -320,6 +322,7 @@
 		deleteProgress = [];
 		operationProgress = [];
 		operationBrushedIps = [];
+		brushDnsBindingId = '';
 		operationTitle = '';
 		operationTarget = '';
 		firewallVm = null;
@@ -839,6 +842,12 @@
 		accounts = accountList;
 		proxies = proxyList;
 		dnsBindings = bindingList.filter((binding) => binding.enabled);
+		if (brushDnsBindingId && !dnsBindings.some((binding) => String(binding.id) === brushDnsBindingId)) {
+			brushDnsBindingId = '';
+		}
+		if (!brushDnsBindingId && dnsBindings.length === 1) {
+			brushDnsBindingId = String(dnsBindings[0].id);
+		}
 		syncProxySelection();
 	}
 
@@ -1052,6 +1061,7 @@
 				...createForm,
 				account_id: accountId,
 				...proxyPayload(),
+				resource_group_auto_generated: true,
 				dns_binding_id: createForm.dns_binding_id ? Number(createForm.dns_binding_id) : 0
 			});
 			mergeCreateProgress({
@@ -1163,7 +1173,11 @@
 		ipActionLoading = `${vm.name}:replace`;
 		beginOperationProgress('更换公网 IPv4', vm.name);
 		try {
-			const result = await requestOperationWithProgress<{ public_ipv4: string; old_public_ipv4: string }>(
+			const result = await requestOperationWithProgress<{
+				public_ipv4: string;
+				old_public_ipv4: string;
+				dns_sync?: { synced: boolean; fqdn: string; message: string } | null;
+			}>(
 				'/api/user/azure/vm/ip/replace',
 				{
 					method: 'POST',
@@ -1171,11 +1185,17 @@
 						account_id: accountId,
 						...proxyPayload(),
 						resource_group: vm.resource_group,
-						vm_name: vm.name
+						vm_name: vm.name,
+						dns_binding_id: Number(brushDnsBindingId || 0)
 					}
 				}
 			);
-			toast = `${vm.name} 已更换 IPv4：${result.old_public_ipv4 || '-'} -> ${result.public_ipv4 || '-'}`;
+			const dnsText = result.dns_sync?.synced
+				? `，DNS 已同步到 ${result.dns_sync.fqdn}`
+				: result.dns_sync?.message
+					? `，DNS 未同步：${result.dns_sync.message}`
+					: '';
+			toast = `${vm.name} 已更换 IPv4：${result.old_public_ipv4 || '-'} -> ${result.public_ipv4 || '-'}${dnsText}`;
 			await loadVms();
 		} catch (err) {
 			const message = err instanceof Error ? err.message : '换 IP 失败';
@@ -1237,7 +1257,11 @@
 		ipActionLoading = `${vm.name}:brush`;
 		beginOperationProgress(`刷 IPv4 段 ${brushIpPrefix}`, vm.name);
 		try {
-			const result = await requestOperationWithProgress<{ public_ipv4: string; attempts: number }>(
+			const result = await requestOperationWithProgress<{
+				public_ipv4: string;
+				attempts: number;
+				dns_sync?: { synced: boolean; fqdn: string; message: string } | null;
+			}>(
 				'/api/user/azure/vm/ip/brush',
 				{
 					method: 'POST',
@@ -1247,12 +1271,18 @@
 						resource_group: vm.resource_group,
 						vm_name: vm.name,
 						ip_prefix: brushIpPrefix,
-						max_attempts: Number(brushMaxAttempts)
+						max_attempts: Number(brushMaxAttempts),
+						dns_binding_id: Number(brushDnsBindingId || 0)
 					}
 				}
 			);
 			operationBrushedIps = fillBrushedIpFromResult(operationBrushedIps, result.public_ipv4 || '');
-			toast = `${vm.name} 已匹配 IPv4 ${result.public_ipv4}，尝试 ${result.attempts} 次`;
+			const dnsText = result.dns_sync?.synced
+				? `，DNS 已同步到 ${result.dns_sync.fqdn}`
+				: result.dns_sync?.message
+					? `，DNS 未同步：${result.dns_sync.message}`
+					: '';
+			toast = `${vm.name} 已匹配 IPv4 ${result.public_ipv4}，尝试 ${result.attempts} 次${dnsText}`;
 			await loadVms();
 		} catch (err) {
 			const message = err instanceof Error ? err.message : '刷 IP 失败';
@@ -1930,8 +1960,19 @@
 			bind:value={brushMaxAttempts}
 		/>
 	</div>
+	<div>
+		<label class="text-sm text-muted" for={brushDnsBindingSelectId}>换/刷 IPv4 后同步 DNS</label>
+		<select id={brushDnsBindingSelectId} class="input mt-1 min-w-[260px]" bind:value={brushDnsBindingId}>
+			<option value="">不自动同步 DNS</option>
+			{#each dnsBindings as binding}
+				<option value={String(binding.id)}>
+					{binding.name} - {binding.fqdn} ({binding.record_type})
+				</option>
+			{/each}
+		</select>
+	</div>
 	<p class="text-sm text-muted">
-		刷 IP 会重复创建并检测公网 IPv4，命中前缀后自动停止；未命中会删除临时 IP 并在达到最大次数后停止。
+		更换 IPv4 会把新 IP 同步到所选 DNS；刷 IP 会重复创建并检测公网 IPv4，只有命中目标前缀才会同步解析。
 	</p>
 </div>
 

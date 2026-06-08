@@ -46,6 +46,8 @@ import {
 } from './proxy';
 import {
 	buildAbnormalAccountRemovedMessage,
+	buildDnsSyncMessage,
+	buildIpBrushMissMessage,
 	buildReplenishmentMessage,
 	buildSubscriptionAlertMessage,
 	getTelegramCredentials,
@@ -59,9 +61,14 @@ const activePolicies = new Set<number>();
 const activeNotificationUsers = new Set<number>();
 const SUBSCRIPTION_STATUS_TIMEOUT_MS = 30_000;
 const MIN_POLICY_CHECK_INTERVAL_SECONDS = 10;
-const DEFAULT_POLICY_CHECK_INTERVAL_SECONDS = 10;
+const DEFAULT_POLICY_CHECK_INTERVAL_SECONDS = 60;
 const DEFAULT_REPLENISHMENT_IP_PREFIX = '85.211';
 const DEFAULT_REPLENISHMENT_IP_BRUSH_ATTEMPTS = 30;
+const REPLENISHMENT_ACCOUNT_ORDER_LABELS: Record<string, string> = {
+	pool_added_at: '加入 Azure 号池时间',
+	subscription_enabled_at: '账号订阅启用时间',
+	azure_registered_at: 'Azure 账号注册时间'
+};
 const REPLENISHMENT_FAILURE_BASE_COOLDOWN_MS = 5 * 60 * 1000;
 const REPLENISHMENT_FAILURE_MAX_COOLDOWN_MS = 60 * 60 * 1000;
 const REPLENISHMENT_FLOW_LOCK_TIMEOUT_MS = 6 * 60 * 60 * 1000;
@@ -178,6 +185,33 @@ function replenishmentIpPrefix(policy: WorkflowPolicy) {
 function replenishmentIpBrushMaxAttempts(policy: WorkflowPolicy) {
 	const attempts = Number(policy.ipBrushMaxAttempts ?? DEFAULT_REPLENISHMENT_IP_BRUSH_ATTEMPTS);
 	return Number.isFinite(attempts) && attempts > 0 ? Math.floor(attempts) : DEFAULT_REPLENISHMENT_IP_BRUSH_ATTEMPTS;
+}
+
+function normalizeReplenishmentAccountOrder(value?: string | null) {
+	const normalized = String(value ?? '').trim().toLowerCase();
+	return normalized === 'subscription_enabled_at' || normalized === 'azure_registered_at'
+		? normalized
+		: 'pool_added_at';
+}
+
+function orderTimestamp(account: AzureAccount, order: string) {
+	const value =
+		order === 'subscription_enabled_at'
+			? account.subscriptionEnabledAt
+			: order === 'azure_registered_at'
+				? account.azureRegisteredAt
+				: account.createdAt;
+	const date = value instanceof Date ? value : value ? new Date(value) : account.createdAt;
+	const time = date instanceof Date ? date.getTime() : Number(date);
+	return Number.isFinite(time) && time > 0 ? time : account.createdAt.getTime();
+}
+
+function orderAccountsForReplenishment(accounts: AzureAccount[], orderValue?: string | null) {
+	const order = normalizeReplenishmentAccountOrder(orderValue);
+	return [...accounts].sort((a, b) => {
+		const timeDiff = orderTimestamp(a, order) - orderTimestamp(b, order);
+		return timeDiff !== 0 ? timeDiff : a.id - b.id;
+	});
 }
 
 function shouldRunPolicyStatusCheck(policy: WorkflowPolicy, force: boolean) {
@@ -523,15 +557,32 @@ async function pickReplenishmentRuntimeFromPool(options: {
 	startIndex?: number;
 	getBootProxyPool: () => Promise<WorkerBootProxyRuntime[]>;
 }): Promise<{ runtime: WorkerAccountRuntime; selectedIndex: number } | null> {
-	const ordered = options.accounts.filter((account) => !options.excludedAccountIds.has(account.id));
+	const order = normalizeReplenishmentAccountOrder(options.policy.replenishmentAccountOrder);
+	const ordered = orderAccountsForReplenishment(
+		options.accounts.filter((account) => !options.excludedAccountIds.has(account.id)),
+		order
+	);
 	const offset = ordered.length > 0 ? Math.max(0, options.startIndex ?? 0) % ordered.length : 0;
 	const candidates = [...ordered.slice(offset), ...ordered.slice(0, offset)];
+	const missingOrderTime =
+		order !== 'pool_added_at' &&
+		candidates.some((account) =>
+			order === 'subscription_enabled_at' ? !account.subscriptionEnabledAt : !account.azureRegisteredAt
+		);
 	await insertWorkflowLog(
 		options.policy.id,
 		'account_pool',
 		candidates.length > 0 ? 'success' : 'warning',
-		`本轮可按添加顺序选择的候选补机账号 ${candidates.length} 个`
+		`本轮可按${REPLENISHMENT_ACCOUNT_ORDER_LABELS[order]}选择的候选补机账号 ${candidates.length} 个`
 	);
+	if (missingOrderTime) {
+		await insertWorkflowLog(
+			options.policy.id,
+			'account_pool',
+			'info',
+			`部分账号未记录${REPLENISHMENT_ACCOUNT_ORDER_LABELS[order]}，这些账号已自动回退按加入 Azure 号池时间排序`
+		);
+	}
 
 	for (const candidate of candidates) {
 		try {
@@ -554,7 +605,7 @@ async function pickReplenishmentRuntimeFromPool(options: {
 				options.policy.id,
 				'account_pool',
 				usable ? 'success' : 'warning',
-				`顺序候选补机账号 ${runtime.account.name} 订阅状态 ${status.state}${usable ? '，已选用' : '，跳过'}`
+				`${REPLENISHMENT_ACCOUNT_ORDER_LABELS[order]}候选补机账号 ${runtime.account.name} 订阅状态 ${status.state}${usable ? '，已选用' : '，跳过'}`
 			);
 			if (usable) {
 				const selectedIndex = ordered.findIndex((account) => account.id === runtime.account.id);
@@ -578,6 +629,55 @@ async function logCreateProgress(policyId: number, event: CreateVmProgressEvent)
 			? `: ${event.detail.error.trim()}`
 			: '';
 	await insertWorkflowLog(policyId, `create:${event.step}`, event.status, `${event.message}${detailError}`);
+}
+
+async function notifyIpBrushMiss(policy: WorkflowPolicy, vmName: string, event: CreateVmProgressEvent) {
+	if (event.step !== 'public-ipv4') return;
+	if (event.detail?.brushRecordOnly !== true || event.detail?.matched !== false) return;
+	const ipv4 = String(event.detail?.ip ?? '').trim();
+	const targetPrefix = String(event.detail?.targetPrefix ?? replenishmentIpPrefix(policy)).trim();
+	if (!ipv4 || !targetPrefix || ipv4.startsWith(targetPrefix)) return;
+
+	try {
+		const settings = await findNotificationSettingsByUser(policy.userId);
+		const credentials = getTelegramCredentials(settings);
+		if (!credentials) return;
+		await sendTelegramMessageToTargets({
+			token: credentials.token,
+			chatIds: credentials.chatIds,
+			text: buildIpBrushMissMessage({
+				policyName: policy.name,
+				vmName,
+				ipv4,
+				targetPrefix,
+				attempt: Number(event.detail?.attempt ?? 0) || null,
+				maxAttempts: Number(event.detail?.maxAttempts ?? 0) || null,
+				kept: event.detail?.kept === true
+			})
+		});
+		await insertWorkflowLog(
+			policy.id,
+			'telegram_notify',
+			'success',
+			`刷 IP 未命中通知已发送到 Telegram: ${ipv4} 未命中 ${targetPrefix}`
+		);
+	} catch (err) {
+		await insertWorkflowLog(
+			policy.id,
+			'telegram_notify',
+			'failed',
+			`Telegram 刷 IP 未命中通知发送失败: ${errorMessage(err)}`
+		);
+	}
+}
+
+async function logReplenishmentCreateProgress(
+	policy: WorkflowPolicy,
+	vmName: string,
+	event: CreateVmProgressEvent
+) {
+	await logCreateProgress(policy.id, event);
+	await notifyIpBrushMiss(policy, vmName, event);
 }
 
 async function cleanupFailedReplenishmentResourceGroup(
@@ -738,6 +838,37 @@ async function syncWorkflowDns(options: {
 				syncResult.updated.join(',') || '-'
 			}`
 		);
+		try {
+			const settings = await findNotificationSettingsByUser(options.policy.userId);
+			const credentials = getTelegramCredentials(settings);
+			if (credentials) {
+				await sendTelegramMessageToTargets({
+					token: credentials.token,
+					chatIds: credentials.chatIds,
+					text: buildDnsSyncMessage({
+						policyName: options.policy.name,
+						fqdn: syncResult.fqdn,
+						ipv4: syncResult.lastIpv4,
+						ipv6: syncResult.lastIpv6,
+						created: syncResult.created,
+						updated: syncResult.updated
+					})
+				});
+				await insertWorkflowLog(
+					options.policy.id,
+					'telegram_notify',
+					'success',
+					'DNS 同步成功通知已发送到 Telegram'
+				);
+			}
+		} catch (notifyErr) {
+			await insertWorkflowLog(
+				options.policy.id,
+				'telegram_notify',
+				'failed',
+				`Telegram DNS 同步通知发送失败: ${errorMessage(notifyErr)}`
+			);
+		}
 	} catch (err) {
 		await insertWorkflowLog(
 			options.policy.id,
@@ -1039,11 +1170,12 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 
 			try {
 				const accounts = await listAccountsByUser(policy.userId);
+				const accountOrder = normalizeReplenishmentAccountOrder(policy.replenishmentAccountOrder);
 				await insertWorkflowLog(
 					policy.id,
 					'account_pool',
 					accounts.length > 0 ? 'success' : 'warning',
-					`Azure 号池当前共有 ${accounts.length} 个账号，自动补机会按添加顺序逐个检测，选中第一个正常订阅账号`
+					`Azure 号池当前共有 ${accounts.length} 个账号，自动补机会按${REPLENISHMENT_ACCOUNT_ORDER_LABELS[accountOrder]}逐个检测，选中第一个正常订阅账号`
 				);
 				let bootProxyPoolPromise: Promise<WorkerBootProxyRuntime[]> | null = null;
 				const getBootProxyPool = () => {
@@ -1060,7 +1192,7 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 						policy.id,
 						'auto_create',
 						'running',
-						`准备创建第 ${i + 1}/${deficit} 台补机，按账号添加顺序选择可用号池账号`
+						`准备创建第 ${i + 1}/${deficit} 台补机，按${REPLENISHMENT_ACCOUNT_ORDER_LABELS[accountOrder]}选择可用号池账号`
 					);
 					const selected = await pickReplenishmentRuntimeFromPool({
 						policy,
@@ -1105,7 +1237,7 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 							customData: userdata,
 							ipPrefix,
 							ipBrushMaxAttempts,
-							progress: (event) => logCreateProgress(policy.id, event)
+							progress: (event) => logReplenishmentCreateProgress(policy, vmName, event)
 						});
 						await insertWorkflowLog(
 							policy.id,

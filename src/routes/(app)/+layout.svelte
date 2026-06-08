@@ -2,11 +2,14 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { api } from '$lib/api';
+	import { createTranslator, languages, normalizeLanguage, type LanguageCode } from '$lib/i18n';
 	import { onMount } from 'svelte';
 
 	let { children } = $props();
 	let email = $state('');
 	let isAdmin = $state(false);
+	let language = $state<LanguageCode>('zh');
+	let t = $derived(createTranslator(language));
 
 	type CurrentUser = {
 		id: number;
@@ -17,18 +20,24 @@
 	};
 
 	const baseNav = [
-		{ href: '/vms', label: 'VM 管理' },
-		{ href: '/accounts', label: 'Azure 号池' },
-		{ href: '/resources', label: '资源浏览' },
-		{ href: '/proxies', label: '代理配置' },
-		{ href: '/dns', label: 'DNS 管理' },
-		{ href: '/workflows', label: '自动补机' },
-		{ href: '/notifications', label: '通知设置' },
-		{ href: '/logs', label: '执行日志' }
+		{ href: '/vms', labelKey: 'nav.vms' },
+		{ href: '/accounts', labelKey: 'nav.accounts' },
+		{ href: '/resources', labelKey: 'nav.resources' },
+		{ href: '/proxies', labelKey: 'nav.proxies' },
+		{ href: '/dns', labelKey: 'nav.dns' },
+		{ href: '/workflows', labelKey: 'nav.workflows' },
+		{ href: '/notifications', labelKey: 'nav.notifications' },
+		{ href: '/logs', labelKey: 'nav.logs' },
+		{ href: '/security', labelKey: 'nav.security' }
 	];
 	const nav = $derived(
-		isAdmin ? [...baseNav, { href: '/admin', label: '管理员后台' }] : baseNav
+		isAdmin ? [...baseNav, { href: '/admin', labelKey: 'nav.admin' }] : baseNav
 	);
+
+	function setLanguage(value: string) {
+		language = normalizeLanguage(value);
+		localStorage.setItem('language', language);
+	}
 
 	async function loadCurrentUser() {
 		try {
@@ -51,6 +60,7 @@
 		}
 		email = localStorage.getItem('email') ?? '';
 		isAdmin = localStorage.getItem('is_admin') === 'true';
+		language = normalizeLanguage(localStorage.getItem('language'));
 		void loadCurrentUser();
 	});
 
@@ -76,17 +86,28 @@
 		<nav class="space-y-1">
 			{#each nav as item}
 				<a class="nav-item {$page.url.pathname === item.href ? 'active' : ''}" href={item.href}>
-					{item.label}
+					{t(item.labelKey)}
 				</a>
 			{/each}
 		</nav>
-		<button class="btn-secondary mt-8 w-full" onclick={logout}>退出登录</button>
+		<label class="mt-8 block text-xs text-muted" for="panel-language">{t('language.label')}</label>
+		<select
+			id="panel-language"
+			class="input mt-1"
+			value={language}
+			onchange={(event) => setLanguage(event.currentTarget.value)}
+		>
+			{#each languages as option}
+				<option value={option.code}>{option.label}</option>
+			{/each}
+		</select>
+		<button class="btn-secondary mt-3 w-full" onclick={logout}>{t('nav.logout')}</button>
 	</aside>
 
 	<main class="flex-1 p-4 md:p-6">
 		<div class="mb-4 flex gap-2 md:hidden">
 			{#each nav as item}
-				<a class="btn-secondary text-xs" href={item.href}>{item.label}</a>
+				<a class="btn-secondary text-xs" href={item.href}>{t(item.labelKey)}</a>
 			{/each}
 		</div>
 		{@render children()}

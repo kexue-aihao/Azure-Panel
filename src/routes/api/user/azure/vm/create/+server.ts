@@ -345,7 +345,8 @@ export const POST: RequestHandler = async (event) => {
 	const requestedVmName = String(body.vm_name ?? '').trim();
 	const resourceGroup = requestedResourceGroup || randomAzureResourceName('rg-azp', 64);
 	const vmName = requestedVmName || randomAzureResourceName('vm-azp', 48);
-	const cleanupResourceGroupOnFailure = !requestedResourceGroup;
+	const cleanupResourceGroupOnFailure =
+		!requestedResourceGroup || body.resource_group_auto_generated === true;
 	const adminPassword = String(body.admin_password ?? '');
 	const dnsBindingId = Number(body.dns_binding_id ?? 0);
 	const proxyMode = String(body.proxy_mode ?? 'account');

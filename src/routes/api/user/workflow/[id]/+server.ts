@@ -5,6 +5,13 @@ import { deleteWorkflow, findWorkflowByUser, updateWorkflow } from '$lib/server/
 import { fail, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
+function normalizeAccountOrder(value: unknown) {
+	const raw = String(value ?? '').trim();
+	return ['pool_added_at', 'subscription_enabled_at', 'azure_registered_at'].includes(raw)
+		? raw
+		: 'pool_added_at';
+}
+
 export const PUT: RequestHandler = async (event) => {
 	const user = await requireUser(event);
 	const policyId = Number(event.params.id);
@@ -39,11 +46,14 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.ip_prefix !== undefined) updates.ipPrefix = String(body.ip_prefix);
 	if (body.ip_brush_max_attempts !== undefined)
 		updates.ipBrushMaxAttempts = Number(body.ip_brush_max_attempts) || 30;
-	if (body.check_interval_seconds !== undefined) updates.checkIntervalSeconds = 10;
+	if (body.check_interval_seconds !== undefined) updates.checkIntervalSeconds = 60;
 	if (body.status_check_enabled !== undefined)
 		updates.statusCheckEnabled = Boolean(body.status_check_enabled);
 	if (body.status_trigger_states !== undefined)
 		updates.statusTriggerStates = DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES;
+	if (body.replenishment_account_order !== undefined) {
+		updates.replenishmentAccountOrder = normalizeAccountOrder(body.replenishment_account_order);
+	}
 	if (body.dns_binding_id !== undefined) {
 		const dnsBindingId = Number(body.dns_binding_id) || 0;
 		if (!dnsBindingId) return fail('自动补机策略必须选择 DNS 解析绑定');
@@ -76,6 +86,7 @@ export const PUT: RequestHandler = async (event) => {
 		check_interval_seconds: updated?.checkIntervalSeconds,
 		status_check_enabled: updated?.statusCheckEnabled,
 		status_trigger_states: updated?.statusTriggerStates,
+		replenishment_account_order: updated?.replenishmentAccountOrder,
 		dns_binding_id: updated?.dnsBindingId,
 		last_account_status: updated?.lastAccountStatus,
 		last_status_checked_at: updated?.lastStatusCheckedAt,

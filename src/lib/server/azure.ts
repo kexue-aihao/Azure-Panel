@@ -37,6 +37,9 @@ export const DIRECT_PROXY = Symbol('DIRECT_PROXY');
 export type AzureProxySelection = ProxyRuntimeConfig | typeof DIRECT_PROXY | null;
 
 const DEFAULT_CREATE_IP_PREFIX = '85.211';
+const DEFAULT_FIREWALL_ALLOW_ALL_PORT_RANGE = '0-65535';
+const DEFAULT_FIREWALL_ALLOW_ALL_RULE_NAME = 'allow-in-0-to-65535';
+const DEFAULT_FIREWALL_ALLOW_ALL_RULE_PRIORITY = 100;
 export type VmInfo = {
 	name: string;
 	resourceGroup: string;
@@ -201,6 +204,8 @@ export type VmFirewallRuleInput = {
 	priority?: number;
 	direction?: string;
 };
+
+type VmNetworkSecurityGroupRef = { resourceGroup: string; name: string; id: string };
 
 export type AzureClients = {
 	compute: ComputeManagementClient;
@@ -3140,12 +3145,14 @@ function normalizeOpenPorts(value?: string | string[]) {
 	const ports = rawParts
 		.map((part) => String(part).trim())
 		.filter(Boolean);
-	const normalized = ports.length > 0 ? ports : ['*'];
-	const unique: string[] = [];
+	const normalized = ports.length > 0 ? ports : [DEFAULT_FIREWALL_ALLOW_ALL_PORT_RANGE];
+	const unique: string[] = [DEFAULT_FIREWALL_ALLOW_ALL_PORT_RANGE];
 
 	for (const port of normalized) {
 		if (port === '*') {
-			if (!unique.includes(port)) unique.push(port);
+			if (!unique.includes(DEFAULT_FIREWALL_ALLOW_ALL_PORT_RANGE)) {
+				unique.push(DEFAULT_FIREWALL_ALLOW_ALL_PORT_RANGE);
+			}
 			continue;
 		}
 
@@ -3153,19 +3160,19 @@ function normalizeOpenPorts(value?: string | string[]) {
 		if (!range) throw new Error(`端口格式不正确: ${port}`);
 		const start = Number(range[1]);
 		const end = Number(range[2] ?? range[1]);
-		if (start < 1 || start > 65535 || end < 1 || end > 65535 || start > end) {
+		if (start < 0 || start > 65535 || end < 0 || end > 65535 || start > end) {
 			throw new Error(`端口范围不正确: ${port}`);
 		}
 		const normalizedPort = start === end ? String(start) : `${start}-${end}`;
 		if (!unique.includes(normalizedPort)) unique.push(normalizedPort);
 	}
 
-	if (unique.includes('*')) return ['*'];
 	return unique.slice(0, 200);
 }
 
 function securityRuleName(port: string, index: number) {
-	const safePort = port === '*' ? 'all' : port.replace(/-/g, 'to');
+	if (port === DEFAULT_FIREWALL_ALLOW_ALL_PORT_RANGE) return DEFAULT_FIREWALL_ALLOW_ALL_RULE_NAME;
+	const safePort = port === '*' ? 'all' : port.replace(/-/g, '-to-');
 	return `allow-in-${safePort}-${index + 1}`;
 }
 
@@ -3183,7 +3190,7 @@ function normalizeSecurityPortRange(value: string | undefined, fallback = '*') {
 }
 
 function normalizeSecurityRuleName(value: string | undefined, destinationPortRange: string) {
-	const fallback = `allow-in-${destinationPortRange === '*' ? 'all' : destinationPortRange.replace(/-/g, 'to')}`;
+	const fallback = `allow-in-${destinationPortRange === '*' ? 'all' : destinationPortRange.replace(/-/g, '-to-')}`;
 	const clean = sanitizeResourceName(String(value ?? '').trim() || fallback).slice(0, 80);
 	return clean || fallback;
 }
@@ -4778,7 +4785,7 @@ async function ensureVmNetworkSecurityGroup(
 	resourceGroup: string,
 	vmName: string,
 	options: { createIfMissing?: boolean; progress?: CreateVmProgressReporter } = {}
-): Promise<{ resourceGroup: string; name: string; id: string } | null> {
+): Promise<VmNetworkSecurityGroupRef | null> {
 	const { vmLocation, nicResourceGroup, nicName, nic } = await getPrimaryNicAndIPv4Config(
 		clients,
 		resourceGroup,
@@ -4838,6 +4845,102 @@ async function ensureVmNetworkSecurityGroup(
 		name: nsgName,
 		id: nsg.id
 	};
+}
+
+async function listNetworkSecurityRules(
+	clients: AzureClients,
+	nsg: VmNetworkSecurityGroupRef
+): Promise<SecurityRule[]> {
+	const rules: SecurityRule[] = [];
+	for await (const rule of clients.network.securityRules.list(nsg.resourceGroup, nsg.name)) {
+		rules.push(rule);
+	}
+	return rules;
+}
+
+function nextAvailableSecurityPriority(rules: SecurityRule[], preferred = DEFAULT_FIREWALL_ALLOW_ALL_RULE_PRIORITY) {
+	const used = new Set(
+		rules
+			.map((rule) => Math.floor(Number(rule.priority ?? 0)))
+			.filter((priority) => priority >= 100 && priority <= 4096)
+	);
+	if (!used.has(preferred)) return preferred;
+	for (let priority = 101; priority <= 4096; priority++) {
+		if (!used.has(priority)) return priority;
+	}
+	throw new Error('NSG 已无可用安全规则优先级，无法同步全端口放行策略');
+}
+
+async function ensureVmAllowAllInboundFirewall(
+	clients: AzureClients,
+	resourceGroup: string,
+	vmName: string,
+	progress?: CreateVmProgressReporter,
+	stepPrefix = 'firewall-allow-all'
+): Promise<VmFirewallRuleInfo | null> {
+	await reportCreateVmProgress(progress, stepPrefix, 'running', '同步 VM 防火墙全端口放行策略', {
+		vmName,
+		destinationPortRange: DEFAULT_FIREWALL_ALLOW_ALL_PORT_RANGE
+	});
+	const nsg = await ensureVmNetworkSecurityGroup(clients, resourceGroup, vmName, {
+		createIfMissing: true,
+		progress
+	});
+	if (!nsg) return null;
+
+	const rules = await listNetworkSecurityRules(clients, nsg);
+	const existingAllowAll = rules.find((rule) => rule.name === DEFAULT_FIREWALL_ALLOW_ALL_RULE_NAME);
+	const ruleName = existingAllowAll?.name || DEFAULT_FIREWALL_ALLOW_ALL_RULE_NAME;
+	const priority = existingAllowAll?.priority ?? nextAvailableSecurityPriority(rules);
+	const destinationPortRange = DEFAULT_FIREWALL_ALLOW_ALL_PORT_RANGE;
+
+	await reportCreateVmProgress(progress, `${stepPrefix}-rule`, 'running', '下发 0-65535 全端口入站放行规则', {
+		networkSecurityGroup: nsg.name,
+		ruleName,
+		destinationPortRange,
+		priority
+	});
+	const poller = await clients.network.securityRules.beginCreateOrUpdate(
+		nsg.resourceGroup,
+		nsg.name,
+		ruleName,
+		{
+			name: ruleName,
+			description: 'Azure-Panel default allow inbound traffic to all ports 0-65535',
+			protocol: '*',
+			sourcePortRange: '*',
+			destinationPortRange,
+			sourceAddressPrefix: '*',
+			destinationAddressPrefix: '*',
+			access: 'Allow',
+			priority,
+			direction: 'Inbound'
+		},
+		{ updateIntervalInMs: 2000 }
+	);
+	let polls = 0;
+	while (!poller.isDone()) {
+		polls += 1;
+		await reportCreateVmProgress(progress, `${stepPrefix}-polling`, 'running', `全端口防火墙规则同步中，轮询第 ${polls} 次`, {
+			networkSecurityGroup: nsg.name,
+			ruleName,
+			status: poller.getOperationState().status,
+			polls
+		});
+		await poller.poll();
+		if (!poller.isDone()) await sleep(2000);
+	}
+	const state = poller.getOperationState();
+	if (state.error) throw state.error;
+	const rule = await clients.network.securityRules.get(nsg.resourceGroup, nsg.name, ruleName);
+	await reportCreateVmProgress(progress, stepPrefix, 'success', 'VM 防火墙已放行 0-65535 全部入站端口', {
+		networkSecurityGroup: nsg.name,
+		ruleName,
+		destinationPortRange: rule.destinationPortRange ?? destinationPortRange,
+		priority,
+		polls
+	});
+	return toVmFirewallRuleInfo(rule);
 }
 
 export async function listVmFirewallRules(
@@ -5556,14 +5659,25 @@ export async function replaceVmPublicIPv4(
 		throw new Error(`read replaced IPv4 failed (replace-ip-complete): ${message}`);
 	});
 	const createdPublicIPv4 = publicIpAddressValue(created);
+	const finalPublicIPv4 = fresh.publicIPv4 || createdPublicIPv4;
+	try {
+		await ensureVmAllowAllInboundFirewall(clients, resourceGroup, vmName, progress, 'replace-ip-firewall');
+	} catch (err) {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(progress, 'replace-ip-firewall', 'error', 'IPv4 changed, but firewall allow-all sync failed', {
+			publicIPv4: finalPublicIPv4,
+			error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
+		});
+		throw new Error(`IPv4 changed to ${finalPublicIPv4 || '-'}, but firewall allow-all sync failed: ${message}`);
+	}
 	await reportCreateVmProgress(progress, 'replace-ip-complete', 'success', 'IPv4 更换完成', {
 		oldPublicIPv4,
-		publicIPv4: fresh.publicIPv4 || createdPublicIPv4
+		publicIPv4: finalPublicIPv4
 	});
 	return {
 		vmName,
 		resourceGroup,
-		publicIPv4: fresh.publicIPv4 || createdPublicIPv4,
+		publicIPv4: finalPublicIPv4,
 		oldPublicIPv4,
 		publicIpName: fresh.publicIpName || parseResourceName(created.id)
 	};
@@ -5752,8 +5866,21 @@ export async function brushVmPublicIPv4Prefix(
 		throw new Error(`read brushed IPv4 failed (brush-ip-complete): ${message}`);
 	});
 	const createdPublicIPv4 = publicIpAddressValue(created.pip);
+	const finalPublicIPv4 = fresh.publicIPv4 || createdPublicIPv4;
+	try {
+		await ensureVmAllowAllInboundFirewall(clients, options.resourceGroup, options.vmName, options.progress, 'brush-ip-firewall');
+	} catch (err) {
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(options.progress, 'brush-ip-firewall', 'error', 'IPv4 changed, but firewall allow-all sync failed', {
+			publicIPv4: finalPublicIPv4,
+			targetPrefix,
+			matched: created.matched,
+			error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
+		});
+		throw new Error(`IPv4 changed to ${finalPublicIPv4 || '-'}, but firewall allow-all sync failed: ${message}`);
+	}
 	await reportCreateVmProgress(options.progress, 'brush-ip-complete', 'success', '刷 IPv4 段完成', {
-		publicIPv4: fresh.publicIPv4 || createdPublicIPv4,
+		publicIPv4: finalPublicIPv4,
 		targetPrefix,
 		attempts: created.attempts,
 		matched: created.matched
@@ -5761,7 +5888,7 @@ export async function brushVmPublicIPv4Prefix(
 	return {
 		vmName: options.vmName,
 		resourceGroup: options.resourceGroup,
-		publicIPv4: fresh.publicIPv4 || createdPublicIPv4,
+		publicIPv4: finalPublicIPv4,
 		oldPublicIPv4,
 		publicIpName: fresh.publicIpName || parseResourceName(created.pip.id),
 		targetPrefix,

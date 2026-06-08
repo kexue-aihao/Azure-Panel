@@ -97,6 +97,16 @@ export function maskIpAddress(ip: string | null | undefined) {
 	return maskMiddle(raw, 3, 3);
 }
 
+export function maskIpBackHalf(ip: string | null | undefined) {
+	const raw = trimString(ip);
+	if (!raw) return '-';
+	if (/^\d{1,3}(\.\d{1,3}){3}$/.test(raw)) {
+		const parts = raw.split('.');
+		return `${parts[0]}.${parts[1]}.*.*`;
+	}
+	return maskIpAddress(raw);
+}
+
 export function publicTelegramSettings(
 	settings: NotificationSettings | null
 ): TelegramPublicSettings | null {
@@ -296,8 +306,53 @@ export function buildReplenishmentMessage(input: {
 		`VM: ${maskMiddle(input.vmName, 4, 4)}`,
 		`资源组: ${maskMiddle(input.resourceGroup, 4, 4)}`,
 		`规格/区域: ${input.vmSize} / ${input.location}`,
-		`IPv4: ${maskIpAddress(input.publicIPv4)}`,
+		`IPv4: ${maskIpBackHalf(input.publicIPv4)}`,
 		`IPv6: ${maskIpAddress(input.publicIPv6)}`,
+		`时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
+	].join('\n');
+}
+
+export function buildIpBrushMissMessage(input: {
+	policyName: string;
+	vmName: string;
+	ipv4: string;
+	targetPrefix: string;
+	attempt?: number | null;
+	maxAttempts?: number | null;
+	kept?: boolean | null;
+}) {
+	const attemptText =
+		input.attempt && input.maxAttempts
+			? `${Math.floor(input.attempt)}/${Math.floor(input.maxAttempts)}`
+			: '-';
+	return [
+		'Azure Panel 自动补机刷 IP 未命中',
+		`策略: ${maskMiddle(input.policyName, 2, 2)}`,
+		`VM: ${maskMiddle(input.vmName, 4, 4)}`,
+		`目标前缀: ${input.targetPrefix || '85.211'}`,
+		`刷到 IPv4: ${input.ipv4}`,
+		`尝试: ${attemptText}`,
+		`处理: ${input.kept ? '达到最大次数，保留该 IP 继续创建' : '已删除该临时 IP 并继续尝试'}`,
+		`时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
+	].join('\n');
+}
+
+export function buildDnsSyncMessage(input: {
+	policyName: string;
+	fqdn: string;
+	ipv4?: string | null;
+	ipv6?: string | null;
+	created?: string[];
+	updated?: string[];
+}) {
+	return [
+		'Azure Panel DNS 同步成功',
+		`策略: ${maskMiddle(input.policyName, 2, 2)}`,
+		`域名: ${input.fqdn}`,
+		`IPv4: ${maskIpBackHalf(input.ipv4)}`,
+		`IPv6: ${maskIpAddress(input.ipv6)}`,
+		`新增: ${(input.created ?? []).join(',') || '-'}`,
+		`更新: ${(input.updated ?? []).join(',') || '-'}`,
 		`时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
 	].join('\n');
 }

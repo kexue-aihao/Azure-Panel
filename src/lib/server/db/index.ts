@@ -38,6 +38,8 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		password_hash varchar(255) NOT NULL,
 		role varchar(16) NOT NULL DEFAULT 'user',
 		disabled tinyint(1) NOT NULL DEFAULT 0,
+		totp_enabled tinyint(1) NOT NULL DEFAULT 0,
+		totp_secret_encrypted text,
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
 		UNIQUE KEY users_email_unique (email),
@@ -72,6 +74,8 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		vm_region_cache text,
 		vm_image_cache text,
 		vm_provider_cache text,
+		subscription_enabled_at timestamp NULL DEFAULT NULL,
+		azure_registered_at timestamp NULL DEFAULT NULL,
 		remark varchar(255) DEFAULT '',
 		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (id),
@@ -169,9 +173,10 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		enable_ipv6 tinyint(1) NOT NULL DEFAULT 0,
 		ip_prefix varchar(32) NOT NULL DEFAULT '85.211',
 		ip_brush_max_attempts int NOT NULL DEFAULT 30,
-		check_interval_seconds int NOT NULL DEFAULT 10,
+		check_interval_seconds int NOT NULL DEFAULT 60,
 		status_check_enabled tinyint(1) NOT NULL DEFAULT 1,
 		status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled',
+		replenishment_account_order varchar(32) NOT NULL DEFAULT 'pool_added_at',
 		dns_binding_id int NOT NULL DEFAULT 0,
 		last_account_status varchar(64) NOT NULL DEFAULT '',
 		last_status_checked_at timestamp NULL DEFAULT NULL,
@@ -523,7 +528,16 @@ function countFromRows(rows: RowDataPacket[]) {
 }
 
 const MYSQL_SCHEMA_READY_COLUMNS: Record<string, string[]> = {
-	users: ['id', 'email', 'password_hash', 'role', 'disabled', 'created_at'],
+	users: [
+		'id',
+		'email',
+		'password_hash',
+		'role',
+		'disabled',
+		'totp_enabled',
+		'totp_secret_encrypted',
+		'created_at'
+	],
 	proxy_profiles: [
 		'id',
 		'user_id',
@@ -550,6 +564,8 @@ const MYSQL_SCHEMA_READY_COLUMNS: Record<string, string[]> = {
 		'vm_region_cache',
 		'vm_image_cache',
 		'vm_provider_cache',
+		'subscription_enabled_at',
+		'azure_registered_at',
 		'remark',
 		'created_at'
 	],
@@ -635,6 +651,7 @@ const MYSQL_SCHEMA_READY_COLUMNS: Record<string, string[]> = {
 		'check_interval_seconds',
 		'status_check_enabled',
 		'status_trigger_states',
+		'replenishment_account_order',
 		'dns_binding_id',
 		'last_account_status',
 		'last_status_checked_at',
@@ -854,6 +871,18 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 		'disabled',
 		'disabled tinyint(1) NOT NULL DEFAULT 0'
 	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'users',
+		'totp_enabled',
+		'totp_enabled tinyint(1) NOT NULL DEFAULT 0'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'users',
+		'totp_secret_encrypted',
+		'totp_secret_encrypted text NULL'
+	);
 	await mysqlInitQuery(
 		pool,
 		"UPDATE users SET role = 'user' WHERE role IS NULL OR role = ''",
@@ -865,6 +894,12 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 		'UPDATE users SET disabled = 0 WHERE disabled IS NULL',
 		undefined,
 		'mysql-schema:users:normalize-disabled'
+	);
+	await mysqlInitQuery(
+		pool,
+		'UPDATE users SET totp_enabled = 0 WHERE totp_enabled IS NULL',
+		undefined,
+		'mysql-schema:users:normalize-totp-enabled'
 	);
 	await createMysqlIndexIfMissing(
 		pool,
@@ -909,6 +944,18 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 		'azure_accounts',
 		'vm_provider_cache',
 		'vm_provider_cache text NULL'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'azure_accounts',
+		'subscription_enabled_at',
+		'subscription_enabled_at timestamp NULL DEFAULT NULL'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'azure_accounts',
+		'azure_registered_at',
+		'azure_registered_at timestamp NULL DEFAULT NULL'
 	);
 	await createMysqlIndexIfMissing(
 		pool,
@@ -977,7 +1024,7 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 		pool,
 		'workflow_policies',
 		'check_interval_seconds',
-		'check_interval_seconds int NOT NULL DEFAULT 10'
+		'check_interval_seconds int NOT NULL DEFAULT 60'
 	);
 	const hadReplenishTargetCount = await mysqlColumnExists(
 		pool,
@@ -1036,9 +1083,21 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 	);
 	await mysqlInitQuery(
 		pool,
-		'UPDATE workflow_policies SET check_interval_seconds = 10 WHERE check_interval_seconds <> 10',
+		'UPDATE workflow_policies SET check_interval_seconds = 60 WHERE check_interval_seconds <> 60',
 		undefined,
 		'mysql-schema:workflow-policies:normalize-check-interval'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'replenishment_account_order',
+		"replenishment_account_order varchar(32) NOT NULL DEFAULT 'pool_added_at'"
+	);
+	await mysqlInitQuery(
+		pool,
+		"UPDATE workflow_policies SET replenishment_account_order = 'pool_added_at' WHERE replenishment_account_order IS NULL OR replenishment_account_order NOT IN ('pool_added_at','subscription_enabled_at','azure_registered_at')",
+		undefined,
+		'mysql-schema:workflow-policies:normalize-account-order'
 	);
 	await addMysqlColumnIfMissing(
 		pool,
@@ -1170,6 +1229,8 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 			password_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'user',
 			disabled INTEGER NOT NULL DEFAULT 0,
+			totp_enabled INTEGER NOT NULL DEFAULT 0,
+			totp_secret_encrypted TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS proxy_profiles (
@@ -1198,6 +1259,8 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 			vm_region_cache TEXT DEFAULT '',
 			vm_image_cache TEXT DEFAULT '',
 			vm_provider_cache TEXT DEFAULT '',
+			subscription_enabled_at INTEGER,
+			azure_registered_at INTEGER,
 			remark TEXT DEFAULT '',
 			created_at INTEGER NOT NULL
 		);
@@ -1280,9 +1343,10 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 			enable_ipv6 INTEGER NOT NULL DEFAULT 0,
 			ip_prefix TEXT NOT NULL DEFAULT '85.211',
 			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30,
-			check_interval_seconds INTEGER NOT NULL DEFAULT 10,
+			check_interval_seconds INTEGER NOT NULL DEFAULT 60,
 			status_check_enabled INTEGER NOT NULL DEFAULT 1,
 			status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned,disabled',
+			replenishment_account_order TEXT NOT NULL DEFAULT 'pool_added_at',
 			dns_binding_id INTEGER NOT NULL DEFAULT 0,
 			last_account_status TEXT NOT NULL DEFAULT '',
 			last_status_checked_at INTEGER,
@@ -1327,8 +1391,15 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	if (!userColumns.some((column) => column.name === 'disabled')) {
 		sqlite.exec('ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0');
 	}
+	if (!userColumns.some((column) => column.name === 'totp_enabled')) {
+		sqlite.exec('ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0');
+	}
+	if (!userColumns.some((column) => column.name === 'totp_secret_encrypted')) {
+		sqlite.exec("ALTER TABLE users ADD COLUMN totp_secret_encrypted TEXT NOT NULL DEFAULT ''");
+	}
 	sqlite.exec("UPDATE users SET role = 'user' WHERE role IS NULL OR role = ''");
 	sqlite.exec('UPDATE users SET disabled = 0 WHERE disabled IS NULL');
+	sqlite.exec('UPDATE users SET totp_enabled = 0 WHERE totp_enabled IS NULL');
 	ensureSqliteAdminUsers(sqlite);
 
 	const accountColumns = sqlite.prepare('PRAGMA table_info(azure_accounts)').all() as Array<{
@@ -1348,6 +1419,12 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	}
 	if (!accountColumns.some((column) => column.name === 'vm_provider_cache')) {
 		sqlite.exec("ALTER TABLE azure_accounts ADD COLUMN vm_provider_cache TEXT DEFAULT ''");
+	}
+	if (!accountColumns.some((column) => column.name === 'subscription_enabled_at')) {
+		sqlite.exec('ALTER TABLE azure_accounts ADD COLUMN subscription_enabled_at INTEGER');
+	}
+	if (!accountColumns.some((column) => column.name === 'azure_registered_at')) {
+		sqlite.exec('ALTER TABLE azure_accounts ADD COLUMN azure_registered_at INTEGER');
 	}
 	const proxyColumns = sqlite.prepare('PRAGMA table_info(proxy_profiles)').all() as Array<{
 		name: string;
@@ -1386,7 +1463,7 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	}
 	if (!workflowColumns.some((column) => column.name === 'check_interval_seconds')) {
 		sqlite.exec(
-			'ALTER TABLE workflow_policies ADD COLUMN check_interval_seconds INTEGER NOT NULL DEFAULT 10'
+			'ALTER TABLE workflow_policies ADD COLUMN check_interval_seconds INTEGER NOT NULL DEFAULT 60'
 		);
 	}
 	if (!workflowColumns.some((column) => column.name === 'replenish_target_count')) {
@@ -1413,7 +1490,15 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	);
 	sqlite.exec("UPDATE workflow_policies SET ip_prefix = '85.211' WHERE ip_prefix IS NULL OR trim(ip_prefix) = ''");
 	sqlite.exec('UPDATE workflow_policies SET ip_brush_max_attempts = 30 WHERE ip_brush_max_attempts IS NULL OR ip_brush_max_attempts < 1');
-	sqlite.exec('UPDATE workflow_policies SET check_interval_seconds = 10 WHERE check_interval_seconds <> 10');
+	sqlite.exec('UPDATE workflow_policies SET check_interval_seconds = 60 WHERE check_interval_seconds <> 60');
+	if (!workflowColumns.some((column) => column.name === 'replenishment_account_order')) {
+		sqlite.exec(
+			"ALTER TABLE workflow_policies ADD COLUMN replenishment_account_order TEXT NOT NULL DEFAULT 'pool_added_at'"
+		);
+	}
+	sqlite.exec(
+		"UPDATE workflow_policies SET replenishment_account_order = 'pool_added_at' WHERE replenishment_account_order IS NULL OR replenishment_account_order NOT IN ('pool_added_at','subscription_enabled_at','azure_registered_at')"
+	);
 	if (!workflowColumns.some((column) => column.name === 'dns_binding_id')) {
 		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN dns_binding_id INTEGER NOT NULL DEFAULT 0');
 	}

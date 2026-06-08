@@ -29,6 +29,7 @@ export const GET: RequestHandler = async (event) => {
 			check_interval_seconds: p.checkIntervalSeconds,
 			status_check_enabled: p.statusCheckEnabled,
 			status_trigger_states: p.statusTriggerStates,
+			replenishment_account_order: p.replenishmentAccountOrder,
 			dns_binding_id: p.dnsBindingId,
 			last_account_status: p.lastAccountStatus,
 			last_status_checked_at: p.lastStatusCheckedAt,

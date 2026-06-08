@@ -164,6 +164,34 @@ export async function updateUserAdminFields(
 	);
 }
 
+export async function updateUserSecurityFields(
+	userId: number,
+	values: { totpEnabled?: boolean; totpSecretEncrypted?: string }
+): Promise<User | null> {
+	const updateValues: Partial<Pick<User, 'totpEnabled' | 'totpSecretEncrypted'>> = {};
+	if (values.totpEnabled !== undefined) updateValues.totpEnabled = values.totpEnabled;
+	if (values.totpSecretEncrypted !== undefined) {
+		updateValues.totpSecretEncrypted = values.totpSecretEncrypted;
+	}
+
+	if (Object.keys(updateValues).length === 0) return findUserById(userId);
+
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		await db.update(mysqlUsers).set(updateValues).where(eq(mysqlUsers.id, userId));
+		return findUserById(userId);
+	}
+
+	return (
+		getSqliteDb()
+			.update(sqliteUsers)
+			.set(updateValues)
+			.where(eq(sqliteUsers.id, userId))
+			.returning()
+			.get() ?? null
+	);
+}
+
 export async function deleteUserAndOwnedData(userId: number): Promise<void> {
 	if (getDriver() === 'mysql') {
 		const { pool } = getMysqlDb();
@@ -483,12 +511,16 @@ export async function insertAccount(
 		| 'vmRegionCache'
 		| 'vmImageCache'
 		| 'vmProviderCache'
+		| 'subscriptionEnabledAt'
+		| 'azureRegisteredAt'
 	> & {
 		proxyProfileId?: number | null;
 		proxyUrlEncrypted?: string | null;
 		vmRegionCache?: string | null;
 		vmImageCache?: string | null;
 		vmProviderCache?: string | null;
+		subscriptionEnabledAt?: Date | null;
+		azureRegisteredAt?: Date | null;
 	}
 ): Promise<AzureAccount> {
 	if (getDriver() === 'mysql') {

@@ -57,10 +57,17 @@
 		check_interval_seconds: number;
 		status_check_enabled: boolean;
 		status_trigger_states: string;
+		replenishment_account_order: string;
 		dns_binding_id: number;
 		last_account_status: string;
 		last_status_checked_at: string | null;
 	};
+
+	const accountOrderOptions = [
+		{ value: 'pool_added_at', label: '按加入 Azure 号池时间（默认）' },
+		{ value: 'subscription_enabled_at', label: '按账号订阅启用时间' },
+		{ value: 'azure_registered_at', label: '按 Azure 账号注册时间' }
+	];
 
 	function defaultWorkflowForm() {
 		return {
@@ -82,9 +89,10 @@
 			enable_ipv6: true,
 			ip_prefix: '85.211',
 			ip_brush_max_attempts: 30,
-			check_interval_seconds: 10,
+			check_interval_seconds: 60,
 			status_check_enabled: true,
 			status_trigger_states: 'banned,warning,warned,disabled',
+			replenishment_account_order: 'pool_added_at',
 			dns_binding_id: ''
 		};
 	}
@@ -152,9 +160,10 @@
 			vm_names: vmNames,
 			min_running_count: Number(form.replenish_target_count),
 			replenish_target_count: Number(form.replenish_target_count),
-			check_interval_seconds: 10,
+			check_interval_seconds: 60,
 			dns_binding_id: Number(form.dns_binding_id || 0),
 			status_check_enabled: form.status_check_enabled,
+			replenishment_account_order: form.replenishment_account_order,
 			auto_create: true
 		};
 
@@ -187,9 +196,10 @@
 			enable_ipv6: workflow.enable_ipv6,
 			ip_prefix: workflow.ip_prefix || '85.211',
 			ip_brush_max_attempts: workflow.ip_brush_max_attempts || 30,
-			check_interval_seconds: 10,
+			check_interval_seconds: 60,
 			status_check_enabled: workflow.status_check_enabled,
 			status_trigger_states: workflow.status_trigger_states || 'banned,warning,warned,disabled',
+			replenishment_account_order: workflow.replenishment_account_order || 'pool_added_at',
 			dns_binding_id: workflow.dns_binding_id ? String(workflow.dns_binding_id) : ''
 		};
 		await loadRegions(true);
@@ -520,13 +530,24 @@
 			placeholder="异常时目标补机数量"
 		/>
 		<p class="text-xs text-muted">
-			只有当前触发检测账号的订阅状态为 banned、warning、warned 或 disabled 时才会执行自动补机；补机账号会从 Azure 号池按添加顺序选择正常订阅账号。
+			只有当前触发检测账号的订阅状态为 banned、warning、warned 或 disabled 时才会执行自动补机；补机账号会从 Azure 号池按下方排序方式选择正常订阅账号。
 		</p>
+		<div>
+			<label class="mb-1 block text-xs text-muted" for="workflow-account-order">补机账号使用顺序</label>
+			<select id="workflow-account-order" class="input" bind:value={form.replenishment_account_order}>
+				{#each accountOrderOptions as option}
+					<option value={option.value}>{option.label}</option>
+				{/each}
+			</select>
+			<p class="mt-1 text-xs text-muted">
+				如果账号未记录订阅启用时间或 Azure 注册时间，会自动回退为加入 Azure 号池时间，默认使用加入号池时间。
+			</p>
+		</div>
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={form.auto_start} /> 自动启动已停止的 VM
 		</label>
 		<label class="flex items-center gap-2 text-sm">
-			<input type="checkbox" bind:checked={form.status_check_enabled} /> 每 10 秒检测正在使用账号订阅状态，异常立即触发补机，上一轮补机未完成时跳过本轮
+			<input type="checkbox" bind:checked={form.status_check_enabled} /> 每 60 秒检测正在使用账号订阅状态，异常立即触发补机，上一轮补机未完成时跳过本轮
 		</label>
 		<button class="btn-secondary" type="button" disabled={checkingStatus} onclick={() => void checkAccountStatus()}>
 			{checkingStatus ? '检测中...' : '检测触发账号状态'}
@@ -630,7 +651,7 @@
 			{/each}
 		</select>
 		<p class="rounded-lg border border-border bg-background/70 px-3 py-2 text-xs text-muted">
-			补机触发逻辑固定为每 10 秒检测一次当前正在使用账号的订阅状态；检测到 banned、warning、warned 或 disabled 后立即按账号添加顺序选择号池账号补机；补机会刷 IPv4 前缀 85.211，默认最多 30 次；上一轮补机流程未完成前不会再次触发检测。
+			补机触发逻辑固定为每 60 秒检测一次当前正在使用账号的订阅状态；检测到 banned、warning、warned 或 disabled 后立即按所选顺序选择号池账号补机；补机会刷 IPv4 前缀 85.211，默认最多 30 次；上一轮补机流程未完成前不会再次触发检测。
 		</p>
 		<div class="flex flex-wrap gap-2">
 			<button class="btn-primary" type="submit" disabled={savingWorkflow}>
@@ -675,7 +696,10 @@
 							系统: {workflow.image_reference || '-'}
 						</p>
 						<p class="text-xs text-muted">
-							自动开机: {workflow.auto_start ? '是' : '否'} · 自动补机: 异常立即创建 · 订阅检测 10s · IPv4 前缀 {workflow.ip_prefix || '85.211'} / {workflow.ip_brush_max_attempts || 30} 次
+							自动开机: {workflow.auto_start ? '是' : '否'} · 自动补机: 异常立即创建 · 订阅检测 60s · IPv4 前缀 {workflow.ip_prefix || '85.211'} / {workflow.ip_brush_max_attempts || 30} 次
+						</p>
+						<p class="text-xs text-muted">
+							补机账号顺序: {accountOrderOptions.find((option) => option.value === workflow.replenishment_account_order)?.label || '按加入 Azure 号池时间（默认）'}
 						</p>
 						<p class="text-xs text-muted">
 							状态检测: {workflow.status_check_enabled ? '开启' : '关闭'} · 触发状态: banned / warning / warned / disabled ·
