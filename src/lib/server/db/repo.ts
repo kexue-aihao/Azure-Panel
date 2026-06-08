@@ -108,6 +108,30 @@ export async function createUser(email: string, passwordHash: string): Promise<U
 	return getSqliteDb().insert(sqliteUsers).values({ email, passwordHash, role }).returning().get()!;
 }
 
+export async function createManagedUser(values: {
+	email: string;
+	passwordHash: string;
+	role?: string;
+	disabled?: boolean;
+}): Promise<User> {
+	const insertValues = {
+		email: values.email.trim().toLowerCase(),
+		passwordHash: values.passwordHash,
+		role: normalizeUserRole(values.role),
+		disabled: Boolean(values.disabled)
+	};
+
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const result = await db.insert(mysqlUsers).values(insertValues).$returningId();
+		const id = Number(result[0]?.id);
+		if (!id) throw new Error('Failed to create managed user');
+		return (await findUserById(id))!;
+	}
+
+	return getSqliteDb().insert(sqliteUsers).values(insertValues).returning().get()!;
+}
+
 export async function countAdminUsers(): Promise<number> {
 	if (getDriver() === 'mysql') {
 		const { pool } = getMysqlDb();
@@ -1059,6 +1083,27 @@ export async function upsertSubscriptionNotificationState(
 		.values(insertValues as never)
 		.returning()
 		.get()!;
+}
+
+export async function listSubscriptionNotificationStatesByUser(
+	userId: number
+): Promise<SubscriptionNotificationState[]> {
+	if (getDriver() === 'mysql') {
+		const { db } = getMysqlDb();
+		const rows = await db
+			.select()
+			.from(mysqlSubscriptionNotificationStates)
+			.where(eq(mysqlSubscriptionNotificationStates.userId, userId))
+			.orderBy(desc(mysqlSubscriptionNotificationStates.id));
+		return rows as SubscriptionNotificationState[];
+	}
+
+	return getSqliteDb()
+		.select()
+		.from(sqliteSubscriptionNotificationStates)
+		.where(eq(sqliteSubscriptionNotificationStates.userId, userId))
+		.orderBy(desc(sqliteSubscriptionNotificationStates.id))
+		.all();
 }
 
 export async function listWorkflowsByUser(userId: number): Promise<WorkflowPolicy[]> {

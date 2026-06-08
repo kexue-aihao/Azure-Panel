@@ -43,6 +43,10 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.admin_username !== undefined) updates.adminUsername = String(body.admin_username);
 	if (body.userdata !== undefined) updates.userdataEncrypted = encryptSecret(String(body.userdata));
 	if (body.enable_ipv6 !== undefined) updates.enableIpv6 = Boolean(body.enable_ipv6);
+	if (body.enable_accelerated_networking !== undefined)
+		updates.enableAcceleratedNetworking = Boolean(body.enable_accelerated_networking);
+	if (body.enable_ddos_protection !== undefined)
+		updates.enableDdosProtection = Boolean(body.enable_ddos_protection);
 	if (body.ip_prefix !== undefined) updates.ipPrefix = String(body.ip_prefix);
 	if (body.ip_brush_max_attempts !== undefined)
 		updates.ipBrushMaxAttempts = Number(body.ip_brush_max_attempts) || 30;
@@ -81,6 +85,8 @@ export const PUT: RequestHandler = async (event) => {
 		admin_username: updated?.adminUsername,
 		userdata_configured: Boolean(updated?.userdataEncrypted),
 		enable_ipv6: updated?.enableIpv6,
+		enable_accelerated_networking: updated?.enableAcceleratedNetworking,
+		enable_ddos_protection: updated?.enableDdosProtection,
 		ip_prefix: updated?.ipPrefix,
 		ip_brush_max_attempts: updated?.ipBrushMaxAttempts,
 		check_interval_seconds: updated?.checkIntervalSeconds,

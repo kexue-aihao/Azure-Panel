@@ -171,6 +171,8 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		admin_password_encrypted text NOT NULL,
 		userdata_encrypted text NOT NULL,
 		enable_ipv6 tinyint(1) NOT NULL DEFAULT 0,
+		enable_accelerated_networking tinyint(1) NOT NULL DEFAULT 0,
+		enable_ddos_protection tinyint(1) NOT NULL DEFAULT 0,
 		ip_prefix varchar(32) NOT NULL DEFAULT '85.211',
 		ip_brush_max_attempts int NOT NULL DEFAULT 30,
 		check_interval_seconds int NOT NULL DEFAULT 60,
@@ -646,6 +648,8 @@ const MYSQL_SCHEMA_READY_COLUMNS: Record<string, string[]> = {
 		'admin_password_encrypted',
 		'userdata_encrypted',
 		'enable_ipv6',
+		'enable_accelerated_networking',
+		'enable_ddos_protection',
 		'ip_prefix',
 		'ip_brush_max_attempts',
 		'check_interval_seconds',
@@ -1011,6 +1015,18 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 	await addMysqlColumnIfMissing(
 		pool,
 		'workflow_policies',
+		'enable_accelerated_networking',
+		'enable_accelerated_networking tinyint(1) NOT NULL DEFAULT 0'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
+		'enable_ddos_protection',
+		'enable_ddos_protection tinyint(1) NOT NULL DEFAULT 0'
+	);
+	await addMysqlColumnIfMissing(
+		pool,
+		'workflow_policies',
 		'ip_prefix',
 		"ip_prefix varchar(32) NOT NULL DEFAULT '85.211'"
 	);
@@ -1341,6 +1357,8 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 			admin_password_encrypted TEXT NOT NULL DEFAULT '',
 			userdata_encrypted TEXT NOT NULL DEFAULT '',
 			enable_ipv6 INTEGER NOT NULL DEFAULT 0,
+			enable_accelerated_networking INTEGER NOT NULL DEFAULT 0,
+			enable_ddos_protection INTEGER NOT NULL DEFAULT 0,
 			ip_prefix TEXT NOT NULL DEFAULT '85.211',
 			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30,
 			check_interval_seconds INTEGER NOT NULL DEFAULT 60,
@@ -1452,6 +1470,16 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	}
 	if (!workflowColumns.some((column) => column.name === 'enable_ipv6')) {
 		sqlite.exec('ALTER TABLE workflow_policies ADD COLUMN enable_ipv6 INTEGER NOT NULL DEFAULT 0');
+	}
+	if (!workflowColumns.some((column) => column.name === 'enable_accelerated_networking')) {
+		sqlite.exec(
+			'ALTER TABLE workflow_policies ADD COLUMN enable_accelerated_networking INTEGER NOT NULL DEFAULT 0'
+		);
+	}
+	if (!workflowColumns.some((column) => column.name === 'enable_ddos_protection')) {
+		sqlite.exec(
+			'ALTER TABLE workflow_policies ADD COLUMN enable_ddos_protection INTEGER NOT NULL DEFAULT 0'
+		);
 	}
 	if (!workflowColumns.some((column) => column.name === 'ip_prefix')) {
 		sqlite.exec("ALTER TABLE workflow_policies ADD COLUMN ip_prefix TEXT NOT NULL DEFAULT '85.211'");

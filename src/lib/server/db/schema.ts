@@ -165,6 +165,12 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	adminPasswordEncrypted: text('admin_password_encrypted').notNull().default(''),
 	userdataEncrypted: text('userdata_encrypted').notNull().default(''),
 	enableIpv6: integer('enable_ipv6', { mode: 'boolean' }).notNull().default(false),
+	enableAcceleratedNetworking: integer('enable_accelerated_networking', { mode: 'boolean' })
+		.notNull()
+		.default(false),
+	enableDdosProtection: integer('enable_ddos_protection', { mode: 'boolean' })
+		.notNull()
+		.default(false),
 	ipPrefix: text('ip_prefix').notNull().default('85.211'),
 	ipBrushMaxAttempts: integer('ip_brush_max_attempts').notNull().default(30),
 	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(60),

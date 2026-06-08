@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
+	import { createTranslator, normalizeLanguage, type LanguageCode } from '$lib/i18n';
 
 	type Account = { id: number; name: string };
 	type DnsBinding = { id: number; name: string; fqdn: string; enabled: boolean };
@@ -51,6 +52,8 @@
 		name_prefix: string;
 		admin_username: string;
 		enable_ipv6: boolean;
+		enable_accelerated_networking: boolean;
+		enable_ddos_protection: boolean;
 		ip_prefix: string;
 		ip_brush_max_attempts: number;
 		userdata_configured: boolean;
@@ -87,6 +90,8 @@
 			admin_password: '',
 			userdata: '',
 			enable_ipv6: true,
+			enable_accelerated_networking: false,
+			enable_ddos_protection: false,
 			ip_prefix: '85.211',
 			ip_brush_max_attempts: 30,
 			check_interval_seconds: 60,
@@ -116,6 +121,12 @@
 	let sizeError = $state('');
 	let imageError = $state('');
 	let createOptionsRequestId = 0;
+	let language = $state<LanguageCode>('zh');
+	let t = $derived(createTranslator(language));
+
+	function syncLanguage() {
+		language = normalizeLanguage(localStorage.getItem('language'));
+	}
 
 	function randomSuffix(length = 10) {
 		const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -194,6 +205,8 @@
 			name_prefix: workflow.name_prefix || 'auto-vm',
 			admin_username: workflow.admin_username || 'azureuser',
 			enable_ipv6: workflow.enable_ipv6,
+			enable_accelerated_networking: workflow.enable_accelerated_networking,
+			enable_ddos_protection: workflow.enable_ddos_protection,
 			ip_prefix: workflow.ip_prefix || '85.211',
 			ip_brush_max_attempts: workflow.ip_brush_max_attempts || 30,
 			check_interval_seconds: 60,
@@ -438,12 +451,18 @@
 	}
 
 	onMount(() => {
+		syncLanguage();
+		const onLanguage = (event: Event) => {
+			language = normalizeLanguage((event as CustomEvent).detail);
+		};
+		window.addEventListener('azure-panel-language-change', onLanguage);
 		fillRandomResourceGroup();
 		void load();
+		return () => window.removeEventListener('azure-panel-language-change', onLanguage);
 	});
 </script>
 
-<h1 class="mb-4 text-2xl font-semibold">自动补机</h1>
+<h1 class="mb-4 text-2xl font-semibold">{t('workflow.title')}</h1>
 
 {#if toast}
 	<div class="mb-4 rounded-lg border border-border bg-card px-3 py-2 text-sm">{toast}</div>
@@ -630,6 +649,14 @@
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" bind:checked={form.enable_ipv6} /> 自动补机时同时创建 IPv6 公网地址
 		</label>
+		<label class="flex items-center gap-2 text-sm">
+			<input type="checkbox" bind:checked={form.enable_accelerated_networking} />
+			{t('workflow.enable_accelerated_networking')}
+		</label>
+		<label class="flex items-center gap-2 text-sm">
+			<input type="checkbox" bind:checked={form.enable_ddos_protection} />
+			{t('workflow.enable_ddos_protection')}
+		</label>
 		<p class="-mt-2 text-xs text-muted">
 			自动补机会默认刷 IPv4 前缀 85.211，最多尝试 30 次；成功后同步创建/更新 DNS 解析。
 		</p>
@@ -714,6 +741,10 @@
 							IPv6: {workflow.enable_ipv6 ? '是' : '否'} · UserData: {workflow.userdata_configured
 								? '已配置'
 								: '未配置'}
+						</p>
+						<p class="text-xs text-muted">
+							{t('workflow.accelerated_networking')}: {workflow.enable_accelerated_networking ? t('common.yes') : t('common.no')} ·
+							{t('workflow.ddos_protection')}: {workflow.enable_ddos_protection ? t('common.yes') : t('common.no')}
 						</p>
 					</div>
 					<div class="space-y-2">

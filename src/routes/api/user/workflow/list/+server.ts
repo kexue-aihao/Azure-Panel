@@ -24,6 +24,8 @@ export const GET: RequestHandler = async (event) => {
 			admin_username: p.adminUsername,
 			userdata_configured: Boolean(p.userdataEncrypted),
 			enable_ipv6: p.enableIpv6,
+			enable_accelerated_networking: p.enableAcceleratedNetworking,
+			enable_ddos_protection: p.enableDdosProtection,
 			ip_prefix: p.ipPrefix,
 			ip_brush_max_attempts: p.ipBrushMaxAttempts,
 			check_interval_seconds: p.checkIntervalSeconds,

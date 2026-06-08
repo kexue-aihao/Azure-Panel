@@ -150,6 +150,8 @@ CREATE TABLE IF NOT EXISTS `workflow_policies` (
   `admin_password_encrypted` text NOT NULL,
   `userdata_encrypted` text,
   `enable_ipv6` tinyint(1) NOT NULL DEFAULT 0,
+  `enable_accelerated_networking` tinyint(1) NOT NULL DEFAULT 0,
+  `enable_ddos_protection` tinyint(1) NOT NULL DEFAULT 0,
   `ip_prefix` varchar(32) NOT NULL DEFAULT '85.211',
   `ip_brush_max_attempts` int NOT NULL DEFAULT 30,
   `check_interval_seconds` int NOT NULL DEFAULT 60,

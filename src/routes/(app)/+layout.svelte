@@ -37,6 +37,7 @@
 	function setLanguage(value: string) {
 		language = normalizeLanguage(value);
 		localStorage.setItem('language', language);
+		window.dispatchEvent(new CustomEvent('azure-panel-language-change', { detail: language }));
 	}
 
 	async function loadCurrentUser() {

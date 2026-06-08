@@ -134,6 +134,10 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	adminPasswordEncrypted: text('admin_password_encrypted').notNull(),
 	userdataEncrypted: text('userdata_encrypted').notNull().default(''),
 	enableIpv6: boolean('enable_ipv6').notNull().default(false),
+	enableAcceleratedNetworking: boolean('enable_accelerated_networking')
+		.notNull()
+		.default(false),
+	enableDdosProtection: boolean('enable_ddos_protection').notNull().default(false),
 	ipPrefix: varchar('ip_prefix', { length: 32 }).notNull().default('85.211'),
 	ipBrushMaxAttempts: int('ip_brush_max_attempts').notNull().default(30),
 	checkIntervalSeconds: int('check_interval_seconds').notNull().default(60),

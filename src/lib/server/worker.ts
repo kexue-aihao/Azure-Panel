@@ -1191,6 +1191,8 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 			const replenishmentVmSize = policy.vmSize;
 			const ipPrefix = replenishmentIpPrefix(policy);
 			const ipBrushMaxAttempts = replenishmentIpBrushMaxAttempts(policy);
+			const enableAcceleratedNetworking = Boolean(policy.enableAcceleratedNetworking);
+			const enableDdosProtection = Boolean(policy.enableDdosProtection);
 			const deficit = Math.max(targetCount - trackedCount, 0);
 			await insertWorkflowLog(
 				policy.id,
@@ -1296,6 +1298,8 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 							adminUsername: policy.adminUsername,
 							adminPassword: password,
 							enableIpv6: policy.enableIpv6,
+							enableAcceleratedNetworking,
+							enableDdosProtection,
 							customData: userdata,
 							ipPrefix,
 							ipBrushMaxAttempts,
