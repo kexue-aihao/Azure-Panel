@@ -62,6 +62,7 @@ const activeNotificationUsers = new Set<number>();
 const SUBSCRIPTION_STATUS_TIMEOUT_MS = 30_000;
 const MIN_POLICY_CHECK_INTERVAL_SECONDS = 10;
 const DEFAULT_POLICY_CHECK_INTERVAL_SECONDS = 60;
+const SUBSCRIPTION_STATUS_NOTIFY_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_REPLENISHMENT_IP_PREFIX = '85.211';
 const DEFAULT_REPLENISHMENT_IP_BRUSH_ATTEMPTS = 30;
 const REPLENISHMENT_ACCOUNT_ORDER_LABELS: Record<string, string> = {
@@ -129,6 +130,13 @@ async function getAccountSubscriptionStatusWithTimeout(
 function normalizedNotificationState(state?: string | null) {
 	const normalized = String(state ?? '').trim().toLowerCase();
 	return normalized === 'warned' ? 'warning' : normalized;
+}
+
+function dateTimeMs(value: Date | string | number | null | undefined) {
+	if (!value) return 0;
+	const date = value instanceof Date ? value : new Date(value);
+	const time = date.getTime();
+	return Number.isFinite(time) ? time : 0;
 }
 
 function shuffle<T>(items: T[]) {
@@ -1063,7 +1071,7 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 							sent ? 'success' : 'skipped',
 							sent
 								? '本轮订阅状态查询失败结果已发送到 Telegram'
-								: '未配置 Telegram 通知，跳过本轮订阅状态查询失败结果发送'
+								: '未配置 Telegram 通知，或 1 小时内已发送过订阅状态查询失败结果通知，本轮跳过发送'
 						)
 					)
 					.catch((notifyErr) =>
@@ -1101,7 +1109,7 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 						sent ? 'success' : 'skipped',
 						sent
 							? `本轮订阅状态 ${status.state} 检测结果已发送到 Telegram`
-							: '未配置 Telegram 通知，跳过本轮订阅状态结果发送'
+							: '未配置 Telegram 通知，或 1 小时内已发送过订阅状态结果通知，本轮跳过发送'
 					)
 				)
 				.catch((err) => {
@@ -1412,7 +1420,13 @@ async function notifySubscriptionStateIfNeeded(options: {
 		return false;
 	}
 
-	const shouldNotify = options.alwaysNotify || existing?.lastNotifiedState !== normalizedState;
+	const lastNotifiedAt = dateTimeMs(existing?.lastNotifiedAt);
+	const stateChanged = !existing || existing.lastState !== normalizedState;
+	const notifyIntervalElapsed =
+		!lastNotifiedAt || now.getTime() - lastNotifiedAt >= SUBSCRIPTION_STATUS_NOTIFY_INTERVAL_MS;
+	const shouldNotify = options.alwaysNotify
+		? stateChanged || notifyIntervalElapsed
+		: existing?.lastNotifiedState !== normalizedState;
 	if (!shouldNotify) {
 		await upsertSubscriptionNotificationState(options.settingsUserId, options.account.id, baseState);
 		return false;
@@ -1452,9 +1466,31 @@ async function notifyPolicySubscriptionCheckFailure(options: {
 	account: AzureAccount;
 	message: string;
 }) {
+	const now = new Date();
+	const normalizedState = 'check_failed';
+	const existing = await findSubscriptionNotificationState(options.policy.userId, options.account.id);
+	const baseState = {
+		subscriptionId: options.account.subscriptionId,
+		displayName: '',
+		lastState: normalizedState,
+		lastCheckedAt: now
+	};
+	const lastNotifiedAt = dateTimeMs(existing?.lastNotifiedAt);
+	const stateChanged = !existing || existing.lastState !== normalizedState;
+	const notifyIntervalElapsed =
+		!lastNotifiedAt || now.getTime() - lastNotifiedAt >= SUBSCRIPTION_STATUS_NOTIFY_INTERVAL_MS;
+	const shouldNotify = stateChanged || notifyIntervalElapsed;
+	if (!shouldNotify) {
+		await upsertSubscriptionNotificationState(options.policy.userId, options.account.id, baseState);
+		return false;
+	}
+
 	const settings = await findNotificationSettingsByUser(options.policy.userId);
 	const credentials = getTelegramCredentials(settings);
-	if (!credentials) return false;
+	if (!credentials) {
+		await upsertSubscriptionNotificationState(options.policy.userId, options.account.id, baseState);
+		return false;
+	}
 
 	await sendTelegramMessageToTargets({
 		token: credentials.token,
@@ -1470,6 +1506,11 @@ async function notifyPolicySubscriptionCheckFailure(options: {
 			result: '订阅状态查询失败',
 			detail: options.message
 		})
+	});
+	await upsertSubscriptionNotificationState(options.policy.userId, options.account.id, {
+		...baseState,
+		lastNotifiedState: normalizedState,
+		lastNotifiedAt: now
 	});
 	return true;
 }
