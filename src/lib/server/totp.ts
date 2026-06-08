@@ -45,7 +45,9 @@ function hotp(secret: string, counter: number) {
 }
 
 function normalizeCode(code: string) {
-	return String(code ?? '').replace(/\s+/g, '');
+	return String(code ?? '')
+		.replace(/[０-９]/g, (char) => String(char.charCodeAt(0) - 0xff10))
+		.replace(/\D/g, '');
 }
 
 export function generateTotpSecret() {

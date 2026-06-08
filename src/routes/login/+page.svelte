@@ -45,13 +45,27 @@
 		localStorage.setItem('language', language);
 	}
 
+	function normalizeTotpInput(value: string) {
+		return String(value ?? '')
+			.replace(/[０-９]/g, (char) => String(char.charCodeAt(0) - 0xff10))
+			.replace(/\D/g, '')
+			.slice(0, 6);
+	}
+
 	async function login() {
 		loading = true;
 		message = '';
+		const cleanTotpCode = normalizeTotpInput(totpCode);
+		totpCode = cleanTotpCode;
+		if (requires2fa && cleanTotpCode.length !== 6) {
+			message = '请输入 6 位二步验证码';
+			loading = false;
+			return;
+		}
 		try {
 			const data = await api<AuthResponse>('/api/guest/login', {
 				method: 'POST',
-				body: JSON.stringify({ email, password, totp_code: totpCode })
+				body: JSON.stringify({ email, password, totp_code: cleanTotpCode })
 			});
 			if (data.requires_2fa) {
 				requires2fa = true;
@@ -117,6 +131,7 @@
 
 		<form
 			class="space-y-3"
+			novalidate
 			onsubmit={(e) => {
 				e.preventDefault();
 				void login();
@@ -129,7 +144,11 @@
 					class="input"
 					bind:value={totpCode}
 					inputmode="numeric"
-					pattern="[0-9]{6}"
+					maxlength="6"
+					autocomplete="one-time-code"
+					oninput={(event) => {
+						totpCode = normalizeTotpInput(event.currentTarget.value);
+					}}
 					placeholder={t('login.totp')}
 					required
 				/>
