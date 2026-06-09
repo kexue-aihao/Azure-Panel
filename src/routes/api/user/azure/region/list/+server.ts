@@ -1,11 +1,20 @@
 import { getUserAccount, getUserAccountWithSelectedProxy } from '$lib/server/accounts';
-import { createAzureClients, listAvailableVmRegions, type AzureRegionOption } from '$lib/server/azure';
+import {
+	createAzureClients,
+	fallbackAvailableVmRegions,
+	listAvailableVmRegions,
+	type AzureRegionOption
+} from '$lib/server/azure';
 import { updateAccountRegionCache } from '$lib/server/db/repo';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
 function shouldRefreshCache(value: string | null) {
 	return ['1', 'true', 'yes', 'force'].includes((value ?? '').trim().toLowerCase());
+}
+
+function shouldUseFastFallback(value: string | null) {
+	return ['1', 'true', 'yes'].includes((value ?? '').trim().toLowerCase());
 }
 
 function parseRegionCache(raw: string | null | undefined): AzureRegionOption[] | null {
@@ -42,10 +51,11 @@ export const GET: RequestHandler = async (event) => {
 
 	try {
 		const refresh = shouldRefreshCache(event.url.searchParams.get('refresh'));
-		if (!refresh) {
-			const account = await getUserAccount(user.id, accountId);
-			const cachedRegions = parseRegionCache(account.vmRegionCache);
-			if (cachedRegions) return ok(cachedRegions);
+		const cachedAccount = await getUserAccount(user.id, accountId);
+		const cachedRegions = parseRegionCache(cachedAccount.vmRegionCache);
+		if (!refresh && cachedRegions) return ok(cachedRegions);
+		if (!refresh && shouldUseFastFallback(event.url.searchParams.get('fast'))) {
+			return ok(fallbackAvailableVmRegions());
 		}
 
 		const { account, proxy } = await getUserAccountWithSelectedProxy(user.id, accountId, {
@@ -59,6 +69,8 @@ export const GET: RequestHandler = async (event) => {
 		}
 		return ok(regions);
 	} catch (err) {
-		return fail(err instanceof Error ? err.message : String(err), 500);
+		const cachedAccount = await getUserAccount(user.id, accountId).catch(() => null);
+		const cachedRegions = parseRegionCache(cachedAccount?.vmRegionCache);
+		return ok(cachedRegions?.length ? cachedRegions : fallbackAvailableVmRegions());
 	}
 };

@@ -410,6 +410,19 @@ const REGION_SCAN_PRIORITY = [
 	'canadacentral'
 ];
 
+const FAST_VM_SIZE_CANDIDATES: Array<{
+	name: string;
+	cores: number;
+	memoryGB: number;
+	maxDataDiskCount: number;
+}> = [
+	{ name: 'Standard_B1s', cores: 1, memoryGB: 1, maxDataDiskCount: 2 },
+	{ name: 'Standard_B1ms', cores: 1, memoryGB: 2, maxDataDiskCount: 2 },
+	{ name: 'Standard_B2s', cores: 2, memoryGB: 4, maxDataDiskCount: 4 },
+	{ name: 'Standard_B2ms', cores: 2, memoryGB: 8, maxDataDiskCount: 4 },
+	{ name: 'Standard_B4ms', cores: 4, memoryGB: 16, maxDataDiskCount: 8 }
+];
+
 type FeaturedImageCandidate = {
 	label: string;
 	publisher: string;
@@ -1305,6 +1318,46 @@ function regionOptionFromLocation(location: string): AzureRegionOption | null {
 
 function isAzureRegionOption(region: AzureRegionOption | null): region is AzureRegionOption {
 	return region !== null;
+}
+
+export function fallbackAvailableVmRegions(): AzureRegionOption[] {
+	return REGION_SCAN_PRIORITY.map(regionOptionFromLocation).filter(isAzureRegionOption);
+}
+
+function fallbackVmCapability(name: string, cores: number, memoryGB: number, maxDataDiskCount: number): VmCapability {
+	return {
+		name,
+		source: 'Fallback',
+		family: name.split('_')[1]?.replace(/\d.*$/, '') ?? '',
+		tier: '',
+		cores,
+		memoryGB,
+		maxDataDiskCount,
+		acceleratedNetworking: null,
+		hyperVGenerations: '',
+		restricted: false,
+		restrictionReasons: [],
+		quotaName: '',
+		quotaLocalizedName: '',
+		quotaRemaining: 0,
+		totalQuotaRemaining: 0,
+		quotaRequired: cores,
+		quotaRestricted: false
+	};
+}
+
+export function fallbackVmCapabilities(location: string): VmCapabilitiesResult {
+	const available = FAST_VM_SIZE_CANDIDATES.map((size) =>
+		fallbackVmCapability(size.name, size.cores, size.memoryGB, size.maxDataDiskCount)
+	).sort((a, b) => byCapacity(a, b));
+	return {
+		location,
+		available,
+		restricted: [],
+		quotas: [],
+		highestCoreSize: selectLargest(available, 'cores'),
+		largestMemorySize: selectLargest(available, 'memoryGB')
+	};
 }
 
 function azureErrorMessage(err: unknown) {
@@ -2534,15 +2587,19 @@ export async function refreshVmPublicIps(
 
 export async function listVmCapabilities(
 	clients: AzureClients,
-	location: string
+	location: string,
+	options: { includeQuotas?: boolean } = {}
 ): Promise<VmCapabilitiesResult> {
+	const includeQuotas = options.includeQuotas ?? true;
 	const [resourceSkus, legacySizes, quotas] = await Promise.all([
 		listResourceSkuCapabilitiesForLocationSafe(clients, location),
 		listVmSizeCapabilitiesForLocation(clients, location).catch(() => []),
-		listComputeQuotas(clients, location)
+		includeQuotas ? listComputeQuotas(clients, location) : Promise.resolve([])
 	]);
 	const merged = mergeVisibleVmCapabilities(resourceSkus, legacySizes);
-	const quotaAware = applyQuotaToCapabilities(merged, quotas, { restrictByQuota: false });
+	const quotaAware = includeQuotas
+		? applyQuotaToCapabilities(merged, quotas, { restrictByQuota: false })
+		: merged;
 	const available = quotaAware
 		.filter((sku) => !sku.restricted)
 		.sort((a, b) => byCapacity(a, b));

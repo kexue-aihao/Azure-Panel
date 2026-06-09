@@ -266,10 +266,8 @@
 	let selectedAccount = $derived(accounts.find((account) => account.id === accountId) ?? null);
 	let createReady = $derived(
 		Boolean(
-			accountId &&
+				accountId &&
 				!createLoading &&
-				!regionLoading &&
-				!sizeLoading &&
 				regions.some((region) => region.name === createForm.location) &&
 				vmSizes.some((size) => size.name === createForm.vm_size) &&
 				vmImages.some((image) => image.imageReference === createForm.image_reference)
@@ -902,16 +900,37 @@
 		regionLoading = true;
 		regionError = '';
 		try {
-			const params = new URLSearchParams({ account_id: String(accountId) });
-			if (refresh) params.set('refresh', '1');
-			appendProxyParams(params);
-			regions = await api<AzureRegionOption[]>(`/api/user/azure/region/list?${params}`);
+			const fastParams = new URLSearchParams({ account_id: String(accountId) });
+			if (refresh) fastParams.set('refresh', '1');
+			else fastParams.set('fast', '1');
+			appendProxyParams(fastParams);
+			regions = await api<AzureRegionOption[]>(`/api/user/azure/region/list?${fastParams}`);
 			if (regions.length && !regions.some((region) => region.name === location)) {
 				location = regions[0].name;
 			}
 			syncCreateLocation();
 			regionLoading = false;
 			await loadRegionDetails(refresh);
+
+			if (!refresh) {
+				const refreshParams = new URLSearchParams({
+					account_id: String(accountId),
+					refresh: '1'
+				});
+				appendProxyParams(refreshParams);
+				void api<AzureRegionOption[]>(`/api/user/azure/region/list?${refreshParams}`)
+					.then((officialRegions) => {
+						if (!officialRegions?.length || !accountId) return;
+						regions = officialRegions;
+						if (!regions.some((region) => region.name === location)) {
+							location = regions[0].name;
+							void loadRegionDetails();
+						}
+					})
+					.catch(() => {
+						// The fast region list is already usable; official refresh is best effort.
+					});
+			}
 		} catch (err) {
 			regions = [];
 			regionError = err instanceof Error ? err.message : '区域识别失败';
@@ -949,7 +968,7 @@
 	function sizeLabel(size: VmSizeOption) {
 		const memory = Number.isFinite(size.memory_gb) ? `${size.memory_gb} GB` : '-';
 		const quota =
-			size.quota_remaining || size.quota_required
+			size.quota_remaining > 0 && size.quota_required > 0
 				? `，剩余 ${size.quota_remaining}/${size.quota_required} vCPU`
 				: '';
 		return `${size.name}（${size.cores}C / ${memory}${quota}）`;
@@ -982,12 +1001,13 @@
 		sizeLoading = true;
 		sizeError = '';
 		try {
-			const params = new URLSearchParams({
+			const fastParams = new URLSearchParams({
 				account_id: String(accountId),
 				location: location.trim()
 			});
-			appendProxyParams(params);
-			const result = await api<{ sizes: VmSizeOption[] }>(`/api/user/azure/vm/sizes?${params}`);
+			fastParams.set('fast', '1');
+			appendProxyParams(fastParams);
+			const result = await api<{ sizes: VmSizeOption[] }>(`/api/user/azure/vm/sizes?${fastParams}`);
 			if (requestId !== createOptionsRequestId) return;
 			vmSizes = result.sizes ?? [];
 			if (vmSizes.length && !vmSizes.some((size) => size.name === createForm.vm_size)) {
@@ -995,11 +1015,27 @@
 			}
 		} catch (err) {
 			if (requestId !== createOptionsRequestId) return;
-			vmSizes = [];
 			sizeError = err instanceof Error ? err.message : '规格查询失败';
 		} finally {
 			if (requestId === createOptionsRequestId) sizeLoading = false;
 		}
+
+		if (requestId !== createOptionsRequestId) return;
+		const refreshParams = new URLSearchParams({
+			account_id: String(accountId),
+			location: location.trim()
+		});
+		appendProxyParams(refreshParams);
+		void api<{ sizes: VmSizeOption[] }>(`/api/user/azure/vm/sizes?${refreshParams}`)
+			.then((result) => {
+				if (requestId !== createOptionsRequestId || !result.sizes?.length) return;
+				const selected = result.sizes.find((size) => size.name === createForm.vm_size);
+				vmSizes = result.sizes;
+				if (!selected) createForm.vm_size = vmSizes[0].name;
+			})
+			.catch(() => {
+				// Fast fallback already made the selector usable; background refresh is best effort.
+			});
 	}
 
 	async function loadVmImages(requestId: number, refresh = false) {
@@ -1620,9 +1656,9 @@
 					class="input mt-1 min-w-[220px]"
 					bind:value={location}
 					onchange={() => void changeLocation()}
-					disabled={regionLoading || regions.length === 0}
+					disabled={regions.length === 0}
 				>
-					{#if regionLoading}
+					{#if regionLoading && regions.length === 0}
 						<option value={location}>正在识别当前账号可开机区域...</option>
 					{:else if regions.length === 0}
 						<option value={location}>{regionError || '暂无可选区域，请先选择账号'}</option>
@@ -1703,10 +1739,10 @@
 					class="input"
 					bind:value={location}
 					onchange={() => void changeLocation()}
-					disabled={regionLoading || regions.length === 0}
+					disabled={regions.length === 0}
 					required
 				>
-					{#if regionLoading}
+					{#if regionLoading && regions.length === 0}
 						<option value={location}>正在识别当前账号可开机区域...</option>
 					{:else if regions.length === 0}
 						<option value={location}>{regionError || '暂无可选区域，请先选择账号'}</option>
@@ -1727,10 +1763,10 @@
 					id={createSizeSelectId}
 					class="input"
 					bind:value={createForm.vm_size}
-					disabled={sizeLoading || vmSizes.length === 0}
+					disabled={vmSizes.length === 0}
 					required
 				>
-					{#if sizeLoading}
+					{#if sizeLoading && vmSizes.length === 0}
 						<option value={createForm.vm_size}>正在从 Azure 官方 API 查询规格...</option>
 					{:else if vmSizes.length === 0}
 						<option value={createForm.vm_size}>{sizeError || '暂无可选择规格，请先选择账号和区域'}</option>
@@ -1842,11 +1878,7 @@
 		>
 			{createLoading
 				? '创建中...'
-				: regionLoading
-					? '识别区域中...'
-					: sizeLoading || imageLoading
-						? '加载规格/系统中...'
-						: '创建 VM'}
+				: '创建 VM'}
 		</button>
 		{#if createProgress.length && !createProgressDialogOpen}
 			<div class="rounded-xl border border-border bg-background p-3">

@@ -238,7 +238,7 @@
 	function sizeLabel(size: VmSizeOption) {
 		const memory = Number.isFinite(size.memory_gb) ? `${size.memory_gb} GB` : '-';
 		const quota =
-			size.quota_remaining || size.quota_required
+			size.quota_remaining > 0 && size.quota_required > 0
 				? `，剩余 ${size.quota_remaining}/${size.quota_required} vCPU`
 				: '';
 		return `${size.name}，${size.cores}C / ${memory}${quota}`;
@@ -298,11 +298,29 @@
 		regionError = '';
 		try {
 			const params = new URLSearchParams({ account_id: String(form.account_id) });
+			params.set('fast', '1');
 			regions = await api<AzureRegionOption[]>(`/api/user/azure/region/list?${params.toString()}`);
 			if (regions.length && !hasRegionOption(form.location) && !preserveCurrent) {
 				form.location = regions[0].name;
 			}
 			await loadCreateOptions(preserveCurrent);
+
+			const refreshParams = new URLSearchParams({
+				account_id: String(form.account_id),
+				refresh: '1'
+			});
+			void api<AzureRegionOption[]>(`/api/user/azure/region/list?${refreshParams.toString()}`)
+				.then((officialRegions) => {
+					if (!officialRegions?.length) return;
+					regions = officialRegions;
+					if (!hasRegionOption(form.location) && !preserveCurrent) {
+						form.location = regions[0].name;
+						void loadCreateOptions(preserveCurrent);
+					}
+				})
+				.catch(() => {
+					// Fast region list is already usable; official refresh is best effort.
+				});
 		} catch (err) {
 			regions = [];
 			vmSizes = [];
@@ -329,6 +347,7 @@
 				account_id: String(form.account_id),
 				location: form.location.trim()
 			});
+			params.set('fast', '1');
 			const result = await api<{ sizes: VmSizeOption[] }>(`/api/user/azure/vm/sizes?${params.toString()}`);
 			if (requestId !== createOptionsRequestId) return;
 			vmSizes = result.sizes ?? [];
@@ -337,11 +356,26 @@
 			}
 		} catch (err) {
 			if (requestId !== createOptionsRequestId) return;
-			vmSizes = [];
 			sizeError = err instanceof Error ? err.message : '规格查询失败';
 		} finally {
 			if (requestId === createOptionsRequestId) sizeLoading = false;
 		}
+
+		if (requestId !== createOptionsRequestId) return;
+		const refreshParams = new URLSearchParams({
+			account_id: String(form.account_id),
+			location: form.location.trim()
+		});
+		void api<{ sizes: VmSizeOption[] }>(`/api/user/azure/vm/sizes?${refreshParams.toString()}`)
+			.then((result) => {
+				if (requestId !== createOptionsRequestId || !result.sizes?.length) return;
+				const selected = result.sizes.find((size) => size.name === form.vm_size);
+				vmSizes = result.sizes;
+				if (!selected && !preserveCurrent) form.vm_size = vmSizes[0].name;
+			})
+			.catch(() => {
+				// Fast fallback already made the selector usable; background refresh is best effort.
+			});
 	}
 
 	async function loadVmImages(requestId: number, preserveCurrent = false) {
@@ -555,10 +589,10 @@
 				class="input"
 				bind:value={form.location}
 				onchange={() => void changeLocation()}
-				disabled={regionLoading || regions.length === 0}
+				disabled={regions.length === 0}
 				required
 			>
-				{#if regionLoading}
+				{#if regionLoading && regions.length === 0}
 					<option value={form.location}>正在从官方 API 查询可开区域...</option>
 				{:else if regions.length === 0}
 					<option value={form.location}>{regionError || '请先从 Azure 号池选择账号加载可开区域'}</option>
@@ -630,10 +664,10 @@
 				id="workflow-size-select"
 				class="input"
 				bind:value={form.vm_size}
-				disabled={sizeLoading || vmSizes.length === 0}
+				disabled={vmSizes.length === 0}
 				required
 			>
-				{#if sizeLoading}
+				{#if sizeLoading && vmSizes.length === 0}
 					<option value={form.vm_size}>正在从官方 API 查询实例规格...</option>
 				{:else if vmSizes.length === 0}
 					<option value={form.vm_size}>{sizeError || '请先选择账号和区域加载规格'}</option>
