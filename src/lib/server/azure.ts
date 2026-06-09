@@ -477,6 +477,8 @@ const FEATURED_IMAGE_CANDIDATES: FeaturedImageCandidate[] = [
 	}
 ];
 
+const IMAGE_QUERY_CONCURRENCY = 4;
+
 type TimedCacheEntry<T> = {
 	expiresAt: number;
 	value?: T;
@@ -521,6 +523,33 @@ async function cachedAzureQuery<T>(
 	}
 
 	return promise;
+}
+
+function vmImageOptionFromCandidate(candidate: FeaturedImageCandidate, version: string): VmImageOption {
+	return {
+		label: `${candidate.label} (${version})`,
+		imageReference: `${candidate.publisher}:${candidate.offer}:${candidate.sku}:${version}`,
+		publisher: candidate.publisher,
+		offer: candidate.offer,
+		sku: candidate.sku,
+		version,
+		osType: candidate.osType,
+		architecture: '',
+		hyperVGeneration: ''
+	};
+}
+
+export function fallbackFeaturedVmImages(): VmImageOption[] {
+	const images: VmImageOption[] = [];
+	const seenImages = new Set<string>();
+	for (const candidate of FEATURED_IMAGE_CANDIDATES) {
+		const image = vmImageOptionFromCandidate(candidate, 'latest');
+		const key = image.imageReference.toLowerCase();
+		if (seenImages.has(key)) continue;
+		seenImages.add(key);
+		images.push(image);
+	}
+	return images;
 }
 
 export function validateProxyUrl(proxyUrl: string) {
@@ -2759,72 +2788,60 @@ export async function listFeaturedVmImages(
 	clients: AzureClients,
 	location: string
 ): Promise<VmImageOption[]> {
-	const images: VmImageOption[] = [];
-	const candidates = [...FEATURED_IMAGE_CANDIDATES];
-	const fixedDebianKeys = new Set(
-		candidates
-			.filter((candidate) => candidate.publisher.toLowerCase() === 'debian')
-			.map((candidate) => `${candidate.offer}:${candidate.sku}`.toLowerCase())
-	);
-	const dynamicDebianCandidates = await discoverDebianImageCandidates(clients, location).catch(() => []);
-	for (const candidate of dynamicDebianCandidates) {
-		const key = `${candidate.offer}:${candidate.sku}`.toLowerCase();
-		if (fixedDebianKeys.has(key)) continue;
-		fixedDebianKeys.add(key);
-		const insertAt = candidates.findIndex((item) => item.publisher === 'MicrosoftWindowsServer');
-		if (insertAt === -1) candidates.push(candidate);
-		else candidates.splice(insertAt, 0, candidate);
-	}
-	const seenImages = new Set<string>();
+	const normalizedLocation = normalizeLocationName(location);
+	const cacheKey = `vm-images:${clients.subscriptionId}:${normalizedLocation}`;
+	return cachedAzureQuery(
+		cacheKey,
+		cacheTtlMs('AZURE_IMAGE_CACHE_TTL_SECONDS', 3600),
+		async () => {
+			const images = await mapWithConcurrency(
+				FEATURED_IMAGE_CANDIDATES,
+				IMAGE_QUERY_CONCURRENCY,
+				async (candidate) => {
+					try {
+						const versions = await clients.compute.virtualMachineImages.list(
+							location,
+							candidate.publisher,
+							candidate.offer,
+							candidate.sku,
+							{ top: 1, orderby: 'name desc' }
+						);
+						const version = latestImageVersion(versions);
+						if (!version) return null;
 
-	for (const candidate of candidates) {
-		try {
-			const versions = await clients.compute.virtualMachineImages.list(
-				location,
-				candidate.publisher,
-				candidate.offer,
-				candidate.sku,
-				{ top: 1, orderby: 'name desc' }
+						const image = vmImageOptionFromCandidate(candidate, version);
+						try {
+							const detail = await clients.compute.virtualMachineImages.get(
+								location,
+								candidate.publisher,
+								candidate.offer,
+								candidate.sku,
+								version
+							);
+							image.architecture = detail.architecture ?? '';
+							image.hyperVGeneration = detail.hyperVGeneration ?? '';
+						} catch {
+							// Version listing is enough for creation; details only enrich the dropdown.
+						}
+						return image;
+					} catch {
+						return null;
+					}
+				}
 			);
-			const version = latestImageVersion(versions);
-			if (!version) continue;
 
-			let architecture = '';
-			let hyperVGeneration = '';
-			try {
-				const image = await clients.compute.virtualMachineImages.get(
-					location,
-					candidate.publisher,
-					candidate.offer,
-					candidate.sku,
-					version
-				);
-				architecture = image.architecture ?? '';
-				hyperVGeneration = image.hyperVGeneration ?? '';
-			} catch {
-				// Version listing is enough for creation; details only enrich the dropdown.
-			}
-
-			const imageReference = `${candidate.publisher}:${candidate.offer}:${candidate.sku}:${version}`;
-			if (seenImages.has(imageReference.toLowerCase())) continue;
-			seenImages.add(imageReference.toLowerCase());
-			images.push({
-				label: `${candidate.label} (${version})`,
-				imageReference,
-				publisher: candidate.publisher,
-				offer: candidate.offer,
-				sku: candidate.sku,
-				version,
-				osType: candidate.osType,
-				architecture,
-				hyperVGeneration
+			const seenImages = new Set<string>();
+			const uniqueImages = images.filter((image): image is VmImageOption => {
+				if (!image) return false;
+				const key = image.imageReference.toLowerCase();
+				if (seenImages.has(key)) return false;
+				seenImages.add(key);
+				return true;
 			});
-		} catch {
-			// Some publishers/offers are not available in every region or subscription.
-		}
-	}
 
-	return images;
+			return uniqueImages.length > 0 ? uniqueImages : fallbackFeaturedVmImages();
+		}
+	);
 }
 
 function usageToQuota(usage: Usage): ComputeQuota {

@@ -270,7 +270,6 @@
 				!createLoading &&
 				!regionLoading &&
 				!sizeLoading &&
-				!imageLoading &&
 				regions.some((region) => region.name === createForm.location) &&
 				vmSizes.some((size) => size.name === createForm.vm_size) &&
 				vmImages.some((image) => image.imageReference === createForm.image_reference)
@@ -963,6 +962,16 @@
 		return meta ? `${image.label} - ${meta}` : image.label;
 	}
 
+	function sameImageFamily(imageReference: string, image: VmImageOption) {
+		const parts = imageReference.split(':');
+		return (
+			parts.length >= 3 &&
+			parts[0] === image.publisher &&
+			parts[1] === image.offer &&
+			parts[2] === image.sku
+		);
+	}
+
 	async function loadVmSizes(requestId: number) {
 		if (!accountId || !location.trim()) {
 			vmSizes = [];
@@ -1003,13 +1012,14 @@
 		imageLoading = true;
 		imageError = '';
 		try {
-			const params = new URLSearchParams({
+			const fastParams = new URLSearchParams({
 				account_id: String(accountId),
 				location: location.trim()
 			});
-			if (refresh) params.set('refresh', '1');
-			appendProxyParams(params);
-			const images = await api<VmImageOption[]>(`/api/user/azure/image/list?${params}`);
+			fastParams.set('fast', refresh ? '0' : '1');
+			if (refresh) fastParams.set('refresh', '1');
+			appendProxyParams(fastParams);
+			const images = await api<VmImageOption[]>(`/api/user/azure/image/list?${fastParams}`);
 			if (requestId !== createOptionsRequestId) return;
 			vmImages = images ?? [];
 			if (
@@ -1020,11 +1030,36 @@
 			}
 		} catch (err) {
 			if (requestId !== createOptionsRequestId) return;
-			vmImages = [];
 			imageError = err instanceof Error ? err.message : '系统镜像查询失败';
 		} finally {
 			if (requestId === createOptionsRequestId) imageLoading = false;
 		}
+
+		if (requestId !== createOptionsRequestId || refresh) return;
+		const refreshParams = new URLSearchParams({
+			account_id: String(accountId),
+			location: location.trim(),
+			refresh: '1'
+		});
+		appendProxyParams(refreshParams);
+		void api<VmImageOption[]>(`/api/user/azure/image/list?${refreshParams}`)
+			.then((images) => {
+				if (requestId !== createOptionsRequestId || !images?.length) return;
+				const selectedImage = images.find(
+					(image) =>
+						image.imageReference === createForm.image_reference ||
+						sameImageFamily(createForm.image_reference, image)
+				);
+				vmImages = images;
+				if (selectedImage) {
+					createForm.image_reference = selectedImage.imageReference;
+				} else {
+					createForm.image_reference = vmImages[0].imageReference;
+				}
+			})
+			.catch(() => {
+				// Fast fallback already made the selector usable; background refresh is best effort.
+			});
 	}
 
 	async function loadCreateOptions(refreshImages = false) {
@@ -1716,10 +1751,10 @@
 				id={imageSelectId}
 				class="input"
 				bind:value={createForm.image_reference}
-				disabled={imageLoading || vmImages.length === 0}
+				disabled={vmImages.length === 0}
 				required
 			>
-				{#if imageLoading}
+				{#if imageLoading && vmImages.length === 0}
 					<option value={createForm.image_reference}>正在从 Azure 官方 API 查询系统镜像...</option>
 				{:else if vmImages.length === 0}
 					<option value={createForm.image_reference}>{imageError || '暂无可选择系统，请先选择账号和区域'}</option>

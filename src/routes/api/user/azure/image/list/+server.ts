@@ -1,5 +1,10 @@
 import { getUserAccount, getUserAccountWithSelectedProxy } from '$lib/server/accounts';
-import { createAzureClients, listFeaturedVmImages, type VmImageOption } from '$lib/server/azure';
+import {
+	createAzureClients,
+	fallbackFeaturedVmImages,
+	listFeaturedVmImages,
+	type VmImageOption
+} from '$lib/server/azure';
 import { updateAccountImageCache } from '$lib/server/db/repo';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
@@ -11,8 +16,16 @@ function shouldRefreshCache(value: string | null) {
 	return ['1', 'true', 'yes', 'force'].includes((value ?? '').trim().toLowerCase());
 }
 
+function shouldUseFastFallback(value: string | null) {
+	return ['1', 'true', 'yes'].includes((value ?? '').trim().toLowerCase());
+}
+
 function normalizeLocation(value: string) {
 	return value.trim().toLowerCase();
+}
+
+function isFallbackImageList(images: VmImageOption[]) {
+	return images.length > 0 && images.every((image) => image.version === 'latest');
 }
 
 function normalizeImage(item: unknown): VmImageOption | null {
@@ -77,14 +90,19 @@ export const GET: RequestHandler = async (event) => {
 		if (!refresh && cache.version >= IMAGE_CACHE_VERSION && cache.locations[locationKey]?.length) {
 			return ok(cache.locations[locationKey]);
 		}
+		if (!refresh && shouldUseFastFallback(event.url.searchParams.get('fast'))) {
+			return ok(fallbackFeaturedVmImages());
+		}
 
 		const { account, proxy } = await getUserAccountWithSelectedProxy(user.id, accountId, {
 			clientIp: getRequestClientIp(event),
 			proxyMode: event.url.searchParams.get('proxy_mode'),
 			proxyProfileId: Number(event.url.searchParams.get('proxy_profile_id') ?? 0) || null
 		});
-		const images = await listFeaturedVmImages(createAzureClients(account, proxy), location);
-		if (images.length > 0) {
+		const images = await listFeaturedVmImages(createAzureClients(account, proxy), location).catch(() =>
+			cache.locations[locationKey]?.length ? cache.locations[locationKey] : fallbackFeaturedVmImages()
+		);
+		if (images.length > 0 && !isFallbackImageList(images)) {
 			await updateAccountImageCache(
 				user.id,
 				accountId,

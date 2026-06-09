@@ -23,6 +23,10 @@
 	type VmImageOption = {
 		label: string;
 		imageReference: string;
+		publisher: string;
+		offer: string;
+		sku: string;
+		version: string;
 		osType: 'Linux' | 'Windows' | 'Unknown';
 		architecture: string;
 		hyperVGeneration: string;
@@ -268,6 +272,16 @@
 		return vmImages.some((image) => image.imageReference === imageReference);
 	}
 
+	function sameImageFamily(imageReference: string, image: VmImageOption) {
+		const parts = imageReference.split(':');
+		return (
+			parts.length >= 3 &&
+			parts[0] === image.publisher &&
+			parts[1] === image.offer &&
+			parts[2] === image.sku
+		);
+	}
+
 	async function load() {
 		accounts = await api<Account[]>('/api/user/azure/account/list');
 		dnsBindings = await api<DnsBinding[]>('/api/user/dns/binding/list');
@@ -345,6 +359,7 @@
 				account_id: String(form.account_id),
 				location: form.location.trim()
 			});
+			params.set('fast', '1');
 			const images = await api<VmImageOption[]>(`/api/user/azure/image/list?${params.toString()}`);
 			if (requestId !== createOptionsRequestId) return;
 			vmImages = images ?? [];
@@ -353,11 +368,35 @@
 			}
 		} catch (err) {
 			if (requestId !== createOptionsRequestId) return;
-			vmImages = [];
 			imageError = err instanceof Error ? err.message : '系统镜像查询失败';
 		} finally {
 			if (requestId === createOptionsRequestId) imageLoading = false;
 		}
+
+		if (requestId !== createOptionsRequestId) return;
+		const refreshParams = new URLSearchParams({
+			account_id: String(form.account_id),
+			location: form.location.trim(),
+			refresh: '1'
+		});
+		void api<VmImageOption[]>(`/api/user/azure/image/list?${refreshParams.toString()}`)
+			.then((images) => {
+				if (requestId !== createOptionsRequestId || !images?.length) return;
+				const selectedImage = images.find(
+					(image) =>
+						image.imageReference === form.image_reference ||
+						sameImageFamily(form.image_reference, image)
+				);
+				vmImages = images;
+				if (selectedImage) {
+					form.image_reference = selectedImage.imageReference;
+				} else if (!preserveCurrent) {
+					form.image_reference = vmImages[0].imageReference;
+				}
+			})
+			.catch(() => {
+				// Fast fallback already made the selector usable; background refresh is best effort.
+			});
 	}
 
 	async function loadCreateOptions(preserveCurrent = false) {
@@ -617,10 +656,10 @@
 				id="workflow-image-select"
 				class="input"
 				bind:value={form.image_reference}
-				disabled={imageLoading || vmImages.length === 0}
+				disabled={vmImages.length === 0}
 				required
 			>
-				{#if imageLoading}
+				{#if imageLoading && vmImages.length === 0}
 					<option value={form.image_reference}>正在从官方 API 查询安装系统...</option>
 				{:else if vmImages.length === 0}
 					<option value={form.image_reference}>{imageError || '请先选择账号和区域加载系统'}</option>
