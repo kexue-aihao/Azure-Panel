@@ -1047,11 +1047,21 @@ export async function listAccountSubscriptions(
 	});
 }
 
-export const DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES = 'banned,warning,warned,disabled';
+export const DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES =
+	'banned,warning,warned,pastdue,past_due,disabled,deleted';
+
+const DEFAULT_NORMALIZED_AZURE_SUBSCRIPTION_TRIGGER_STATES = [
+	'banned',
+	'warning',
+	'pastdue',
+	'disabled',
+	'deleted'
+];
 
 function normalizeSubscriptionState(state: string) {
 	const normalized = state.trim().toLowerCase();
 	if (normalized === 'warned') return 'warning';
+	if (normalized === 'past_due' || normalized === 'past-due') return 'pastdue';
 	return normalized;
 }
 
@@ -1061,7 +1071,7 @@ export function normalizeSubscriptionTriggerStates(value?: string | null) {
 		.split(/[,\s，]+/)
 		.map(normalizeSubscriptionState)
 		.filter(Boolean);
-	return states.length ? [...new Set(states)] : ['banned', 'warning', 'disabled'];
+	return states.length ? [...new Set(states)] : [...DEFAULT_NORMALIZED_AZURE_SUBSCRIPTION_TRIGGER_STATES];
 }
 
 export function isAzureSubscriptionAbnormal(state?: string | null) {

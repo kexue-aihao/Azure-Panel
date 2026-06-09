@@ -75,6 +75,7 @@
 		{ value: 'subscription_enabled_at', label: '按账号订阅启用时间' },
 		{ value: 'azure_registered_at', label: '按 Azure 账号注册时间' }
 	];
+	const defaultStatusTriggerStates = 'banned,warning,warned,pastdue,past_due,disabled,deleted';
 
 	function defaultWorkflowForm() {
 		return {
@@ -100,7 +101,7 @@
 			ip_brush_max_attempts: 30,
 			check_interval_seconds: 60,
 			status_check_enabled: true,
-			status_trigger_states: 'banned,warning,warned,disabled',
+			status_trigger_states: defaultStatusTriggerStates,
 			replenishment_account_order: 'pool_added_at',
 			dns_binding_id: ''
 		};
@@ -215,7 +216,7 @@
 			ip_brush_max_attempts: workflow.ip_brush_max_attempts || 30,
 			check_interval_seconds: 60,
 			status_check_enabled: workflow.status_check_enabled,
-			status_trigger_states: workflow.status_trigger_states || 'banned,warning,warned,disabled',
+			status_trigger_states: workflow.status_trigger_states || defaultStatusTriggerStates,
 			replenishment_account_order: workflow.replenishment_account_order || 'pool_added_at',
 			dns_binding_id: workflow.dns_binding_id ? String(workflow.dns_binding_id) : ''
 		};
@@ -804,7 +805,7 @@
 							补机账号顺序: {accountOrderOptions.find((option) => option.value === workflow.replenishment_account_order)?.label || '按加入 Azure 号池时间（默认）'}
 						</p>
 						<p class="text-xs text-muted">
-							状态检测: {workflow.status_check_enabled ? '开启' : '关闭'} · 触发状态: banned / warning / warned / disabled ·
+							状态检测: {workflow.status_check_enabled ? '开启' : '关闭'} · 触发状态: {(workflow.status_trigger_states || defaultStatusTriggerStates).split(',').join(' / ')} ·
 							上次状态: {workflow.last_account_status || '-'}
 						</p>
 						<p class="text-xs text-muted">

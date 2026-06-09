@@ -144,7 +144,7 @@ export const workflowPolicies = mysqlTable('workflow_policies', {
 	statusCheckEnabled: boolean('status_check_enabled').notNull().default(true),
 	statusTriggerStates: varchar('status_trigger_states', { length: 120 })
 		.notNull()
-		.default('banned,warning,warned,disabled'),
+		.default('banned,warning,warned,pastdue,past_due,disabled,deleted'),
 	replenishmentAccountOrder: varchar('replenishment_account_order', { length: 32 })
 		.notNull()
 		.default('pool_added_at'),

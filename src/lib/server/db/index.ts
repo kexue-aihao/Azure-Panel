@@ -177,7 +177,7 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		ip_brush_max_attempts int NOT NULL DEFAULT 30,
 		check_interval_seconds int NOT NULL DEFAULT 60,
 		status_check_enabled tinyint(1) NOT NULL DEFAULT 1,
-		status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled',
+		status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,pastdue,past_due,disabled,deleted',
 		replenishment_account_order varchar(32) NOT NULL DEFAULT 'pool_added_at',
 		dns_binding_id int NOT NULL DEFAULT 0,
 		last_account_status varchar(64) NOT NULL DEFAULT '',
@@ -1077,11 +1077,11 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 		pool,
 		'workflow_policies',
 		'status_trigger_states',
-		"status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled'"
+		"status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,pastdue,past_due,disabled,deleted'"
 	);
 	await mysqlInitQuery(
 		pool,
-		"UPDATE workflow_policies SET status_trigger_states = 'banned,warning,warned,disabled' WHERE LOWER(REPLACE(status_trigger_states, ' ', '')) = 'banned,warning,warned'",
+		"UPDATE workflow_policies SET status_trigger_states = 'banned,warning,warned,pastdue,past_due,disabled,deleted' WHERE LOWER(REPLACE(status_trigger_states, ' ', '')) IN ('banned,warning,warned','banned,warning,warned,disabled')",
 		undefined,
 		'mysql-schema:workflow-policies:normalize-trigger-states'
 	);
@@ -1363,7 +1363,7 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30,
 			check_interval_seconds INTEGER NOT NULL DEFAULT 60,
 			status_check_enabled INTEGER NOT NULL DEFAULT 1,
-			status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned,disabled',
+			status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned,pastdue,past_due,disabled,deleted',
 			replenishment_account_order TEXT NOT NULL DEFAULT 'pool_added_at',
 			dns_binding_id INTEGER NOT NULL DEFAULT 0,
 			last_account_status TEXT NOT NULL DEFAULT '',
@@ -1510,11 +1510,11 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	sqlite.exec('UPDATE workflow_policies SET auto_create = 1 WHERE auto_create <> 1');
 	if (!workflowColumns.some((column) => column.name === 'status_trigger_states')) {
 		sqlite.exec(
-			"ALTER TABLE workflow_policies ADD COLUMN status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned,disabled'"
+			"ALTER TABLE workflow_policies ADD COLUMN status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned,pastdue,past_due,disabled,deleted'"
 		);
 	}
 	sqlite.exec(
-		"UPDATE workflow_policies SET status_trigger_states = 'banned,warning,warned,disabled' WHERE lower(replace(status_trigger_states, ' ', '')) = 'banned,warning,warned'"
+		"UPDATE workflow_policies SET status_trigger_states = 'banned,warning,warned,pastdue,past_due,disabled,deleted' WHERE lower(replace(status_trigger_states, ' ', '')) IN ('banned,warning,warned','banned,warning,warned,disabled')"
 	);
 	sqlite.exec("UPDATE workflow_policies SET ip_prefix = '85.211' WHERE ip_prefix IS NULL OR trim(ip_prefix) = ''");
 	sqlite.exec('UPDATE workflow_policies SET ip_brush_max_attempts = 30 WHERE ip_brush_max_attempts IS NULL OR ip_brush_max_attempts < 1');

@@ -175,7 +175,9 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 	ipBrushMaxAttempts: integer('ip_brush_max_attempts').notNull().default(30),
 	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(60),
 	statusCheckEnabled: integer('status_check_enabled', { mode: 'boolean' }).notNull().default(true),
-	statusTriggerStates: text('status_trigger_states').notNull().default('banned,warning,warned,disabled'),
+	statusTriggerStates: text('status_trigger_states')
+		.notNull()
+		.default('banned,warning,warned,pastdue,past_due,disabled,deleted'),
 	replenishmentAccountOrder: text('replenishment_account_order')
 		.notNull()
 		.default('pool_added_at'),

@@ -30,7 +30,10 @@ import {
 	createVmSimple,
 	deleteResourceGroupWithProgress,
 	getAccountSubscriptionStatus,
+	getPowerState,
 	isAzureSubscriptionTriggerState,
+	isRunning,
+	powerVmWithProgress,
 	randomAzureResourceName,
 	type CreateVmProgressEvent,
 	type CreateVmResult
@@ -936,6 +939,57 @@ async function syncWorkflowDns(options: {
 	}
 }
 
+async function startTrackedStoppedVms(options: {
+	policy: WorkflowPolicy;
+	runtime: WorkerAccountRuntime;
+	vmNames: string[];
+}) {
+	if (!options.policy.autoStart) {
+		return { runningOrStarted: 0, failed: 0 };
+	}
+	if (options.vmNames.length === 0) {
+		await insertWorkflowLog(options.policy.id, 'auto_start', 'skipped', '策略未记录可自动启动的 VM');
+		return { runningOrStarted: 0, failed: 0 };
+	}
+
+	let runningOrStarted = 0;
+	let failed = 0;
+	for (const vmName of options.vmNames) {
+		try {
+			const state = await getPowerState(options.runtime.clients, options.policy.resourceGroup, vmName);
+			if (isRunning(state)) {
+				runningOrStarted += 1;
+				await insertWorkflowLog(options.policy.id, 'auto_start', 'success', `VM ${vmName} 当前状态 ${state}，无需启动`);
+				continue;
+			}
+			await insertWorkflowLog(
+				options.policy.id,
+				'auto_start',
+				'running',
+				`VM ${vmName} 当前状态 ${state}，按 Azure Start API 自动开机`
+			);
+			await powerVmWithProgress(options.runtime.clients, {
+				resourceGroup: options.policy.resourceGroup,
+				vmName,
+				action: 'start',
+				progress: async (event) => {
+					await insertWorkflowLog(options.policy.id, `auto_start:${event.step}`, event.status, event.message);
+				}
+			});
+			runningOrStarted += 1;
+		} catch (err) {
+			failed += 1;
+			await insertWorkflowLog(
+				options.policy.id,
+				'auto_start',
+				'failed',
+				`自动启动 VM ${vmName} 失败: ${errorMessage(err)}`
+			);
+		}
+	}
+	return { runningOrStarted, failed };
+}
+
 async function removeAbnormalAccountAfterReplenishment(options: {
 	policy: WorkflowPolicy;
 	abnormalAccount: AzureAccount;
@@ -1236,18 +1290,23 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 
 			const targetCount = safeReplenishTargetCount(policy);
 			const trackedVmNames = parseVmNames(policy.vmNamesJson);
-			const trackedCount = trackedVmNames.length;
 			const replenishmentVmSize = policy.vmSize;
 			const ipPrefix = replenishmentIpPrefix(policy);
 			const ipBrushMaxAttempts = replenishmentIpBrushMaxAttempts(policy);
 			const enableAcceleratedNetworking = Boolean(policy.enableAcceleratedNetworking);
 			const enableDdosProtection = Boolean(policy.enableDdosProtection);
-			const deficit = Math.max(targetCount - trackedCount, 0);
+			const started = await startTrackedStoppedVms({
+				policy,
+				runtime: primaryRuntime,
+				vmNames: trackedVmNames
+			});
+			const effectiveTrackedCount = policy.autoStart ? started.runningOrStarted : trackedVmNames.length;
+			const deficit = Math.max(targetCount - effectiveTrackedCount, 0);
 			await insertWorkflowLog(
 				policy.id,
 				'auto_create',
 				deficit > 0 ? 'running' : 'skipped',
-				`订阅异常已触发补机计划：触发账号=${account.name}，订阅状态=${status.state}，已记录补机=${trackedCount}，目标=${targetCount}，需新建=${deficit}，规格=${replenishmentVmSize}，刷 IPv4 前缀=${ipPrefix}，最大次数=${ipBrushMaxAttempts}`
+				`订阅异常已触发补机计划：触发账号=${account.name}，订阅状态=${status.state}，已记录补机=${trackedVmNames.length}，已运行/已提交启动=${started.runningOrStarted}，自动开机失败=${started.failed}，目标=${targetCount}，需新建=${deficit}，规格=${replenishmentVmSize}，刷 IPv4 前缀=${ipPrefix}，最大次数=${ipBrushMaxAttempts}`
 			);
 			if (deficit <= 0) {
 				await insertWorkflowLog(
