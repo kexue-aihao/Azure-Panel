@@ -4979,80 +4979,7 @@ async function detachOldPublicIpOrSwapDirectly(
 			publicIpName: parseResourceName(options.newPublicIpId)
 		}
 	);
-	return options.oldPublicIpId ? 'swapped' : 'none';
-
-	if (!options.oldPublicIpId) return 'none';
-
-	await reportCreateVmProgress(
-		options.progress,
-		`${options.prefix}-detach`,
-		'running',
-		'从网卡解绑旧 IPv4 公网 IP',
-		{
-			nicName: options.nicName,
-			oldPublicIpName: options.oldPublicIpName,
-			oldPublicIPv4: options.oldPublicIPv4
-		}
-	);
-	try {
-		await detachPublicIpFromNic(clients, {
-			nicResourceGroup: options.nicResourceGroup,
-			nicName: options.nicName,
-			nic: options.nic,
-			ipConfig: options.ipConfig,
-			progress: options.progress,
-			step: `${options.prefix}-detach`
-		});
-		return 'detached';
-	} catch (detachErr) {
-		const detachMessage = formatAzureError(detachErr);
-		await reportCreateVmProgress(
-			options.progress,
-			`${options.prefix}-detach-fallback`,
-			'info',
-			'解绑旧 IPv4 失败，改用同一网卡配置直接替换为新 IPv4',
-			{
-				nicName: options.nicName,
-				oldPublicIpName: options.oldPublicIpName,
-				error: detachMessage.length > 900 ? `${detachMessage.slice(0, 900)}...` : detachMessage
-			}
-		);
-
-		await sleep(3000);
-		const currentBinding = await resolveCurrentNicIPv4PublicIp(clients, {
-			resourceGroup: options.resourceGroup,
-			vmName: options.vmName,
-			nicResourceGroup: options.nicResourceGroup,
-			nicName: options.nicName,
-			nic: options.nic,
-			ipConfig: options.ipConfig,
-			progress: options.progress,
-			step: `${options.prefix}-detach-fallback`
-		}).catch(() => null);
-		if (!currentBinding?.publicIpId) return 'detached';
-
-		await attachPublicIpToNic(clients, {
-			nicResourceGroup: options.nicResourceGroup,
-			nicName: options.nicName,
-			nic: options.nic,
-			ipConfig: options.ipConfig,
-			publicIpId: options.newPublicIpId,
-			progress: options.progress,
-			step: `${options.prefix}-swap`
-		});
-		await reportCreateVmProgress(
-			options.progress,
-			`${options.prefix}-swap`,
-			'success',
-			'已直接替换网卡公网 IPv4 绑定',
-			{
-				nicName: options.nicName,
-				oldPublicIpName: options.oldPublicIpName,
-				publicIpName: parseResourceName(options.newPublicIpId)
-			}
-		);
-		return 'swapped';
-	}
+	return 'swapped';
 }
 
 async function waitForNicAttachedPublicIPv4(
@@ -6219,6 +6146,14 @@ export async function replaceVmPublicIPv4(
 				step: 'replace-ip-attach'
 			});
 		}
+		await waitForNicAttachedPublicIPv4(clients, {
+			nicResourceGroup,
+			nicName,
+			ipConfigName: targetIpConfig.name,
+			fallbackPublicIpId: created.id,
+			progress,
+			step: 'replace-ip-bound'
+		});
 		if (oldPublicIpId) {
 			await reportCreateVmProgress(progress, 'replace-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
 				oldPublicIpName,
@@ -6425,6 +6360,14 @@ export async function brushVmPublicIPv4Prefix(
 				step: 'brush-ip-attach'
 			});
 		}
+		await waitForNicAttachedPublicIPv4(clients, {
+			nicResourceGroup,
+			nicName,
+			ipConfigName: targetIpConfig.name,
+			fallbackPublicIpId: created.pip.id,
+			progress: options.progress,
+			step: 'brush-ip-bound'
+		});
 		if (switchMode === 'swapped') {
 			await reportCreateVmProgress(options.progress, 'brush-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
 				oldPublicIpName,
