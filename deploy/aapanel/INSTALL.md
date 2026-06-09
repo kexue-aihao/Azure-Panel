@@ -6,19 +6,23 @@
 
 | 组件 | 版本建议 | 用途 |
 |------|----------|------|
-| Node.js | 20 LTS 或 22 LTS | 运行 SvelteKit 应用 |
+| Go | 1.22 或更高版本 | 运行 Go 主面板 |
+| Node.js | 20 LTS 或 22 LTS | 迁移期本机兼容后端与 Worker |
 | MySQL | 8.0.x（已安装） | 生产数据库 |
-| Nginx | 已安装 | 反向代理到 Node |
-| Supervisor | 已安装 | 守护 Web + Worker 进程 |
+| Nginx | 已安装 | 反向代理到 Go 主面板 |
+| Supervisor | 已安装 | 守护 Go Panel + Node Compat + Worker 进程 |
 | PHP | 不需要 | 本应用不使用 PHP |
 
-## 一、安装 Node.js
+## 一、安装 Go 和 Node.js
+
+Go 主进程监听 `127.0.0.1:3000`，Node 仅作为兼容后端监听 `127.0.0.1:3001`。`GO_PANEL_ENABLED=true` 时脚本默认要求 Go 1.22+ 可用；如需临时退回仅 Node 兼容运行，可显式设置 `ALLOW_NODE_COMPAT_ONLY=1`。
 
 在 aaPanel「软件商店」搜索 **Node.js版本管理器** 或 **PM2**，安装后选择 **Node 20 LTS**。
 
 SSH 验证：
 
 ```bash
+go version
 node -v
 npm -v
 which node
@@ -45,7 +49,7 @@ chmod +x install.sh update.sh
 sudo ./install.sh
 ```
 
-脚本自动完成：拉取/更新代码 → **自动创建数据库和用户** → 生成 `.env` → 导入表结构 → `npm install` → `npm run build:all` → 配置 Supervisor → 健康检查。
+脚本自动完成：拉取/更新代码 → **自动创建数据库和用户** → 生成 `.env` → 导入表结构 → `npm install` → `npm run build:all` → 构建 `bin/azure-panel-go` → 配置 Supervisor → 健康检查。
 
 > 无需手动在 aaPanel 建库。脚本会通过 MySQL root 自动创建 `azure_panel` 库和用户，密码自动生成并保存到 `deploy/aapanel/generated/db-credentials.txt`。
 
@@ -59,7 +63,8 @@ NON_INTERACTIVE=1 DOMAIN=az.argoa.org sudo ./install.sh
 
 | 项目名 | 类型 | 说明 |
 |--------|------|------|
-| `Azure-Panel` | Node.js | Web 前端（`npm run start`，端口 3000） |
+| `azure-panel-go` | Supervisor | Go 主面板（端口 3000） |
+| `Azure-Panel` | Node.js | 本机兼容后端（端口 3001） |
 | `azure-panel-worker` | 通用 | 补机 Worker（`build/worker.js`） |
 
 注册成功后可在面板内直接：**启停、查看日志、绑定 SSL、管理域名**，无需手动配置 Nginx 反代。
@@ -120,14 +125,18 @@ MYSQL_DATABASE=azure_panel
 SECRET_KEY=随机长字符串
 ENCRYPTION_KEY=32位随机密钥
 WORKER_INTERVAL_SECONDS=30
-GO_REPLENISHER_ENABLED=false
+GO_PANEL_ENABLED=true
+GO_PANEL_MODE=go
+GO_PANEL_NODE_COMPAT_ENABLED=true
+GO_PANEL_NODE_COMPAT_PORT=3001
+GO_PANEL_QUEUE_LIMIT=128
 
 HOST=127.0.0.1
 PORT=3000
 ENABLE_EMBEDDED_WORKER=false
 ```
 
-> `ENABLE_EMBEDDED_WORKER=false` 表示 Web 进程不内嵌补机引擎，由 Supervisor 独立 Worker 负责。`GO_REPLENISHER_ENABLED=false` 为默认稳妥配置，打开后会启用可选 Go 补机侧车并保留 Node Worker 回退。
+> `ENABLE_EMBEDDED_WORKER=false` 表示 Web 兼容进程不内嵌补机引擎，由 Supervisor 独立 Worker 负责。`GO_PANEL_ENABLED=true` 表示 Go 主进程接管面板入口；`GO_PANEL_NODE_COMPAT_ENABLED=true` 表示未迁移 API 暂由本机 Node 兼容后端兜底。
 
 ## 六、安装依赖并构建（手动安装时）
 
@@ -171,7 +180,7 @@ Worker 会读取同目录下的 `.env` 文件。
 
 ## 八、配置 Nginx 网站
 
-> **一键安装且已填写 `DOMAIN` 时无需此步**：脚本会自动注册 aaPanel Node 项目并配置反代。
+> **一键安装且已填写 `DOMAIN` 时无需此步**：脚本会自动注册 Go Panel / Node 兼容项目并配置反代。
 
 手动部署时：
 
@@ -247,9 +256,10 @@ npm run build:all
     ↓
 Nginx (aaPanel, :80/:443)
     ↓ 反代
-Node Web (Supervisor, 127.0.0.1:3000)
-    ↓
-MySQL 8.0
+Go Panel (Supervisor, 127.0.0.1:3000)
+    ├─ Web 静态入口 / Go API / 补机调度队列
+    ├─ 旧 API 本机转发 → Node Compat (127.0.0.1:3001)
+    └─ MySQL 8.0
 
 Supervisor Worker (独立进程)
     ↓ 定时检查

@@ -1,8 +1,8 @@
 # Azure Panel
 
-Azure Panel 是一个基于 **SvelteKit 2 + Svelte 5 + TypeScript + Node.js Worker** 的 Azure 资源管理面板，主要用于多 Azure 账号池管理、代理出站、VM 创建与运维、自动补机、DNS 同步、Telegram 通知和管理员后台统一管理。
+Azure Panel 是一个 **Go 高性能 Azure 资源管理面板**，生产入口由 Go 主进程接管，迁移期保留 SvelteKit/Node 本机兼容后端与独立 Worker，用于多 Azure 账号池管理、代理出站、VM 创建与运维、自动补机、DNS 同步、Telegram 通知和管理员后台统一管理。
 
-> 当前仓库已经迁移为 TypeScript 全栈实现，旧版 Python 后端不再作为推荐入口。生产环境推荐使用 aaPanel / 宝塔 + MySQL + 独立 Worker 方式部署。
+> 当前生产架构已切换为 Go 主入口。Go 进程监听 `3000`，负责 Web 静态入口、健康检查、补机调度队列和 Go API；未完全迁移的旧 API 暂由仅绑定 `127.0.0.1:3001` 的 Node 兼容后端兜底。旧版 Python 后端不再作为推荐入口。
 
 ## 功能总览
 
@@ -63,7 +63,7 @@ Azure Panel 是一个基于 **SvelteKit 2 + Svelte 5 + TypeScript + Node.js Work
 ### 自动补机
 
 - 独立 Worker 默认每 30 秒检测正在使用账号的订阅状态。
-- 可选启用 Go 补机侧车作为高性能调度/观测入口，默认仍由 Node Worker 执行 Azure 创建以保持兼容。
+- Go 主面板提供补机调度入口，Node Worker 作为迁移期兼容执行层，后续 Azure 创建链路会继续下沉到 Go。
 - 触发异常状态包括 `banned`、`warning`、`warned`、`disabled`。
 - 检测到异常会发送 Telegram 通知，并立即进入补机流程。
 - 上一轮补机流程完成前不会再次触发新一轮补机，避免重复创建资源。
@@ -116,12 +116,12 @@ Azure Panel 是一个基于 **SvelteKit 2 + Svelte 5 + TypeScript + Node.js Work
 | 模块 | 技术 |
 | --- | --- |
 | 前端 | Svelte 5、SvelteKit、Tailwind CSS |
-| 后端 | SvelteKit Server Routes、Node.js Worker |
+| 后端 | Go 主面板、Go API 调度层、迁移期本机 Node 兼容后端 |
 | 数据库 | MySQL 8.0、SQLite、Drizzle ORM |
 | Azure SDK | `@azure/identity`、`@azure/arm-compute`、`@azure/arm-network`、`@azure/arm-resources` |
 | 安全 | JWT、bcryptjs、TOTP、服务端加密存储 |
 | 代理 | HTTP/SOCKS Agent、sing-box、Xray |
-| 部署 | aaPanel / 宝塔 Node 项目、Supervisor、Nginx 反向代理 |
+| 部署 | Go 二进制、Supervisor、aaPanel / 宝塔兼容项目、Nginx 反向代理 |
 
 ## 目录结构
 
@@ -153,9 +153,10 @@ update.sh              后续升级脚本
 - Nginx
 - MySQL 8.0
 - Node.js 20 LTS
+- Go 1.22 或更高版本
 - Git
 - curl、unzip、tar
-- 可选：Supervisor 或 aaPanel Node 项目守护进程
+- 可选：Supervisor 或 aaPanel 兼容项目守护进程
 
 ## 快速开始：本地开发
 
@@ -209,7 +210,7 @@ sudo ./install.sh
 脚本会自动完成：
 
 - 拉取或同步 `origin/master` 代码。
-- 检测 Node.js 和 npm。
+- 检测 Node.js、npm 和 Go 工具链。
 - 创建 MySQL 数据库和数据库用户。
 - 导入 MySQL 表结构。
 - 同步 aaPanel 数据库列表记录，方便 aaPanel 后台识别和备份数据库。
@@ -217,7 +218,8 @@ sudo ./install.sh
 - 安装 npm 依赖。
 - 下载或检测 sing-box / Xray 托管代理核心。
 - 构建 Web 和 Worker。
-- 创建或重启 aaPanel Node 项目 / Supervisor 进程。
+- 构建并启动 `bin/azure-panel-go` 主进程。
+- 创建或重启 aaPanel 兼容项目 / Supervisor 进程。
 - 执行健康检查。
 
 安装后数据库凭据会保存到：
@@ -312,20 +314,26 @@ ENABLE_EMBEDDED_WORKER=false
 WORKER_INTERVAL_SECONDS=30
 NODE_MAX_OLD_SPACE_SIZE=192
 
-GO_REPLENISHER_ENABLED=false
-GO_REPLENISHER_URL=http://127.0.0.1:43170
+GO_PANEL_ENABLED=true
+GO_PANEL_URL=http://127.0.0.1:3000
+GO_PANEL_MODE=go
+GO_PANEL_NODE_COMPAT_ENABLED=true
+GO_PANEL_NODE_COMPAT_URL=http://127.0.0.1:3001
+GO_PANEL_QUEUE_LIMIT=128
 ```
 
 ### 5. 构建
 
 ```bash
 npm run build:all
+go build -trimpath -ldflags "-s -w" -o bin/azure-panel-go ./services/panel/cmd/panel
 ```
 
-### 6. 启动 Web 与 Worker
+### 6. 启动 Go 面板与兼容 Worker
 
 ```bash
-NODE_ENV=production HOST=127.0.0.1 PORT=3000 node build
+bin/azure-panel-go
+NODE_ENV=production HOST=127.0.0.1 PORT=3001 node build
 NODE_ENV=production ENABLE_EMBEDDED_WORKER=false node build/worker.js
 ```
 
@@ -333,11 +341,21 @@ NODE_ENV=production ENABLE_EMBEDDED_WORKER=false node build/worker.js
 
 | 进程 | 命令 | 说明 |
 | --- | --- | --- |
-| Web | `node build/index.js` 或 `node build` | 面板 Web 服务 |
-| Worker | `node build/worker.js` | 自动补机与订阅检测 |
-| Go replenisher | `bin/azure-panel-go-replenisher` | 可选补机侧车，负责快速接收补机调度并记录 30 秒提交预算 |
+| Go Panel | `bin/azure-panel-go` | 生产主入口，监听 `3000`，承载 Web 静态入口和 Go API |
+| Node Compat | `node build/index.js` 或 `node build` | 迁移期本地兼容后端，默认监听 `3001` |
+| Worker | `node build/worker.js` | 自动补机与订阅检测迁移期执行层 |
 
-`install.sh` 和 `update.sh` 会自动检测 Go 工具链；如果 Go 可用，会构建 `services/replenisher` 到 `bin/azure-panel-go-replenisher`。`GO_REPLENISHER_ENABLED=false` 时不会启动侧车；打开后如果侧车异常，Node Worker 会自动回退到原有补机流程。
+`install.sh` 和 `update.sh` 会自动检测 Go 工具链；`GO_PANEL_ENABLED=true` 时默认要求 Go 1.22+ 可用，并构建 `services/panel` 到 `bin/azure-panel-go`。如需临时退回仅 Node 兼容运行，可显式设置 `ALLOW_NODE_COMPAT_ONLY=1`。`GO_PANEL_NODE_COMPAT_ENABLED=true` 时，尚未迁移到 Go 的旧 API 会转发到本机 Node 兼容后端。
+
+Go 面板提供这些运行时端点：
+
+```text
+/api/health
+/api/go/status
+/v1/replenishment/dispatch
+/api/go/replenishment/tasks
+/api/go/replenishment/tasks/{operationId}
+```
 
 ### 7. Nginx 反向代理
 
@@ -416,10 +434,12 @@ SKIP_GIT_RESET=1 ./update.sh
 | `ENABLE_EMBEDDED_WORKER` | 是否在 Web 进程内嵌 Worker，生产建议 `false` |
 | `WORKER_INTERVAL_SECONDS` | Worker 基础轮询间隔，默认 30 |
 | `NODE_MAX_OLD_SPACE_SIZE` | Node V8 内存上限，低内存服务器建议 128-256 |
-| `GO_REPLENISHER_ENABLED` | 是否启用可选 Go 补机侧车，默认 `false` |
-| `GO_REPLENISHER_URL` | Node Worker 访问 Go 侧车的本地地址，默认 `http://127.0.0.1:43170` |
-| `GO_REPLENISHER_TIMEOUT_MS` | Worker 调用 Go 侧车的超时时间，默认 1500ms，失败会回退 Node 流程 |
-| `GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS` | 侧车记录的补机提交预算，默认 30 秒；Azure VM 最终就绪仍取决于 Azure ARM 长轮询 |
+| `GO_PANEL_ENABLED` | 是否启用 Go 主面板，默认 `true` |
+| `GO_PANEL_URL` | Go 主面板本地地址，默认 `http://127.0.0.1:3000` |
+| `GO_PANEL_NODE_COMPAT_ENABLED` | 是否启用 Node 兼容后端转发，迁移期默认 `true` |
+| `GO_PANEL_NODE_COMPAT_URL` | Node 兼容后端地址，默认 `http://127.0.0.1:3001` |
+| `GO_PANEL_SUBMIT_DEADLINE_SECONDS` | Go 补机调度提交预算，默认 30 秒；Azure VM 最终就绪仍取决于 Azure ARM 长轮询 |
+| `GO_PANEL_QUEUE_LIMIT` | Go 补机调度内存队列保留数量，默认 128 |
 | `SING_BOX_BIN` | 手动指定 sing-box 可执行文件路径 |
 | `XRAY_BIN` | 手动指定 Xray 可执行文件路径 |
 | `MANAGED_PROXY_DIR` | 托管代理核心运行配置目录 |

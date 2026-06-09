@@ -287,14 +287,18 @@ ensure_runtime_env_defaults() {
 		log "Added ENABLE_EMBEDDED_WORKER=false to $env_file"
 	fi
 
-	append_env_default "$env_file" "GO_REPLENISHER_ENABLED" "false" \
-		"# Optional Go replenisher sidecar. Node Worker remains the compatibility fallback."
-	append_env_default "$env_file" "GO_REPLENISHER_URL" "http://127.0.0.1:43170"
-	append_env_default "$env_file" "GO_REPLENISHER_HOST" "127.0.0.1"
-	append_env_default "$env_file" "GO_REPLENISHER_PORT" "43170"
-	append_env_default "$env_file" "GO_REPLENISHER_MODE" "observe"
-	append_env_default "$env_file" "GO_REPLENISHER_TIMEOUT_MS" "1500"
-	append_env_default "$env_file" "GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS" "30"
+	append_env_default "$env_file" "GO_PANEL_ENABLED" "true" \
+		"# Go runtime. Node remains a local compatibility backend during migration."
+	append_env_default "$env_file" "GO_PANEL_URL" "http://127.0.0.1:3000"
+	append_env_default "$env_file" "GO_PANEL_HOST" "127.0.0.1"
+	append_env_default "$env_file" "GO_PANEL_PORT" "3000"
+	append_env_default "$env_file" "GO_PANEL_MODE" "go"
+	append_env_default "$env_file" "GO_PANEL_NODE_COMPAT_ENABLED" "true"
+	append_env_default "$env_file" "GO_PANEL_NODE_COMPAT_PORT" "3001"
+	append_env_default "$env_file" "GO_PANEL_NODE_COMPAT_URL" "http://127.0.0.1:3001"
+	append_env_default "$env_file" "GO_PANEL_TIMEOUT_MS" "1500"
+	append_env_default "$env_file" "GO_PANEL_SUBMIT_DEADLINE_SECONDS" "30"
+	append_env_default "$env_file" "GO_PANEL_QUEUE_LIMIT" "128"
 }
 
 read_port_from_env() {
@@ -324,13 +328,17 @@ ENCRYPTION_KEY=${encryption_key}
 WORKER_INTERVAL_SECONDS=30
 ENABLE_EMBEDDED_WORKER=false
 
-GO_REPLENISHER_ENABLED=false
-GO_REPLENISHER_URL=http://127.0.0.1:43170
-GO_REPLENISHER_HOST=127.0.0.1
-GO_REPLENISHER_PORT=43170
-GO_REPLENISHER_MODE=observe
-GO_REPLENISHER_TIMEOUT_MS=1500
-GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS=30
+GO_PANEL_ENABLED=true
+GO_PANEL_URL=http://127.0.0.1:3000
+GO_PANEL_HOST=127.0.0.1
+GO_PANEL_PORT=3000
+GO_PANEL_MODE=go
+GO_PANEL_NODE_COMPAT_ENABLED=true
+GO_PANEL_NODE_COMPAT_PORT=3001
+GO_PANEL_NODE_COMPAT_URL=http://127.0.0.1:3001
+GO_PANEL_TIMEOUT_MS=1500
+GO_PANEL_SUBMIT_DEADLINE_SECONDS=30
+GO_PANEL_QUEUE_LIMIT=128
 
 HOST=127.0.0.1
 PORT=${app_port}
@@ -864,16 +872,21 @@ terminate_pids() {
 	fi
 }
 
-cleanup_project_node_runtimes() {
+cleanup_project_runtimes() {
 	local app_dir="${1:-$(pwd)}"
 	local -a pids=()
 	mapfile -t pids < <(
 		{
+			list_project_runtime_pids "$app_dir" "bin/azure-panel-go"
 			list_project_runtime_pids "$app_dir" "build/index.js"
 			list_project_runtime_pids "$app_dir" "build/worker.js"
 		} | sort -n -u
 	)
-	terminate_pids "old Web/Worker Node" "${pids[@]}"
+	terminate_pids "old Azure Panel runtime" "${pids[@]}"
+}
+
+cleanup_project_node_runtimes() {
+	cleanup_project_runtimes "$@"
 }
 
 cleanup_managed_proxy_runtimes() {
@@ -909,7 +922,7 @@ runtime_memory_cleanup_before_restart() {
 		return 0
 	fi
 	cleanup_managed_proxy_runtimes "$app_dir"
-	cleanup_project_node_runtimes "$app_dir"
+	cleanup_project_runtimes "$app_dir"
 }
 
 npm_build_all() {
@@ -978,90 +991,105 @@ find_go_bin() {
 	return 1
 }
 
-go_replenisher_enabled() {
+go_panel_enabled() {
 	local env_file="${1:-.env}"
-	local enabled="${GO_REPLENISHER_ENABLED:-}"
-	[[ -z "$enabled" && -f "$env_file" ]] && enabled="$(get_env_value GO_REPLENISHER_ENABLED "$env_file")"
+	local enabled="${GO_PANEL_ENABLED:-}"
+	[[ -z "$enabled" && -f "$env_file" ]] && enabled="$(get_env_value GO_PANEL_ENABLED "$env_file")"
 	is_truthy_value "$enabled"
 }
 
-go_replenisher_binary_path() {
+go_panel_binary_path() {
 	local app_dir="${1:-$(pwd)}"
-	echo "${GO_REPLENISHER_BIN:-${app_dir}/bin/azure-panel-go-replenisher}"
+	echo "${GO_PANEL_BIN:-${app_dir}/bin/azure-panel-go}"
 }
 
-build_go_replenisher() {
+build_go_panel() {
 	local app_dir="${1:-$(pwd)}"
-	local service_dir="${app_dir}/services/replenisher"
+	local service_dir="${app_dir}/services/panel"
 	local bin_path
 	local go_bin
+	local enabled
 
-	if [[ "${SKIP_GO_REPLENISHER_BUILD:-0}" == "1" ]]; then
-		warn "Skipped Go replenisher build (SKIP_GO_REPLENISHER_BUILD=1)"
+	if [[ "${SKIP_GO_PANEL_BUILD:-0}" == "1" ]]; then
+		warn "Skipped Go panel build (SKIP_GO_PANEL_BUILD=1)"
 		return 0
 	fi
 
 	[[ -d "$service_dir" ]] || {
-		warn "Go replenisher source not found: $service_dir"
+		warn "Go panel source not found: $service_dir"
 		return 0
 	}
 
 	go_bin="$(find_go_bin 2>/dev/null || true)"
 	if [[ -z "$go_bin" ]]; then
-		if go_replenisher_enabled "${app_dir}/.env"; then
-			warn "GO_REPLENISHER_ENABLED=true but Go toolchain was not found; Node Worker fallback remains active"
+		if go_panel_enabled "${app_dir}/.env"; then
+			if [[ "${ALLOW_NODE_COMPAT_ONLY:-0}" == "1" ]]; then
+				warn "GO_PANEL_ENABLED=true but Go toolchain was not found; ALLOW_NODE_COMPAT_ONLY=1 keeps the Node compatibility runtime active"
+			else
+				die "GO_PANEL_ENABLED=true 但未找到 Go 1.22+ 工具链；请安装 Go 后重试，或临时设置 ALLOW_NODE_COMPAT_ONLY=1"
+			fi
 		else
-			warn "Go toolchain not found; skip optional Go replenisher build"
+			warn "Go toolchain not found; skip Go panel build"
 		fi
 		return 0
 	fi
 
-	bin_path="$(go_replenisher_binary_path "$app_dir")"
+	bin_path="$(go_panel_binary_path "$app_dir")"
 	mkdir -p "$(dirname "$bin_path")"
-	log "Building Go replenisher sidecar -> $bin_path"
+	log "Building Go panel -> $bin_path"
 	if (
 		cd "$service_dir"
-		CGO_ENABLED=0 "$go_bin" build -trimpath -ldflags "-s -w" -o "$bin_path" ./cmd/replenisher
+		CGO_ENABLED=0 "$go_bin" build -trimpath -ldflags "-s -w" -o "$bin_path" ./cmd/panel
 	); then
 		chmod +x "$bin_path" 2>/dev/null || true
-		log "Go replenisher build completed"
+		log "Go panel build completed"
 		return 0
 	fi
 
-	if [[ "${REQUIRE_GO_REPLENISHER:-0}" == "1" ]]; then
-		die "Go replenisher build failed and REQUIRE_GO_REPLENISHER=1"
+	enabled=0
+	go_panel_enabled "${app_dir}/.env" && enabled=1
+	if [[ "${REQUIRE_GO_PANEL:-1}" != "0" && "${ALLOW_NODE_COMPAT_ONLY:-0}" != "1" && "$enabled" == "1" ]]; then
+		die "Go panel build failed and REQUIRE_GO_PANEL=1"
 	fi
-	warn "Go replenisher build failed; Node Worker fallback remains active"
+	warn "Go panel build failed; Node compatibility runtime remains active"
 	return 0
 }
 
-write_go_replenisher_supervisor_config() {
+write_go_panel_supervisor_config() {
 	local app_dir="$1"
-	local program="${2:-azure-panel-go-replenisher}"
-	local bin_path env_file port host mode token deadline conf_dir conf_file body
+	local program="${2:-azure-panel-go}"
+	local bin_path env_file port host mode token deadline queue_limit compat_enabled compat_url static_dir conf_dir conf_file body
 
 	env_file="${app_dir}/.env"
-	if ! go_replenisher_enabled "$env_file"; then
+	if ! go_panel_enabled "$env_file"; then
 		return 0
 	fi
 
-	bin_path="$(go_replenisher_binary_path "$app_dir")"
+	bin_path="$(go_panel_binary_path "$app_dir")"
 	if [[ ! -x "$bin_path" ]]; then
-		warn "Go replenisher is enabled but binary is missing: $bin_path"
+		warn "Go panel is enabled but binary is missing: $bin_path"
 		return 1
 	fi
 
-	host="${GO_REPLENISHER_HOST:-$(get_env_value GO_REPLENISHER_HOST "$env_file")}"
-	port="${GO_REPLENISHER_PORT:-$(get_env_value GO_REPLENISHER_PORT "$env_file")}"
-	mode="${GO_REPLENISHER_MODE:-$(get_env_value GO_REPLENISHER_MODE "$env_file")}"
-	token="${GO_REPLENISHER_TOKEN:-$(get_env_value GO_REPLENISHER_TOKEN "$env_file")}"
-	deadline="${GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS:-$(get_env_value GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS "$env_file")}"
+	host="${GO_PANEL_HOST:-$(get_env_value GO_PANEL_HOST "$env_file")}"
+	port="${GO_PANEL_PORT:-$(get_env_value GO_PANEL_PORT "$env_file")}"
+	mode="${GO_PANEL_MODE:-$(get_env_value GO_PANEL_MODE "$env_file")}"
+	token="${GO_PANEL_TOKEN:-$(get_env_value GO_PANEL_TOKEN "$env_file")}"
+	deadline="${GO_PANEL_SUBMIT_DEADLINE_SECONDS:-$(get_env_value GO_PANEL_SUBMIT_DEADLINE_SECONDS "$env_file")}"
+	queue_limit="${GO_PANEL_QUEUE_LIMIT:-$(get_env_value GO_PANEL_QUEUE_LIMIT "$env_file")}"
+	compat_enabled="${GO_PANEL_NODE_COMPAT_ENABLED:-$(get_env_value GO_PANEL_NODE_COMPAT_ENABLED "$env_file")}"
+	compat_url="${GO_PANEL_NODE_COMPAT_URL:-$(get_env_value GO_PANEL_NODE_COMPAT_URL "$env_file")}"
+	static_dir="${GO_PANEL_STATIC_DIR:-$(get_env_value GO_PANEL_STATIC_DIR "$env_file")}"
 	host="${host:-127.0.0.1}"
-	port="${port:-43170}"
-	mode="${mode:-observe}"
+	port="${port:-3000}"
+	mode="${mode:-go}"
 	deadline="${deadline:-30}"
+	queue_limit="${queue_limit:-128}"
+	compat_enabled="${compat_enabled:-true}"
+	compat_url="${compat_url:-http://127.0.0.1:3001}"
+	static_dir="${static_dir:-${app_dir}/build/client}"
 
-	body="; Azure Panel Go replenisher sidecar - generated by install.sh/update.sh
+	body="; Azure Panel Go web/API runtime - generated by install.sh/update.sh
 [program:${program}]
 command=${bin_path}
 directory=${app_dir}
@@ -1073,7 +1101,7 @@ startretries=3
 stopwaitsecs=10
 stdout_logfile=/www/wwwlogs/${program}.log
 stderr_logfile=/www/wwwlogs/${program}-error.log
-environment=GO_REPLENISHER_HOST=\"${host}\",GO_REPLENISHER_PORT=\"${port}\",GO_REPLENISHER_MODE=\"${mode}\",GO_REPLENISHER_TOKEN=\"${token}\",GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS=\"${deadline}\""
+environment=AZURE_PANEL_APP_DIR=\"${app_dir}\",GO_PANEL_HOST=\"${host}\",GO_PANEL_PORT=\"${port}\",GO_PANEL_MODE=\"${mode}\",GO_PANEL_TOKEN=\"${token}\",GO_PANEL_NODE_COMPAT_ENABLED=\"${compat_enabled}\",GO_PANEL_NODE_COMPAT_URL=\"${compat_url}\",GO_PANEL_STATIC_DIR=\"${static_dir}\",GO_PANEL_SUBMIT_DEADLINE_SECONDS=\"${deadline}\",GO_PANEL_QUEUE_LIMIT=\"${queue_limit}\""
 
 	mkdir -p /www/wwwlogs 2>/dev/null || true
 	mkdir -p "${app_dir}/deploy/aapanel/generated"
@@ -1086,18 +1114,18 @@ environment=GO_REPLENISHER_HOST=\"${host}\",GO_REPLENISHER_PORT=\"${port}\",GO_R
 		else
 			conf_file="${conf_dir}/${program}.conf"
 		fi
-		log "Writing Go replenisher Supervisor config -> $conf_file"
+		log "Writing Go panel Supervisor config -> $conf_file"
 		printf '%s\n' "$body" >"$conf_file"
 	done < <(supervisor_conf_dirs)
 
 	printf '%s\n' "$body" >"${app_dir}/deploy/aapanel/generated/${program}.conf"
 }
 
-go_replenisher_supervisor_program() {
+go_panel_supervisor_program() {
 	local env_file="${1:-.env}"
 	local app_dir="${2:-$(pwd)}"
-	if go_replenisher_enabled "$env_file" && [[ -x "$(go_replenisher_binary_path "$app_dir")" ]]; then
-		echo "${GO_REPLENISHER_PROGRAM:-azure-panel-go-replenisher}"
+	if go_panel_enabled "$env_file" && [[ -x "$(go_panel_binary_path "$app_dir")" ]]; then
+		echo "${GO_PANEL_PROGRAM:-azure-panel-go}"
 	fi
 }
 
@@ -1269,7 +1297,7 @@ sys.exit(0 if public.M("sites").where("name=?", ("${name}",)).count() > 0 else 1
 PY
 }
 
-# 在 aaPanel 面板中注册 Web（Node 项目）与 Worker（通用项目），便于网站列表统一管理
+# 在 aaPanel 面板中注册 Node 兼容后端与 Worker，主 Web/API 入口由 Go Panel 接管。
 setup_aapanel_site() {
 	local app_dir="$1"
 	local domain="$2"
@@ -1300,7 +1328,7 @@ setup_aapanel_site() {
 	[[ -n "$panel_py" ]] || { warn "未找到 python3，无法调用 aaPanel API"; return 1; }
 
 	node_version="$(detect_nodejs_version_label)"
-	log "注册 aaPanel 站点: ${domain} (Node ${node_version})"
+	log "注册 aaPanel 兼容项目: ${domain} (Go Panel :${port}, Node ${node_version} compat :${GO_PANEL_NODE_COMPAT_PORT:-3001})"
 
 	release_app_port "$port" "${WEB_PROGRAM:-azure-panel-web}" "${WORKER_PROGRAM:-azure-panel-worker}"
 
@@ -1383,11 +1411,13 @@ write_supervisor_configs() {
 	local app_port="$3"
 	local web_program="$4"
 	local worker_program="$5"
-	local conf_dir web_conf worker_conf web_body worker_body node_opts
+	local conf_dir web_conf worker_conf web_body worker_body node_opts compat_port
 
 	node_opts="$(node_memory_options)"
+	compat_port="${GO_PANEL_NODE_COMPAT_PORT:-$(get_env_value GO_PANEL_NODE_COMPAT_PORT "${app_dir}/.env")}"
+	compat_port="${compat_port:-3001}"
 
-	web_body="; Azure Panel Web — 由 install.sh 自动生成
+	web_body="; Azure Panel Node compatibility Web — 由 install.sh 自动生成
 [program:${web_program}]
 command=${node_bin} ${app_dir}/build/index.js
 directory=${app_dir}
@@ -1399,7 +1429,7 @@ startretries=3
 stopwaitsecs=10
 stdout_logfile=/www/wwwlogs/${web_program}.log
 stderr_logfile=/www/wwwlogs/${web_program}-error.log
-environment=NODE_ENV=\"production\",ENABLE_EMBEDDED_WORKER=\"false\",NODE_OPTIONS=\"${node_opts}\",HOST=\"127.0.0.1\",PORT=\"${app_port}\""
+environment=NODE_ENV=\"production\",ENABLE_EMBEDDED_WORKER=\"false\",NODE_OPTIONS=\"${node_opts}\",HOST=\"127.0.0.1\",PORT=\"${compat_port}\""
 
 	worker_body="; Azure Panel Worker — 由 install.sh 自动生成
 [program:${worker_program}]
@@ -1553,7 +1583,7 @@ health_check() {
 		done
 		[[ -n "$status" ]] && warn "健康检查 HTTP 状态: $status"
 		[[ -n "$body" ]] && warn "健康检查响应: $body"
-		warn "健康检查未通过或响应超时，请查看 aaPanel Node 项目日志，以及端口 ${port} 是否被正确监听；数据库状态以前面的 MySQL 端口/账号验收为准"
+		warn "健康检查未通过或响应超时，请查看 Go Panel / Node 兼容后端日志，以及端口 ${port} 是否被正确监听；数据库状态以前面的 MySQL 端口/账号验收为准"
 		return 1
 	fi
 	warn "未安装 curl，跳过健康检查"

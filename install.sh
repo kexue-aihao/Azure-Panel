@@ -129,7 +129,7 @@ MYSQL_DATABASE="${MYSQL_DATABASE:-azure_panel}"
 APP_PORT="${APP_PORT:-3000}"
 WEB_PROGRAM="${WEB_PROGRAM:-azure-panel-web}"
 WORKER_PROGRAM="${WORKER_PROGRAM:-azure-panel-worker}"
-GO_REPLENISHER_PROGRAM="${GO_REPLENISHER_PROGRAM:-azure-panel-go-replenisher}"
+GO_PANEL_PROGRAM="${GO_PANEL_PROGRAM:-azure-panel-go}"
 DOMAIN="${DOMAIN:-}"
 AAPANEL_WEB_PROJECT_NAME="${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}"
 
@@ -145,6 +145,9 @@ check_prerequisites() {
 	log "检查运行环境..."
 	require_cmd git
 	require_node_tools
+	if ! find_go_bin >/dev/null 2>&1; then
+		warn "未检测到 Go 工具链；GO_PANEL_ENABLED=true 时安装会停止。请先安装 Go 1.22+，或临时设置 ALLOW_NODE_COMPAT_ONLY=1"
+	fi
 
 	if [[ "${EUID}" -ne 0 ]]; then
 		warn "建议使用 root 或 sudo 运行，以便写入 Supervisor 配置"
@@ -261,17 +264,15 @@ setup_supervisor() {
 		return
 	fi
 
-	if [[ "${SKIP_SUPERVISOR_WEB:-0}" == "1" && "${SKIP_SUPERVISOR_WORKER:-0}" == "1" ]] && ! go_replenisher_enabled "${APP_DIR}/.env"; then
-		warn "Web/Worker 均由 aaPanel Node 项目管理，跳过 Supervisor"
+	if [[ "${SKIP_SUPERVISOR_WEB:-0}" == "1" && "${SKIP_SUPERVISOR_WORKER:-0}" == "1" ]] && ! go_panel_enabled "${APP_DIR}/.env"; then
+		warn "兼容后端/Worker 均由 aaPanel Node 项目管理，跳过 Supervisor"
 		return
 	fi
 
 	local port go_program
 	port="$(read_port_from_env "${APP_DIR}/.env" "$APP_PORT")"
 	if is_app_healthy "$port"; then
-		warn "端口 ${port} 已有服务在运行，跳过 Web/Worker Supervisor 启动（避免端口冲突）"
-		export SKIP_SUPERVISOR_WEB=1
-		export SKIP_SUPERVISOR_WORKER=1
+		warn "端口 ${port} 已有服务在运行，将优先通过 Supervisor 重启 Go/兼容进程"
 	fi
 
 	local node_bin
@@ -279,8 +280,8 @@ setup_supervisor() {
 	mkdir -p /www/wwwlogs 2>/dev/null || true
 
 	write_supervisor_configs "$node_bin" "$APP_DIR" "$APP_PORT" "$WEB_PROGRAM" "$WORKER_PROGRAM"
-	write_go_replenisher_supervisor_config "$APP_DIR" "$GO_REPLENISHER_PROGRAM" || true
-	go_program="$(go_replenisher_supervisor_program "${APP_DIR}/.env" "$APP_DIR")"
+	write_go_panel_supervisor_config "$APP_DIR" "$GO_PANEL_PROGRAM" || true
+	go_program="$(go_panel_supervisor_program "${APP_DIR}/.env" "$APP_DIR")"
 	supervisor_reload_and_start "$WEB_PROGRAM" "$WORKER_PROGRAM" "$go_program" || true
 }
 
@@ -298,16 +299,23 @@ setup_aapanel_resources() {
 	fi
 
 	if setup_aapanel_site "$APP_DIR" "$DOMAIN" "$port" "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}"; then
-		export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-1}"
-		export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-1}"
+		if go_panel_enabled "${APP_DIR}/.env"; then
+			export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-0}"
+			export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-0}"
+		else
+			export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-1}"
+			export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-1}"
+		fi
 		return 0
 	fi
 
-	# 面板 API 返回格式异常但 Node 项目实际已在运行
+	# 面板 API 返回格式异常但 Go/Node 兼容项目实际已在运行
 	if is_app_healthy "$port" && aapanel_project_exists "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}"; then
-		warn "aaPanel Node 项目已在运行，视为注册成功并跳过 Supervisor"
-		export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-1}"
-		export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-1}"
+		warn "aaPanel 兼容项目已在运行，视为注册成功"
+		if ! go_panel_enabled "${APP_DIR}/.env"; then
+			export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-1}"
+			export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-1}"
+		fi
 		return 0
 	fi
 
@@ -339,16 +347,17 @@ main() {
 	setup_mysql
 	ensure_proxy_cores
 	npm_build_all
-	build_go_replenisher "$APP_DIR"
+	build_go_panel "$APP_DIR"
 
 	local port aapanel_ok=0
 	port="$(read_port_from_env "${APP_DIR}/.env" "$APP_PORT")"
+
+	setup_supervisor
 
 	if setup_aapanel_resources; then
 		aapanel_ok=1
 	fi
 
-	setup_supervisor
 	if [[ "${aapanel_ok:-0}" != "1" ]]; then
 		verify_or_hint_supervisor
 	fi
@@ -366,13 +375,13 @@ main() {
 	info "数据库   : ${MYSQL_DATABASE} (用户: ${MYSQL_USER})"
 	info "DB 凭据  : ${APP_DIR}/deploy/aapanel/generated/db-credentials.txt"
 	if [[ "${aapanel_ok:-0}" == "1" ]]; then
-		info "aaPanel  : 网站 → Node 项目 → Azure-Panel / azure-panel-worker"
+		info "aaPanel  : 网站 → Go Panel / Node 兼容后端 / Worker"
 		info "域名     : ${DOMAIN}"
 	else
-		info "Supervisor: $WEB_PROGRAM, $WORKER_PROGRAM"
+		info "Supervisor: $GO_PANEL_PROGRAM, $WEB_PROGRAM, $WORKER_PROGRAM"
 	fi
-	if go_replenisher_enabled "${APP_DIR}/.env"; then
-		info "Go sidecar : $GO_REPLENISHER_PROGRAM"
+	if go_panel_enabled "${APP_DIR}/.env"; then
+		info "Go runtime : $GO_PANEL_PROGRAM"
 	fi
 	info "日志目录 : /www/wwwlogs/"
 	echo ""

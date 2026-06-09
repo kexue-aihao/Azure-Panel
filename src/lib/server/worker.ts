@@ -55,9 +55,9 @@ import {
 	sendTelegramMessageToTargets
 } from './telegram';
 import {
-	dispatchReplenishmentToGoSidecar,
-	isGoReplenisherEnabled
-} from './go-replenisher';
+	dispatchReplenishmentToGoPanel,
+	isGoPanelEnabled
+} from './go-panel';
 import { randomUUID } from 'node:crypto';
 
 let timer: NodeJS.Timeout | null = null;
@@ -111,7 +111,7 @@ function isProxyOutboundFailure(message: string) {
 	);
 }
 
-async function dispatchGoReplenisherPlan(options: {
+async function dispatchGoPanelPlan(options: {
 	policy: WorkflowPolicy;
 	triggerAccount: AzureAccount;
 	subscriptionState: string;
@@ -124,11 +124,11 @@ async function dispatchGoReplenisherPlan(options: {
 	enableAcceleratedNetworking: boolean;
 	enableDdosProtection: boolean;
 }) {
-	if (!isGoReplenisherEnabled()) return;
+	if (!isGoPanelEnabled()) return;
 
 	const startedAt = Date.now();
 	try {
-		const result = await dispatchReplenishmentToGoSidecar({
+		const result = await dispatchReplenishmentToGoPanel({
 			policyId: options.policy.id,
 			userId: options.policy.userId,
 			deficit: options.deficit,
@@ -148,17 +148,17 @@ async function dispatchGoReplenisherPlan(options: {
 		if (result.accepted) {
 			await insertWorkflowLog(
 				options.policy.id,
-				'go_replenisher',
+				'go_panel',
 				'success',
-				`Go 补机侧车已接收调度 operation=${result.operationId ?? '-'} mode=${result.mode ?? '-'}，耗时 ${Date.now() - startedAt}ms；当前仍由 Node Worker 执行 Azure 创建以保持兼容`
+				`Go 面板调度层已接收补机计划 operation=${result.operationId ?? '-'} mode=${result.mode ?? '-'}，耗时 ${Date.now() - startedAt}ms`
 			);
 		}
 	} catch (err) {
 		await insertWorkflowLog(
 			options.policy.id,
-			'go_replenisher',
+			'go_panel',
 			'warning',
-			`Go 补机侧车不可用，已自动回退 Node Worker 补机流程: ${errorMessage(err)}`
+			`Go 面板调度层不可用，已自动回退兼容补机流程: ${errorMessage(err)}`
 		);
 	}
 }
@@ -1346,7 +1346,7 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 					accounts.length > 0 ? 'success' : 'warning',
 					`Azure 号池当前共有 ${accounts.length} 个账号，自动补机会按${REPLENISHMENT_ACCOUNT_ORDER_LABELS[accountOrder]}逐个检测，选中第一个正常订阅账号`
 				);
-				await dispatchGoReplenisherPlan({
+				await dispatchGoPanelPlan({
 					policy,
 					triggerAccount: account,
 					subscriptionState: status.state,
