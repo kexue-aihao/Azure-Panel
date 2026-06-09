@@ -1,14 +1,21 @@
 import { ComputeManagementClient } from '@azure/arm-compute';
 import { NetworkManagementClient } from '@azure/arm-network';
 import { ResourceManagementClient } from '@azure/arm-resources';
-import type { ResourceSku, ResourceSkuRestrictions, Usage, VirtualMachineSize } from '@azure/arm-compute';
+import type {
+	ResourceSku,
+	ResourceSkuRestrictions,
+	Usage,
+	VirtualMachineImageResource,
+	VirtualMachineSize
+} from '@azure/arm-compute';
 import type { GenericResourceExpanded, Provider, ResourceGroup } from '@azure/arm-resources';
 import type {
 	NetworkInterface,
 	NetworkInterfaceIPConfiguration,
 	NetworkSecurityGroup,
 	PublicIPAddress,
-	SecurityRule
+	SecurityRule,
+	Usage as NetworkUsage
 } from '@azure/arm-network';
 import {
 	createDefaultHttpClient,
@@ -401,7 +408,15 @@ const REGION_SCAN_PRIORITY = [
 	'canadacentral'
 ];
 
-const FEATURED_IMAGE_CANDIDATES = [
+type FeaturedImageCandidate = {
+	label: string;
+	publisher: string;
+	offer: string;
+	sku: string;
+	osType: 'Linux' | 'Windows';
+};
+
+const FEATURED_IMAGE_CANDIDATES: FeaturedImageCandidate[] = [
 	{
 		label: 'Ubuntu 24.04 LTS',
 		publisher: 'Canonical',
@@ -458,7 +473,7 @@ const FEATURED_IMAGE_CANDIDATES = [
 		sku: '2019-datacenter-gensecond',
 		osType: 'Windows'
 	}
-] as const;
+];
 
 type TimedCacheEntry<T> = {
 	expiresAt: number;
@@ -1715,6 +1730,64 @@ function latestImageVersion(versions: { name?: string }[]) {
 		.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }))[0];
 }
 
+function imageResourceName(resource: VirtualMachineImageResource) {
+	return String(resource.name ?? parseResourceName(resource.id ?? '')).trim();
+}
+
+function debianMajorFromOfferOrSku(offer: string, sku = '') {
+	const text = `${offer} ${sku}`;
+	return text.match(/\b(12|11)\b/)?.[1] ?? '';
+}
+
+function debianImageLabel(major: string, sku: string) {
+	const genText = /gen2|gensecond/i.test(sku) ? ' Gen2' : '';
+	return `Debian ${major}${genText}`;
+}
+
+async function discoverDebianImageCandidates(clients: AzureClients, location: string): Promise<FeaturedImageCandidate[]> {
+	const candidates: FeaturedImageCandidate[] = [];
+	const seen = new Set<string>();
+	const offers = await clients.compute.virtualMachineImages.listOffers(location, 'Debian').catch(() => []);
+	for (const offerResource of offers) {
+		const offer = imageResourceName(offerResource);
+		if (!/debian/i.test(offer)) continue;
+		const offerMajor = debianMajorFromOfferOrSku(offer);
+		if (offerMajor && !['11', '12'].includes(offerMajor)) continue;
+
+		const skus = await clients.compute.virtualMachineImages.listSkus(location, 'Debian', offer).catch(() => []);
+		const rankedSkus = skus
+			.map(imageResourceName)
+			.filter((sku) => {
+				const major = debianMajorFromOfferOrSku(offer, sku);
+				return major === '12' || major === '11';
+			})
+			.sort((a, b) => {
+				const majorA = debianMajorFromOfferOrSku(offer, a);
+				const majorB = debianMajorFromOfferOrSku(offer, b);
+				if (majorA !== majorB) return Number(majorB) - Number(majorA);
+				const genA = /gen2|gensecond/i.test(a) ? 0 : 1;
+				const genB = /gen2|gensecond/i.test(b) ? 0 : 1;
+				if (genA !== genB) return genA - genB;
+				return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+			});
+
+		for (const sku of rankedSkus) {
+			const major = debianMajorFromOfferOrSku(offer, sku);
+			const key = `${offer}:${sku}`.toLowerCase();
+			if (!major || seen.has(key)) continue;
+			seen.add(key);
+			candidates.push({
+				label: debianImageLabel(major, sku),
+				publisher: 'Debian',
+				offer,
+				sku,
+				osType: 'Linux'
+			});
+		}
+	}
+	return candidates;
+}
+
 function isPublicIpResourceIPv6(pip: PublicIPAddress) {
 	const raw = pip as PublicIPAddress & {
 		properties?: { publicIPAddressVersion?: string; ipAddress?: string };
@@ -1733,6 +1806,85 @@ function publicIpAddressValue(pip: PublicIPAddress) {
 function publicIpIpConfigurationId(pip: PublicIPAddress) {
 	const raw = pip as PublicIPAddress & { properties?: { ipConfiguration?: { id?: string } } };
 	return String(pip.ipConfiguration?.id ?? raw.properties?.ipConfiguration?.id ?? '').trim();
+}
+
+function publicIpProvisioningState(pip: PublicIPAddress) {
+	const raw = pip as PublicIPAddress & { properties?: { provisioningState?: string } };
+	return String(pip.provisioningState ?? raw.properties?.provisioningState ?? '').trim();
+}
+
+function networkUsageName(usage: NetworkUsage) {
+	return `${usage.name?.value ?? ''} ${usage.name?.localizedValue ?? ''}`.trim();
+}
+
+function isPublicIpUsage(usage: NetworkUsage) {
+	return /public\s*ip|publicip|公网\s*ip|公共\s*ip|公共.*地址/i.test(networkUsageName(usage));
+}
+
+async function ensurePublicIpQuotaAvailable(
+	clients: AzureClients,
+	location: string,
+	progress: CreateVmProgressReporter | undefined,
+	step: string,
+	detail: CreateVmProgressEvent['detail']
+) {
+	try {
+		const usages = await cachedAzureQuery(
+			`network-usages:${clients.subscriptionId}:${location}`,
+			cacheTtlMs('AZURE_NETWORK_USAGE_CACHE_TTL_SECONDS', 60),
+			async () => {
+				const list: NetworkUsage[] = [];
+				for await (const usage of clients.network.usages.list(location)) {
+					list.push(usage);
+				}
+				return list;
+			}
+		);
+		const publicIpUsage = usages.find(isPublicIpUsage);
+		if (!publicIpUsage) return;
+		const current = Number(publicIpUsage.currentValue ?? 0);
+		const limit = Number(publicIpUsage.limit ?? 0);
+		if (!Number.isFinite(current) || !Number.isFinite(limit) || limit <= 0) return;
+		await reportCreateVmProgress(progress, `${step}-quota`, 'info', '公网 IP 配额预检完成', {
+			...detail,
+			usageName: networkUsageName(publicIpUsage),
+			current,
+			limit,
+			remaining: limit - current
+		});
+		if (current >= limit) {
+			throw new Error(
+				`公网 IP 区域配额不足 ${networkUsageName(publicIpUsage) || 'Public IP'}: 已用 ${current}/${limit}`
+			);
+		}
+	} catch (err) {
+		if (isPublicIpQuotaFailure(formatAzureError(err))) throw err;
+		const message = formatAzureError(err);
+		await reportCreateVmProgress(progress, `${step}-quota`, 'info', '公网 IP 配额预检失败，继续尝试创建', {
+			...detail,
+			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
+		});
+	}
+}
+
+async function describePublicIpAfterCreateFailure(
+	clients: AzureClients,
+	resourceGroup: string,
+	publicIpName: string
+) {
+	const pip = await getPublicIpWithRawFallback(clients, resourceGroup, publicIpName).catch(() => null);
+	if (!pip?.id) return '';
+	const state = publicIpProvisioningState(pip);
+	const address = publicIpAddressValue(pip);
+	const ipConfig = publicIpIpConfigurationId(pip);
+	return [
+		`Public IP residual resource exists`,
+		state ? `provisioningState=${state}` : '',
+		address ? `ip=${address}` : 'ip=-',
+		ipConfig ? `ipConfiguration=${parseResourceName(ipConfig) || ipConfig}` : 'ipConfiguration=-'
+	]
+		.filter(Boolean)
+		.join('；');
 }
 
 type ArmPublicIpResource = {
@@ -2476,8 +2628,24 @@ export async function listFeaturedVmImages(
 	location: string
 ): Promise<VmImageOption[]> {
 	const images: VmImageOption[] = [];
+	const candidates = [...FEATURED_IMAGE_CANDIDATES];
+	const fixedDebianKeys = new Set(
+		candidates
+			.filter((candidate) => candidate.publisher.toLowerCase() === 'debian')
+			.map((candidate) => `${candidate.offer}:${candidate.sku}`.toLowerCase())
+	);
+	const dynamicDebianCandidates = await discoverDebianImageCandidates(clients, location).catch(() => []);
+	for (const candidate of dynamicDebianCandidates) {
+		const key = `${candidate.offer}:${candidate.sku}`.toLowerCase();
+		if (fixedDebianKeys.has(key)) continue;
+		fixedDebianKeys.add(key);
+		const insertAt = candidates.findIndex((item) => item.publisher === 'MicrosoftWindowsServer');
+		if (insertAt === -1) candidates.push(candidate);
+		else candidates.splice(insertAt, 0, candidate);
+	}
+	const seenImages = new Set<string>();
 
-	for (const candidate of FEATURED_IMAGE_CANDIDATES) {
+	for (const candidate of candidates) {
 		try {
 			const versions = await clients.compute.virtualMachineImages.list(
 				location,
@@ -2505,9 +2673,12 @@ export async function listFeaturedVmImages(
 				// Version listing is enough for creation; details only enrich the dropdown.
 			}
 
+			const imageReference = `${candidate.publisher}:${candidate.offer}:${candidate.sku}:${version}`;
+			if (seenImages.has(imageReference.toLowerCase())) continue;
+			seenImages.add(imageReference.toLowerCase());
 			images.push({
 				label: `${candidate.label} (${version})`,
-				imageReference: `${candidate.publisher}:${candidate.offer}:${candidate.sku}:${version}`,
+				imageReference,
 				publisher: candidate.publisher,
 				offer: candidate.offer,
 				sku: candidate.sku,
@@ -3340,6 +3511,18 @@ async function createPublicIp(
 		ddosProtection: Boolean(options.ddosProtectionPlanId)
 	}));
 	try {
+		if (options.version === 'IPv4') {
+			await ensurePublicIpQuotaAvailable(
+				clients,
+				options.location,
+				options.progress,
+				step,
+				withPublicIpDetail({
+					name: options.name,
+					version: options.version
+				})
+			);
+		}
 		const poller = await clients.network.publicIPAddresses.beginCreateOrUpdate(
 			options.resourceGroup,
 			options.name,
@@ -3423,7 +3606,13 @@ async function createPublicIp(
 		}));
 		return ready;
 	} catch (err) {
-		const message = enrichPublicIpCreateFailureMessage(options.version, formatAzureError(err));
+		const failureDetail = await describePublicIpAfterCreateFailure(
+			clients,
+			options.resourceGroup,
+			options.name
+		).catch(() => '');
+		const rawMessage = [formatAzureError(err), failureDetail].filter(Boolean).join(' | ');
+		const message = enrichPublicIpCreateFailureMessage(options.version, rawMessage);
 		const recovered = await recoverPublicIpAfterCreateFailure(clients, options);
 		if (recovered) {
 			await reportCreateVmProgress(
@@ -3487,8 +3676,10 @@ function conciseProgressError(message: string, maxLength = 240) {
 }
 
 function isPublicIpQuotaFailure(message: string) {
-	return /quota|limit|maximum|exceed|publicipaddresscountlimitreached|publicipcountlimitreached|public ip count|public ip address count/i.test(
-		message
+	return (
+		/publicipaddresscountlimitreached|publicipcountlimitreached|public\s*ip\s*(address\s*)?count\s*(limit|quota)|quota\s*(exceeded|limit|reached|不足)|limit\s*(exceeded|reached)|exceed(s|ed|ing)?\s+(the\s+)?(approved\s+)?(quota|limit)|maximum\s+.*\s+(reached|exceeded)/i.test(
+			message
+		) || /公网\s*IP.*(配额|额度).*不足|(配额|额度).*不足|超过.*(配额|额度|上限|限制)|达到.*(上限|限制)/i.test(message)
 	);
 }
 

@@ -5,6 +5,7 @@ import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
 type VmImageCache = Record<string, VmImageOption[]>;
+const IMAGE_CACHE_VERSION = 2;
 
 function shouldRefreshCache(value: string | null) {
 	return ['1', 'true', 'yes', 'force'].includes((value ?? '').trim().toLowerCase());
@@ -40,23 +41,25 @@ function normalizeImage(item: unknown): VmImageOption | null {
 	};
 }
 
-function parseImageCache(raw: string | null | undefined): VmImageCache {
-	if (!raw?.trim()) return {};
+function parseImageCache(raw: string | null | undefined): { version: number; locations: VmImageCache } {
+	if (!raw?.trim()) return { version: 0, locations: {} };
 
 	try {
 		const parsed = JSON.parse(raw) as unknown;
-		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { version: 0, locations: {} };
 
 		const cache: VmImageCache = {};
+		const version = Number((parsed as Record<string, unknown>).__version ?? 0) || 0;
 		for (const [location, value] of Object.entries(parsed as Record<string, unknown>)) {
+			if (location === '__version') continue;
 			const key = normalizeLocation(location);
 			if (!key || !Array.isArray(value)) continue;
 			const images = value.map(normalizeImage).filter((image): image is VmImageOption => image !== null);
 			if (images.length > 0) cache[key] = images;
 		}
-		return cache;
+		return { version, locations: cache };
 	} catch {
-		return {};
+		return { version: 0, locations: {} };
 	}
 }
 
@@ -71,7 +74,9 @@ export const GET: RequestHandler = async (event) => {
 		const locationKey = normalizeLocation(location);
 		const cachedAccount = await getUserAccount(user.id, accountId);
 		const cache = parseImageCache(cachedAccount.vmImageCache);
-		if (!refresh && cache[locationKey]?.length) return ok(cache[locationKey]);
+		if (!refresh && cache.version >= IMAGE_CACHE_VERSION && cache.locations[locationKey]?.length) {
+			return ok(cache.locations[locationKey]);
+		}
 
 		const { account, proxy } = await getUserAccountWithSelectedProxy(user.id, accountId, {
 			clientIp: getRequestClientIp(event),
@@ -84,7 +89,8 @@ export const GET: RequestHandler = async (event) => {
 				user.id,
 				accountId,
 				JSON.stringify({
-					...cache,
+					__version: IMAGE_CACHE_VERSION,
+					...cache.locations,
 					[locationKey]: images
 				})
 			);
