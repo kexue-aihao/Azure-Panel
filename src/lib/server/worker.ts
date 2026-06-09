@@ -101,6 +101,12 @@ function errorMessage(err: unknown) {
 	return err instanceof Error ? err.message : String(err);
 }
 
+function isProxyOutboundFailure(message: string) {
+	return /代理出站失败|代理握手失败|socket hang up|SocksClient|REQUEST_SEND_ERROR|ECONNRESET|ETIMEDOUT/i.test(
+		message
+	);
+}
+
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
 	let timerId: ReturnType<typeof setTimeout> | undefined;
 	try {
@@ -710,6 +716,46 @@ async function cleanupFailedReplenishmentResourceGroup(
 	);
 }
 
+async function cleanupReplenishmentResourceGroupWithFallback(options: {
+	policy: WorkflowPolicy;
+	account: AzureAccount;
+	resourceGroup: string;
+	getBootProxyPool: () => Promise<WorkerBootProxyRuntime[]>;
+}) {
+	try {
+		const cleanupRuntime = await createRuntimeForAccount(options.policy.id, options.account, {
+			getBootProxyPool: options.getBootProxyPool
+		});
+		if (!cleanupRuntime) throw new Error(`无法为账号 ${options.account.name} 创建 Azure 清理客户端`);
+		await insertWorkflowLog(
+			options.policy.id,
+			'cleanup_resource_group',
+			'running',
+			`资源组清理出口: ${cleanupRuntime.proxyLabel}`
+		);
+		await cleanupFailedReplenishmentResourceGroup(
+			options.policy.id,
+			cleanupRuntime.clients,
+			options.resourceGroup
+		);
+	} catch (firstErr) {
+		const firstMessage = errorMessage(firstErr);
+		await insertWorkflowLog(
+			options.policy.id,
+			'cleanup_resource_group',
+			'warning',
+			`代理出口清理资源组失败，尝试服务器直连清理: ${firstMessage}`
+		);
+		await cleanupFailedReplenishmentResourceGroup(
+			options.policy.id,
+			createAzureClients(options.account, null),
+			options.resourceGroup
+		).catch((directErr) => {
+			throw new Error(`${firstMessage}；直连清理也失败: ${errorMessage(directErr)}`);
+		});
+	}
+}
+
 async function cleanupPendingReplenishmentResourceGroup(
 	policy: WorkflowPolicy,
 	accounts: AzureAccount[],
@@ -744,9 +790,12 @@ async function cleanupPendingReplenishmentResourceGroup(
 		`检测到上次补机失败遗留资源组 ${resourceGroup}，本轮先清理，清理完成前不会创建新的资源组`
 	);
 	try {
-		const runtime = await createRuntimeForAccount(policy.id, account, { getBootProxyPool });
-		if (!runtime) throw new Error(`无法为账号 ${account.name} 创建 Azure 客户端`);
-		await cleanupFailedReplenishmentResourceGroup(policy.id, runtime.clients, resourceGroup);
+		await cleanupReplenishmentResourceGroupWithFallback({
+			policy,
+			account,
+			resourceGroup,
+			getBootProxyPool
+		});
 		await clearReplenishmentFailure(policy);
 		return true;
 	} catch (err) {
@@ -1251,12 +1300,13 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 				}
 				let accountPoolCursor = 0;
 				const excludedAccountIds = new Set([account.id]);
-				for (let i = 0; i < deficit; i++) {
+				const maxCreateAttempts = Math.max(deficit, accounts.length);
+				for (let i = 0; i < maxCreateAttempts; i++) {
 					await insertWorkflowLog(
 						policy.id,
 						'auto_create',
 						'running',
-						`准备创建第 ${i + 1}/${deficit} 台补机，按${REPLENISHMENT_ACCOUNT_ORDER_LABELS[accountOrder]}选择可用号池账号`
+						`准备创建补机，目标缺口 ${deficit} 台，本轮尝试 ${i + 1}/${maxCreateAttempts}，按${REPLENISHMENT_ACCOUNT_ORDER_LABELS[accountOrder]}选择可用号池账号`
 					);
 					const selected = await pickReplenishmentRuntimeFromPool({
 						policy,
@@ -1340,7 +1390,12 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 						let cleanupFailed = false;
 						let cleanupFailureMessage = '';
 						try {
-							await cleanupFailedReplenishmentResourceGroup(policy.id, createClients, resourceGroup);
+							await cleanupReplenishmentResourceGroupWithFallback({
+								policy,
+								account: replenishRuntime.account,
+								resourceGroup,
+								getBootProxyPool
+							});
 						} catch (cleanupErr) {
 							cleanupFailed = true;
 							cleanupFailureMessage = errorMessage(cleanupErr);
@@ -1354,6 +1409,15 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 						const cooldownMessage = cleanupFailed
 							? `${createFailureMessage}；临时资源组 ${resourceGroup} 清理失败: ${cleanupFailureMessage}`
 							: createFailureMessage;
+						if (!cleanupFailed && isProxyOutboundFailure(createFailureMessage) && i < maxCreateAttempts - 1) {
+							await insertWorkflowLog(
+								policy.id,
+								'auto_create',
+								'warning',
+								`本次补机失败来自代理出口异常，临时资源已清理，将跳过该出口继续尝试下一个候选账号`
+							);
+							continue;
+						}
 						const cooldown = await recordReplenishmentFailure(policy, cooldownMessage, {
 							resourceGroup: cleanupFailed ? resourceGroup : '',
 							accountId: cleanupFailed ? replenishRuntime.account.id : 0,
