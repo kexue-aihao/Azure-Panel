@@ -151,9 +151,11 @@ ensure_proxy_cores
 npm_build_all
 
 # ---------- 重启 Supervisor / aaPanel Node 项目 ----------
+cleanup_go_panel_runtime "$APP_DIR" "azure-panel-go" || true
 runtime_memory_cleanup_before_restart "$APP_DIR" || true
 
 if [[ "${SKIP_SUPERVISOR:-0}" != "1" ]]; then
+	write_supervisor_configs "$(find_node_bin)" "$APP_DIR" "$HEALTH_PORT" "$WEB_PROGRAM" "$WORKER_PROGRAM"
 	if restart_aapanel_node_projects "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}" "$WORKER_PROGRAM" 2>/dev/null; then
 		log "已通过 aaPanel 重启 Node 项目"
 	else

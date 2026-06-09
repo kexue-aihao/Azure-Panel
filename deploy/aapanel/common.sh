@@ -838,6 +838,57 @@ cleanup_project_node_runtimes() {
 	terminate_pids "old Web/Worker Node" "${pids[@]}"
 }
 
+cleanup_go_panel_runtime() {
+	local app_dir="${1:-$(pwd)}"
+	local program="${2:-azure-panel-go}"
+	local ctl conf_dir conf_file
+	local -a pids=()
+
+	if [[ "${SKIP_GO_PANEL_CLEANUP:-0}" == "1" ]]; then
+		warn "Skipped old Go panel cleanup (SKIP_GO_PANEL_CLEANUP=1)"
+		return 0
+	fi
+
+	ctl="$(find_supervisorctl)"
+	if [[ -n "$ctl" ]]; then
+		run_supervisorctl stop "$program" 2>/dev/null || true
+		run_supervisorctl remove "$program" 2>/dev/null || true
+	fi
+
+	while IFS= read -r conf_dir; do
+		[[ -n "$conf_dir" ]] || continue
+		if [[ "$conf_dir" == *"/profile" ]]; then
+			conf_file="${conf_dir}/${program}.ini"
+		else
+			conf_file="${conf_dir}/${program}.conf"
+		fi
+		if [[ -f "$conf_file" ]]; then
+			log "删除旧 Go Panel Supervisor 配置: $conf_file"
+			rm -f "$conf_file" 2>/dev/null || true
+		fi
+	done < <(supervisor_conf_dirs)
+
+	rm -f "${app_dir}/deploy/aapanel/generated/${program}.conf" 2>/dev/null || true
+
+	mapfile -t pids < <(
+		{
+			list_project_runtime_pids "$app_dir" "bin/azure-panel-go"
+			pgrep -f "${app_dir}/bin/azure-panel-go" 2>/dev/null || true
+		} | sort -n -u
+	)
+	terminate_pids "old Go panel" "${pids[@]}"
+
+	if [[ -x "${app_dir}/bin/azure-panel-go" ]]; then
+		log "删除旧 Go Panel 二进制: ${app_dir}/bin/azure-panel-go"
+		rm -f "${app_dir}/bin/azure-panel-go" 2>/dev/null || true
+	fi
+
+	if [[ -n "$ctl" ]]; then
+		run_supervisorctl reread 2>/dev/null || true
+		run_supervisorctl update 2>/dev/null || true
+	fi
+}
+
 cleanup_managed_proxy_runtimes() {
 	local app_dir="${1:-$(pwd)}"
 	local managed_dir="${MANAGED_PROXY_DIR:-${app_dir}/data/managed-proxies}"
