@@ -119,14 +119,15 @@ MYSQL_DATABASE=azure_panel
 
 SECRET_KEY=随机长字符串
 ENCRYPTION_KEY=32位随机密钥
-WORKER_INTERVAL_SECONDS=60
+WORKER_INTERVAL_SECONDS=30
+GO_REPLENISHER_ENABLED=false
 
 HOST=127.0.0.1
 PORT=3000
 ENABLE_EMBEDDED_WORKER=false
 ```
 
-> `ENABLE_EMBEDDED_WORKER=false` 表示 Web 进程不内嵌补机引擎，由 Supervisor 独立 Worker 负责。
+> `ENABLE_EMBEDDED_WORKER=false` 表示 Web 进程不内嵌补机引擎，由 Supervisor 独立 Worker 负责。`GO_REPLENISHER_ENABLED=false` 为默认稳妥配置，打开后会启用可选 Go 补机侧车并保留 Node Worker 回退。
 
 ## 六、安装依赖并构建（手动安装时）
 

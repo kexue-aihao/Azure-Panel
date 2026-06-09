@@ -129,6 +129,7 @@ MYSQL_DATABASE="${MYSQL_DATABASE:-azure_panel}"
 APP_PORT="${APP_PORT:-3000}"
 WEB_PROGRAM="${WEB_PROGRAM:-azure-panel-web}"
 WORKER_PROGRAM="${WORKER_PROGRAM:-azure-panel-worker}"
+GO_REPLENISHER_PROGRAM="${GO_REPLENISHER_PROGRAM:-azure-panel-go-replenisher}"
 DOMAIN="${DOMAIN:-}"
 AAPANEL_WEB_PROJECT_NAME="${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}"
 
@@ -260,16 +261,17 @@ setup_supervisor() {
 		return
 	fi
 
-	if [[ "${SKIP_SUPERVISOR_WEB:-0}" == "1" && "${SKIP_SUPERVISOR_WORKER:-0}" == "1" ]]; then
+	if [[ "${SKIP_SUPERVISOR_WEB:-0}" == "1" && "${SKIP_SUPERVISOR_WORKER:-0}" == "1" ]] && ! go_replenisher_enabled "${APP_DIR}/.env"; then
 		warn "Web/Worker 均由 aaPanel Node 项目管理，跳过 Supervisor"
 		return
 	fi
 
-	local port
+	local port go_program
 	port="$(read_port_from_env "${APP_DIR}/.env" "$APP_PORT")"
 	if is_app_healthy "$port"; then
-		warn "端口 ${port} 已有服务在运行，跳过 Supervisor 启动（避免端口冲突）"
-		return
+		warn "端口 ${port} 已有服务在运行，跳过 Web/Worker Supervisor 启动（避免端口冲突）"
+		export SKIP_SUPERVISOR_WEB=1
+		export SKIP_SUPERVISOR_WORKER=1
 	fi
 
 	local node_bin
@@ -277,7 +279,9 @@ setup_supervisor() {
 	mkdir -p /www/wwwlogs 2>/dev/null || true
 
 	write_supervisor_configs "$node_bin" "$APP_DIR" "$APP_PORT" "$WEB_PROGRAM" "$WORKER_PROGRAM"
-	supervisor_reload_and_start "$WEB_PROGRAM" "$WORKER_PROGRAM" || true
+	write_go_replenisher_supervisor_config "$APP_DIR" "$GO_REPLENISHER_PROGRAM" || true
+	go_program="$(go_replenisher_supervisor_program "${APP_DIR}/.env" "$APP_DIR")"
+	supervisor_reload_and_start "$WEB_PROGRAM" "$WORKER_PROGRAM" "$go_program" || true
 }
 
 setup_aapanel_resources() {
@@ -335,6 +339,7 @@ main() {
 	setup_mysql
 	ensure_proxy_cores
 	npm_build_all
+	build_go_replenisher "$APP_DIR"
 
 	local port aapanel_ok=0
 	port="$(read_port_from_env "${APP_DIR}/.env" "$APP_PORT")"
@@ -365,6 +370,9 @@ main() {
 		info "域名     : ${DOMAIN}"
 	else
 		info "Supervisor: $WEB_PROGRAM, $WORKER_PROGRAM"
+	fi
+	if go_replenisher_enabled "${APP_DIR}/.env"; then
+		info "Go sidecar : $GO_REPLENISHER_PROGRAM"
 	fi
 	info "日志目录 : /www/wwwlogs/"
 	echo ""

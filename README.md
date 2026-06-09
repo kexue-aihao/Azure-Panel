@@ -62,7 +62,8 @@ Azure Panel 是一个基于 **SvelteKit 2 + Svelte 5 + TypeScript + Node.js Work
 
 ### 自动补机
 
-- 独立 Worker 每 60 秒检测正在使用账号的订阅状态。
+- 独立 Worker 默认每 30 秒检测正在使用账号的订阅状态。
+- 可选启用 Go 补机侧车作为高性能调度/观测入口，默认仍由 Node Worker 执行 Azure 创建以保持兼容。
 - 触发异常状态包括 `banned`、`warning`、`warned`、`disabled`。
 - 检测到异常会发送 Telegram 通知，并立即进入补机流程。
 - 上一轮补机流程完成前不会再次触发新一轮补机，避免重复创建资源。
@@ -188,7 +189,7 @@ SQLITE_PATH=./data/azure-panel.db
 HOST=127.0.0.1
 PORT=3000
 ENABLE_EMBEDDED_WORKER=true
-WORKER_INTERVAL_SECONDS=60
+WORKER_INTERVAL_SECONDS=30
 ```
 
 访问开发服务后注册第一个用户，第一个用户会自动成为管理员。
@@ -308,8 +309,11 @@ HOST=127.0.0.1
 PORT=3000
 
 ENABLE_EMBEDDED_WORKER=false
-WORKER_INTERVAL_SECONDS=60
+WORKER_INTERVAL_SECONDS=30
 NODE_MAX_OLD_SPACE_SIZE=192
+
+GO_REPLENISHER_ENABLED=false
+GO_REPLENISHER_URL=http://127.0.0.1:43170
 ```
 
 ### 5. 构建
@@ -331,6 +335,9 @@ NODE_ENV=production ENABLE_EMBEDDED_WORKER=false node build/worker.js
 | --- | --- | --- |
 | Web | `node build/index.js` 或 `node build` | 面板 Web 服务 |
 | Worker | `node build/worker.js` | 自动补机与订阅检测 |
+| Go replenisher | `bin/azure-panel-go-replenisher` | 可选补机侧车，负责快速接收补机调度并记录 30 秒提交预算 |
+
+`install.sh` 和 `update.sh` 会自动检测 Go 工具链；如果 Go 可用，会构建 `services/replenisher` 到 `bin/azure-panel-go-replenisher`。`GO_REPLENISHER_ENABLED=false` 时不会启动侧车；打开后如果侧车异常，Node Worker 会自动回退到原有补机流程。
 
 ### 7. Nginx 反向代理
 
@@ -407,8 +414,12 @@ SKIP_GIT_RESET=1 ./update.sh
 | `HOST` | Web 监听地址 |
 | `PORT` | Web 监听端口 |
 | `ENABLE_EMBEDDED_WORKER` | 是否在 Web 进程内嵌 Worker，生产建议 `false` |
-| `WORKER_INTERVAL_SECONDS` | Worker 基础轮询间隔，默认 60 |
+| `WORKER_INTERVAL_SECONDS` | Worker 基础轮询间隔，默认 30 |
 | `NODE_MAX_OLD_SPACE_SIZE` | Node V8 内存上限，低内存服务器建议 128-256 |
+| `GO_REPLENISHER_ENABLED` | 是否启用可选 Go 补机侧车，默认 `false` |
+| `GO_REPLENISHER_URL` | Node Worker 访问 Go 侧车的本地地址，默认 `http://127.0.0.1:43170` |
+| `GO_REPLENISHER_TIMEOUT_MS` | Worker 调用 Go 侧车的超时时间，默认 1500ms，失败会回退 Node 流程 |
+| `GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS` | 侧车记录的补机提交预算，默认 30 秒；Azure VM 最终就绪仍取决于 Azure ARM 长轮询 |
 | `SING_BOX_BIN` | 手动指定 sing-box 可执行文件路径 |
 | `XRAY_BIN` | 手动指定 Xray 可执行文件路径 |
 | `MANAGED_PROXY_DIR` | 托管代理核心运行配置目录 |
@@ -541,7 +552,7 @@ DNS 绑定可用于 VM 创建后、自动补机成功后、换 IPv4 或刷 IPv4 
 13. 选择补机账号顺序，默认按加入 Azure 号池时间。
 14. 保存策略。
 
-策略保存后，Worker 会每 60 秒检测一次正在使用账号的订阅状态。检测到异常状态时立即触发补机。补机成功后会发送通知、同步 DNS、删除异常账号并切换监控账号。
+策略保存后，Worker 默认每 30 秒检测一次正在使用账号的订阅状态。检测到异常状态时立即触发补机。补机成功后会发送通知、同步 DNS、删除异常账号并切换监控账号。
 
 ### 9. 查看日志
 

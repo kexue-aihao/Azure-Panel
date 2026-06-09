@@ -257,6 +257,27 @@ fix_env_file_permissions() {
 	fi
 }
 
+is_truthy_value() {
+	case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+		1|true|yes|on|enabled) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+append_env_default() {
+	local env_file="$1"
+	local key="$2"
+	local value="$3"
+	local comment="${4:-}"
+
+	[[ -f "$env_file" ]] || return 0
+	if grep -q "^${key}=" "$env_file" 2>/dev/null; then
+		return 0
+	fi
+	[[ -n "$comment" ]] && printf '\n%s\n' "$comment" >>"$env_file"
+	printf '%s=%s\n' "$key" "$value" >>"$env_file"
+}
+
 ensure_runtime_env_defaults() {
 	local env_file="${1:-.env}"
 	[[ -f "$env_file" ]] || return 0
@@ -265,6 +286,15 @@ ensure_runtime_env_defaults() {
 		printf '\n# Runtime memory guard: use the standalone worker process in production.\nENABLE_EMBEDDED_WORKER=false\n' >>"$env_file"
 		log "Added ENABLE_EMBEDDED_WORKER=false to $env_file"
 	fi
+
+	append_env_default "$env_file" "GO_REPLENISHER_ENABLED" "false" \
+		"# Optional Go replenisher sidecar. Node Worker remains the compatibility fallback."
+	append_env_default "$env_file" "GO_REPLENISHER_URL" "http://127.0.0.1:43170"
+	append_env_default "$env_file" "GO_REPLENISHER_HOST" "127.0.0.1"
+	append_env_default "$env_file" "GO_REPLENISHER_PORT" "43170"
+	append_env_default "$env_file" "GO_REPLENISHER_MODE" "observe"
+	append_env_default "$env_file" "GO_REPLENISHER_TIMEOUT_MS" "1500"
+	append_env_default "$env_file" "GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS" "30"
 }
 
 read_port_from_env() {
@@ -291,8 +321,16 @@ write_env_file() {
 SECRET_KEY=${secret_key}
 ENCRYPTION_KEY=${encryption_key}
 
-WORKER_INTERVAL_SECONDS=60
+WORKER_INTERVAL_SECONDS=30
 ENABLE_EMBEDDED_WORKER=false
+
+GO_REPLENISHER_ENABLED=false
+GO_REPLENISHER_URL=http://127.0.0.1:43170
+GO_REPLENISHER_HOST=127.0.0.1
+GO_REPLENISHER_PORT=43170
+GO_REPLENISHER_MODE=observe
+GO_REPLENISHER_TIMEOUT_MS=1500
+GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS=30
 
 HOST=127.0.0.1
 PORT=${app_port}
@@ -923,6 +961,146 @@ npm_build_all() {
 	post_deploy_cleanup "$(pwd)" "$npm_bin"
 }
 
+find_go_bin() {
+	if [[ -n "${GO_BIN:-}" && -x "$GO_BIN" ]]; then
+		echo "$GO_BIN"
+		return 0
+	fi
+	if command -v go >/dev/null 2>&1; then
+		command -v go
+		return 0
+	fi
+	for candidate in /usr/local/go/bin/go /usr/bin/go /usr/local/bin/go; do
+		[[ -x "$candidate" ]] || continue
+		echo "$candidate"
+		return 0
+	done
+	return 1
+}
+
+go_replenisher_enabled() {
+	local env_file="${1:-.env}"
+	local enabled="${GO_REPLENISHER_ENABLED:-}"
+	[[ -z "$enabled" && -f "$env_file" ]] && enabled="$(get_env_value GO_REPLENISHER_ENABLED "$env_file")"
+	is_truthy_value "$enabled"
+}
+
+go_replenisher_binary_path() {
+	local app_dir="${1:-$(pwd)}"
+	echo "${GO_REPLENISHER_BIN:-${app_dir}/bin/azure-panel-go-replenisher}"
+}
+
+build_go_replenisher() {
+	local app_dir="${1:-$(pwd)}"
+	local service_dir="${app_dir}/services/replenisher"
+	local bin_path
+	local go_bin
+
+	if [[ "${SKIP_GO_REPLENISHER_BUILD:-0}" == "1" ]]; then
+		warn "Skipped Go replenisher build (SKIP_GO_REPLENISHER_BUILD=1)"
+		return 0
+	fi
+
+	[[ -d "$service_dir" ]] || {
+		warn "Go replenisher source not found: $service_dir"
+		return 0
+	}
+
+	go_bin="$(find_go_bin 2>/dev/null || true)"
+	if [[ -z "$go_bin" ]]; then
+		if go_replenisher_enabled "${app_dir}/.env"; then
+			warn "GO_REPLENISHER_ENABLED=true but Go toolchain was not found; Node Worker fallback remains active"
+		else
+			warn "Go toolchain not found; skip optional Go replenisher build"
+		fi
+		return 0
+	fi
+
+	bin_path="$(go_replenisher_binary_path "$app_dir")"
+	mkdir -p "$(dirname "$bin_path")"
+	log "Building Go replenisher sidecar -> $bin_path"
+	if (
+		cd "$service_dir"
+		CGO_ENABLED=0 "$go_bin" build -trimpath -ldflags "-s -w" -o "$bin_path" ./cmd/replenisher
+	); then
+		chmod +x "$bin_path" 2>/dev/null || true
+		log "Go replenisher build completed"
+		return 0
+	fi
+
+	if [[ "${REQUIRE_GO_REPLENISHER:-0}" == "1" ]]; then
+		die "Go replenisher build failed and REQUIRE_GO_REPLENISHER=1"
+	fi
+	warn "Go replenisher build failed; Node Worker fallback remains active"
+	return 0
+}
+
+write_go_replenisher_supervisor_config() {
+	local app_dir="$1"
+	local program="${2:-azure-panel-go-replenisher}"
+	local bin_path env_file port host mode token deadline conf_dir conf_file body
+
+	env_file="${app_dir}/.env"
+	if ! go_replenisher_enabled "$env_file"; then
+		return 0
+	fi
+
+	bin_path="$(go_replenisher_binary_path "$app_dir")"
+	if [[ ! -x "$bin_path" ]]; then
+		warn "Go replenisher is enabled but binary is missing: $bin_path"
+		return 1
+	fi
+
+	host="${GO_REPLENISHER_HOST:-$(get_env_value GO_REPLENISHER_HOST "$env_file")}"
+	port="${GO_REPLENISHER_PORT:-$(get_env_value GO_REPLENISHER_PORT "$env_file")}"
+	mode="${GO_REPLENISHER_MODE:-$(get_env_value GO_REPLENISHER_MODE "$env_file")}"
+	token="${GO_REPLENISHER_TOKEN:-$(get_env_value GO_REPLENISHER_TOKEN "$env_file")}"
+	deadline="${GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS:-$(get_env_value GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS "$env_file")}"
+	host="${host:-127.0.0.1}"
+	port="${port:-43170}"
+	mode="${mode:-observe}"
+	deadline="${deadline:-30}"
+
+	body="; Azure Panel Go replenisher sidecar - generated by install.sh/update.sh
+[program:${program}]
+command=${bin_path}
+directory=${app_dir}
+user=www
+autostart=true
+autorestart=true
+startsecs=2
+startretries=3
+stopwaitsecs=10
+stdout_logfile=/www/wwwlogs/${program}.log
+stderr_logfile=/www/wwwlogs/${program}-error.log
+environment=GO_REPLENISHER_HOST=\"${host}\",GO_REPLENISHER_PORT=\"${port}\",GO_REPLENISHER_MODE=\"${mode}\",GO_REPLENISHER_TOKEN=\"${token}\",GO_REPLENISHER_SUBMIT_DEADLINE_SECONDS=\"${deadline}\""
+
+	mkdir -p /www/wwwlogs 2>/dev/null || true
+	mkdir -p "${app_dir}/deploy/aapanel/generated"
+
+	while IFS= read -r conf_dir; do
+		[[ -n "$conf_dir" ]] || continue
+		mkdir -p "$conf_dir" 2>/dev/null || continue
+		if [[ "$conf_dir" == *"/profile" ]]; then
+			conf_file="${conf_dir}/${program}.ini"
+		else
+			conf_file="${conf_dir}/${program}.conf"
+		fi
+		log "Writing Go replenisher Supervisor config -> $conf_file"
+		printf '%s\n' "$body" >"$conf_file"
+	done < <(supervisor_conf_dirs)
+
+	printf '%s\n' "$body" >"${app_dir}/deploy/aapanel/generated/${program}.conf"
+}
+
+go_replenisher_supervisor_program() {
+	local env_file="${1:-.env}"
+	local app_dir="${2:-$(pwd)}"
+	if go_replenisher_enabled "$env_file" && [[ -x "$(go_replenisher_binary_path "$app_dir")" ]]; then
+		echo "${GO_REPLENISHER_PROGRAM:-azure-panel-go-replenisher}"
+	fi
+}
+
 detect_arch_label() {
 	local machine
 	machine="$(uname -m 2>/dev/null || echo unknown)"
@@ -1274,6 +1452,7 @@ environment=NODE_ENV=\"production\",ENABLE_EMBEDDED_WORKER=\"false\",NODE_OPTION
 supervisor_reload_and_start() {
 	local web_program="$1"
 	local worker_program="$2"
+	local extra_program="${3:-}"
 	local main_conf update_out
 
 	if [[ -z "$(find_supervisorctl)" ]]; then
@@ -1300,6 +1479,7 @@ supervisor_reload_and_start() {
 	local -a progs=()
 	[[ "${SKIP_SUPERVISOR_WEB:-0}" != "1" ]] && progs+=("$web_program")
 	[[ "${SKIP_SUPERVISOR_WORKER:-0}" != "1" ]] && progs+=("$worker_program")
+	[[ -n "$extra_program" ]] && progs+=("$extra_program")
 
 	if [[ ${#progs[@]} -eq 0 ]]; then
 		warn "无 Supervisor 进程需启动（已由 aaPanel Node 项目管理）"
@@ -1323,10 +1503,12 @@ supervisor_reload_and_start() {
 restart_supervisor_programs() {
 	local web_program="$1"
 	local worker_program="$2"
+	local extra_program="${3:-}"
 	local -a progs=()
 
 	[[ "${SKIP_SUPERVISOR_WEB:-0}" != "1" ]] && progs+=("$web_program")
 	[[ "${SKIP_SUPERVISOR_WORKER:-0}" != "1" ]] && progs+=("$worker_program")
+	[[ -n "$extra_program" ]] && progs+=("$extra_program")
 
 	if [[ ${#progs[@]} -eq 0 ]]; then
 		return 0

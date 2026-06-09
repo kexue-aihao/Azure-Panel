@@ -173,7 +173,7 @@ export const workflowPolicies = sqliteTable('workflow_policies', {
 		.default(false),
 	ipPrefix: text('ip_prefix').notNull().default('85.211'),
 	ipBrushMaxAttempts: integer('ip_brush_max_attempts').notNull().default(30),
-	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(60),
+	checkIntervalSeconds: integer('check_interval_seconds').notNull().default(30),
 	statusCheckEnabled: integer('status_check_enabled', { mode: 'boolean' }).notNull().default(true),
 	statusTriggerStates: text('status_trigger_states').notNull().default('banned,warning,warned,disabled'),
 	replenishmentAccountOrder: text('replenishment_account_order')

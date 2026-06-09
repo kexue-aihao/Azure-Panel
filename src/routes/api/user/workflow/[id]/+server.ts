@@ -50,7 +50,7 @@ export const PUT: RequestHandler = async (event) => {
 	if (body.ip_prefix !== undefined) updates.ipPrefix = String(body.ip_prefix);
 	if (body.ip_brush_max_attempts !== undefined)
 		updates.ipBrushMaxAttempts = Number(body.ip_brush_max_attempts) || 30;
-	if (body.check_interval_seconds !== undefined) updates.checkIntervalSeconds = 60;
+	if (body.check_interval_seconds !== undefined) updates.checkIntervalSeconds = 30;
 	if (body.status_check_enabled !== undefined)
 		updates.statusCheckEnabled = Boolean(body.status_check_enabled);
 	if (body.status_trigger_states !== undefined)
