@@ -4348,41 +4348,57 @@ async function detachOldPublicIpOrSwapDirectly(
 		prefix: 'replace-ip' | 'brush-ip';
 	}
 ): Promise<'detached' | 'swapped' | 'none'> {
-	await reportCreateVmProgress(
-		options.progress,
-		`${options.prefix}-swap`,
-		'running',
-		'Replace NIC IPv4 public IP binding',
-		{
-			nicName: options.nicName,
-			oldPublicIpName: options.oldPublicIpName,
-			oldPublicIPv4: options.oldPublicIPv4,
-			publicIpName: parseResourceName(options.newPublicIpId)
-		}
-	);
-	await attachPublicIpToNic(clients, {
-		nicResourceGroup: options.nicResourceGroup,
-		nicName: options.nicName,
-		nic: options.nic,
-		ipConfig: options.ipConfig,
-		publicIpId: options.newPublicIpId,
-		progress: options.progress,
-		step: `${options.prefix}-swap`
-	});
-	await reportCreateVmProgress(
-		options.progress,
-		`${options.prefix}-swap`,
-		'success',
-		'NIC IPv4 public IP binding replaced',
-		{
-			nicName: options.nicName,
-			oldPublicIpName: options.oldPublicIpName,
-			publicIpName: parseResourceName(options.newPublicIpId)
-		}
-	);
-	return options.oldPublicIpId ? 'swapped' : 'none';
-
 	if (!options.oldPublicIpId) return 'none';
+
+	try {
+		await reportCreateVmProgress(
+			options.progress,
+			`${options.prefix}-swap`,
+			'running',
+			'Replace NIC IPv4 public IP binding',
+			{
+				nicName: options.nicName,
+				oldPublicIpName: options.oldPublicIpName,
+				oldPublicIPv4: options.oldPublicIPv4,
+				publicIpName: parseResourceName(options.newPublicIpId)
+			}
+		);
+		await attachPublicIpToNic(clients, {
+			nicResourceGroup: options.nicResourceGroup,
+			nicName: options.nicName,
+			nic: options.nic,
+			ipConfig: options.ipConfig,
+			publicIpId: options.newPublicIpId,
+			progress: options.progress,
+			step: `${options.prefix}-swap`
+		});
+		await reportCreateVmProgress(
+			options.progress,
+			`${options.prefix}-swap`,
+			'success',
+			'NIC IPv4 public IP binding replaced',
+			{
+				nicName: options.nicName,
+				oldPublicIpName: options.oldPublicIpName,
+				publicIpName: parseResourceName(options.newPublicIpId)
+			}
+		);
+		return 'swapped';
+	} catch (swapErr) {
+		const swapMessage = formatAzureError(swapErr);
+		await reportCreateVmProgress(
+			options.progress,
+			`${options.prefix}-swap-fallback`,
+			'info',
+			'直接替换网卡公网 IPv4 失败，改为先解绑旧 IPv4 后再绑定新 IPv4',
+			{
+				nicName: options.nicName,
+				oldPublicIpName: options.oldPublicIpName,
+				publicIpName: parseResourceName(options.newPublicIpId),
+				error: swapMessage.length > 900 ? `${swapMessage.slice(0, 900)}...` : swapMessage
+			}
+		);
+	}
 
 	await reportCreateVmProgress(
 		options.progress,
@@ -5782,23 +5798,6 @@ export async function brushVmPublicIPv4Prefix(
 			prefix: 'brush-ip'
 		});
 		if (switchMode !== 'swapped') {
-			if (oldPublicIpId) {
-				await reportCreateVmProgress(options.progress, 'brush-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
-					oldPublicIpName,
-					oldPublicIPv4,
-					mode: switchMode
-				});
-				await deletePublicIpById(clients, oldPublicIpId).catch(async (err) => {
-					const message = formatAzureError(err);
-					await reportCreateVmProgress(options.progress, 'brush-ip-cleanup', 'error', '删除旧 IPv4 公网 IP 失败', {
-						oldPublicIpName,
-						oldPublicIPv4,
-						error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
-					});
-					throw new Error(`delete old IPv4 public IP failed (brush-ip-cleanup): ${message}`);
-				});
-			}
-
 			await reportCreateVmProgress(
 				options.progress,
 				'brush-ip-attach',
@@ -5821,7 +5820,7 @@ export async function brushVmPublicIPv4Prefix(
 				step: 'brush-ip-attach'
 			});
 		}
-		if (switchMode === 'swapped') {
+		if (oldPublicIpId) {
 			await reportCreateVmProgress(options.progress, 'brush-ip-cleanup', 'running', '删除旧 IPv4 公网 IP', {
 				oldPublicIpName,
 				oldPublicIPv4,
