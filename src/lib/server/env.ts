@@ -9,9 +9,7 @@ export function getEncryptionKey(): string {
 }
 
 export function getWorkerIntervalMs(): number {
-	const seconds = Number(readEnv('WORKER_INTERVAL_SECONDS') ?? '30');
-	if (!Number.isFinite(seconds) || seconds <= 0) return 30_000;
-	return Math.max(5, seconds) * 1000;
+	return 60_000;
 }
 
 export function getPort(): number {

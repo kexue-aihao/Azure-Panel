@@ -54,10 +54,6 @@ import {
 	normalizeSubscriptionCheckIntervalHours,
 	sendTelegramMessageToTargets
 } from './telegram';
-import {
-	dispatchReplenishmentToGoPanel,
-	isGoPanelEnabled
-} from './go-panel';
 import { randomUUID } from 'node:crypto';
 
 let timer: NodeJS.Timeout | null = null;
@@ -65,7 +61,7 @@ const activePolicies = new Set<number>();
 const activeNotificationUsers = new Set<number>();
 const SUBSCRIPTION_STATUS_TIMEOUT_MS = 30_000;
 const MIN_POLICY_CHECK_INTERVAL_SECONDS = 10;
-const DEFAULT_POLICY_CHECK_INTERVAL_SECONDS = 30;
+const DEFAULT_POLICY_CHECK_INTERVAL_SECONDS = 60;
 const SUBSCRIPTION_STATUS_NOTIFY_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_REPLENISHMENT_IP_PREFIX = '85.211';
 const DEFAULT_REPLENISHMENT_IP_BRUSH_ATTEMPTS = 30;
@@ -109,58 +105,6 @@ function isProxyOutboundFailure(message: string) {
 	return /代理出站失败|代理握手失败|socket hang up|SocksClient|REQUEST_SEND_ERROR|ECONNRESET|ETIMEDOUT/i.test(
 		message
 	);
-}
-
-async function dispatchGoPanelPlan(options: {
-	policy: WorkflowPolicy;
-	triggerAccount: AzureAccount;
-	subscriptionState: string;
-	deficit: number;
-	targetCount: number;
-	trackedCount: number;
-	accountPoolSize: number;
-	ipPrefix: string;
-	ipBrushMaxAttempts: number;
-	enableAcceleratedNetworking: boolean;
-	enableDdosProtection: boolean;
-}) {
-	if (!isGoPanelEnabled()) return;
-
-	const startedAt = Date.now();
-	try {
-		const result = await dispatchReplenishmentToGoPanel({
-			policyId: options.policy.id,
-			userId: options.policy.userId,
-			deficit: options.deficit,
-			targetCount: options.targetCount,
-			trackedCount: options.trackedCount,
-			accountPoolSize: options.accountPoolSize,
-			triggerAccountName: options.triggerAccount.name,
-			subscriptionState: options.subscriptionState,
-			location: options.policy.location,
-			vmSize: options.policy.vmSize,
-			enableIpv6: Boolean(options.policy.enableIpv6),
-			enableAcceleratedNetworking: options.enableAcceleratedNetworking,
-			enableDdosProtection: options.enableDdosProtection,
-			ipPrefix: options.ipPrefix,
-			ipBrushMaxAttempts: options.ipBrushMaxAttempts
-		});
-		if (result.accepted) {
-			await insertWorkflowLog(
-				options.policy.id,
-				'go_panel',
-				'success',
-				`Go 面板调度层已接收补机计划 operation=${result.operationId ?? '-'} mode=${result.mode ?? '-'}，耗时 ${Date.now() - startedAt}ms`
-			);
-		}
-	} catch (err) {
-		await insertWorkflowLog(
-			options.policy.id,
-			'go_panel',
-			'warning',
-			`Go 面板调度层不可用，已自动回退兼容补机流程: ${errorMessage(err)}`
-		);
-	}
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -1346,19 +1290,6 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 					accounts.length > 0 ? 'success' : 'warning',
 					`Azure 号池当前共有 ${accounts.length} 个账号，自动补机会按${REPLENISHMENT_ACCOUNT_ORDER_LABELS[accountOrder]}逐个检测，选中第一个正常订阅账号`
 				);
-				await dispatchGoPanelPlan({
-					policy,
-					triggerAccount: account,
-					subscriptionState: status.state,
-					deficit,
-					targetCount,
-					trackedCount,
-					accountPoolSize: accounts.length,
-					ipPrefix,
-					ipBrushMaxAttempts,
-					enableAcceleratedNetworking,
-					enableDdosProtection
-				});
 				let bootProxyPoolPromise: Promise<WorkerBootProxyRuntime[]> | null = null;
 				const getBootProxyPool = () => {
 					bootProxyPoolPromise ??= collectBootProxyPool(policy);

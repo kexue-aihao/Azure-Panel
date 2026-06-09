@@ -49,7 +49,7 @@ export const POST: RequestHandler = async (event) => {
 		enableDdosProtection: Boolean(body.enable_ddos_protection),
 		ipPrefix: String(body.ip_prefix ?? '85.211') || '85.211',
 		ipBrushMaxAttempts: Number(body.ip_brush_max_attempts ?? 30) || 30,
-		checkIntervalSeconds: 30,
+		checkIntervalSeconds: 60,
 		statusCheckEnabled: body.status_check_enabled !== false,
 		statusTriggerStates: DEFAULT_AZURE_SUBSCRIPTION_TRIGGER_STATES,
 		replenishmentAccountOrder: normalizeAccountOrder(body.replenishment_account_order),

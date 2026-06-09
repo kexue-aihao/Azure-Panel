@@ -1,8 +1,7 @@
 #!/www/server/panel/pyenv/bin/python3
 # -*- coding: utf-8 -*-
 """
-在 aaPanel 中注册 Azure Panel 兼容资源，使其出现在面板「Node 项目」中可管理。
-生产入口由 Go 进程监听反代端口；Node Web 仅监听本机兼容端口。
+在 aaPanel 中注册 Azure Panel 资源，使其出现在面板「Node 项目」中可管理。
 
 用法:
   python3 register-aapanel-site.py <app_dir> <domain> <port> [project_name]
@@ -240,30 +239,26 @@ def restart_node_project(mod_module, project_name, port=None, app_dir=None, entr
         return False
 
 
-def go_panel_compat_port(default_port="3001"):
-    return os.environ.get("GO_PANEL_NODE_COMPAT_PORT", default_port) or default_port
-
-
 def build_web_env(port):
     return "HOST=127.0.0.1\nPORT={}\nNODE_ENV=production\nENABLE_EMBEDDED_WORKER=false\nNODE_OPTIONS={}".format(
         port, node_options()
     )
 
 
-def register_nodejs_web(app_dir, domain, public_port, compat_port, project_name, node_version):
-    """注册或修复 aaPanel Node.js 项目（本机兼容后端，npm run start）"""
+def register_nodejs_web(app_dir, domain, port, project_name, node_version):
+    """注册或修复 aaPanel Node.js 项目（Web，npm run start）"""
     from mod.project.nodejs import nodeMod
 
     existing = find_site_by_name(project_name)
     if existing:
-        print("[aapanel] Node 兼容项目已存在，尝试重启: {}".format(project_name))
-        return restart_node_project(nodeMod, project_name, compat_port, app_dir, "build/index.js")
+        print("[aapanel] Node 项目已存在，尝试重启: {}".format(project_name))
+        return restart_node_project(nodeMod, project_name, port, app_dir, "build/index.js")
 
     domain_site = find_site_by_domain(domain)
     if domain_site and is_node_site(domain_site):
         name = domain_site.get("name")
-        print("[aapanel] 域名 {} 已绑定 Node 项目 {}，尝试重启兼容后端".format(domain, name))
-        return restart_node_project(nodeMod, name, compat_port, app_dir, "build/index.js")
+        print("[aapanel] 域名 {} 已绑定 Node 项目 {}，尝试重启".format(domain, name))
+        return restart_node_project(nodeMod, name, port, app_dir, "build/index.js")
 
     pkg = os.path.join(app_dir, "package.json")
     if not os.path.isfile(pkg):
@@ -276,7 +271,7 @@ def register_nodejs_web(app_dir, domain, public_port, compat_port, project_name,
         project_cwd=app_dir,
         project_script="start",
         run_user="www",
-        port=str(public_port),
+        port=str(port),
         nodejs_version=node_version,
         pkg_manager="npm",
         not_install_pkg=True,
@@ -284,15 +279,11 @@ def register_nodejs_web(app_dir, domain, public_port, compat_port, project_name,
         is_power_on=True,
         bind_extranet=1 if domain else 0,
         domains=[domain] if domain else [],
-        project_ps="Azure Panel Node Compatibility Backend",
-        env=build_web_env(compat_port),
+        project_ps="Azure Panel Web",
+        env=build_web_env(port),
     )
 
-    print(
-        "[aapanel] 创建 Node.js 兼容项目: {} (域名反代 127.0.0.1:{}，Node 监听 127.0.0.1:{})".format(
-            project_name, public_port, compat_port
-        )
-    )
+    print("[aapanel] 创建 Node.js 项目: {} ({})".format(project_name, domain))
     try:
         nodeMod.main().create_project(get)
         return True
@@ -303,7 +294,7 @@ def register_nodejs_web(app_dir, domain, public_port, compat_port, project_name,
 
     if find_site_by_name(project_name):
         print("[aapanel] 项目记录已写入，尝试重启修复...")
-        return restart_node_project(nodeMod, project_name, compat_port, app_dir, "build/index.js")
+        return restart_node_project(nodeMod, project_name, port, app_dir, "build/index.js")
 
     return False
 
@@ -380,8 +371,7 @@ def main():
 
     app_dir = os.path.abspath(sys.argv[1])
     domain = sys.argv[2].strip()
-    public_port = sys.argv[3].strip()
-    compat_port = go_panel_compat_port("3001")
+    port = sys.argv[3].strip()
     web_name = sys.argv[4].strip() if len(sys.argv) > 4 else "Azure-Panel"
     worker_name = os.environ.get("WORKER_PROJECT_NAME", "azure-panel-worker")
 
@@ -394,22 +384,18 @@ def main():
 
     node_version = os.environ.get("NODEJS_VERSION", detect_nodejs_version())
     print("[aapanel] Node 版本: {}".format(node_version))
-    print("[aapanel] Go 面板主入口: 127.0.0.1:{}".format(public_port))
-    print("[aapanel] Node 兼容后端: 127.0.0.1:{}".format(compat_port))
 
-    web_ok = register_nodejs_web(app_dir, domain, public_port, compat_port, web_name, node_version)
+    web_ok = register_nodejs_web(app_dir, domain, port, web_name, node_version)
     worker_ok = True
     if web_ok:
-        worker_ok = register_general_worker(app_dir, public_port, worker_name, node_version)
+        worker_ok = register_general_worker(app_dir, port, worker_name, node_version)
 
-    public_ok = verify_local_health(public_port)
-    compat_ok = verify_local_health(compat_port)
-    if web_ok and worker_ok and (public_ok or compat_ok):
-        print("[aapanel] 站点注册完成：Go Panel + Node 兼容后端 + Worker")
+    if web_ok and worker_ok and verify_local_health(port):
+        print("[aapanel] 站点注册完成，请在 aaPanel → 网站 → Node 项目 中查看")
         sys.exit(0)
 
-    if web_ok and not (public_ok or compat_ok):
-        print("[aapanel] 项目已注册但服务未响应，请检查 Go Panel / Node 兼容项目日志")
+    if web_ok and not verify_local_health(port):
+        print("[aapanel] 项目已注册但服务未响应，请检查 aaPanel Node 项目日志")
         sys.exit(1)
 
     sys.exit(1)

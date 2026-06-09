@@ -257,27 +257,6 @@ fix_env_file_permissions() {
 	fi
 }
 
-is_truthy_value() {
-	case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-		1|true|yes|on|enabled) return 0 ;;
-		*) return 1 ;;
-	esac
-}
-
-append_env_default() {
-	local env_file="$1"
-	local key="$2"
-	local value="$3"
-	local comment="${4:-}"
-
-	[[ -f "$env_file" ]] || return 0
-	if grep -q "^${key}=" "$env_file" 2>/dev/null; then
-		return 0
-	fi
-	[[ -n "$comment" ]] && printf '\n%s\n' "$comment" >>"$env_file"
-	printf '%s=%s\n' "$key" "$value" >>"$env_file"
-}
-
 ensure_runtime_env_defaults() {
 	local env_file="${1:-.env}"
 	[[ -f "$env_file" ]] || return 0
@@ -286,19 +265,6 @@ ensure_runtime_env_defaults() {
 		printf '\n# Runtime memory guard: use the standalone worker process in production.\nENABLE_EMBEDDED_WORKER=false\n' >>"$env_file"
 		log "Added ENABLE_EMBEDDED_WORKER=false to $env_file"
 	fi
-
-	append_env_default "$env_file" "GO_PANEL_ENABLED" "true" \
-		"# Go runtime. Node remains a local compatibility backend during migration."
-	append_env_default "$env_file" "GO_PANEL_URL" "http://127.0.0.1:3000"
-	append_env_default "$env_file" "GO_PANEL_HOST" "127.0.0.1"
-	append_env_default "$env_file" "GO_PANEL_PORT" "3000"
-	append_env_default "$env_file" "GO_PANEL_MODE" "go"
-	append_env_default "$env_file" "GO_PANEL_NODE_COMPAT_ENABLED" "true"
-	append_env_default "$env_file" "GO_PANEL_NODE_COMPAT_PORT" "3001"
-	append_env_default "$env_file" "GO_PANEL_NODE_COMPAT_URL" "http://127.0.0.1:3001"
-	append_env_default "$env_file" "GO_PANEL_TIMEOUT_MS" "1500"
-	append_env_default "$env_file" "GO_PANEL_SUBMIT_DEADLINE_SECONDS" "30"
-	append_env_default "$env_file" "GO_PANEL_QUEUE_LIMIT" "128"
 }
 
 read_port_from_env() {
@@ -325,20 +291,8 @@ write_env_file() {
 SECRET_KEY=${secret_key}
 ENCRYPTION_KEY=${encryption_key}
 
-WORKER_INTERVAL_SECONDS=30
+WORKER_INTERVAL_SECONDS=60
 ENABLE_EMBEDDED_WORKER=false
-
-GO_PANEL_ENABLED=true
-GO_PANEL_URL=http://127.0.0.1:3000
-GO_PANEL_HOST=127.0.0.1
-GO_PANEL_PORT=3000
-GO_PANEL_MODE=go
-GO_PANEL_NODE_COMPAT_ENABLED=true
-GO_PANEL_NODE_COMPAT_PORT=3001
-GO_PANEL_NODE_COMPAT_URL=http://127.0.0.1:3001
-GO_PANEL_TIMEOUT_MS=1500
-GO_PANEL_SUBMIT_DEADLINE_SECONDS=30
-GO_PANEL_QUEUE_LIMIT=128
 
 HOST=127.0.0.1
 PORT=${app_port}
@@ -872,21 +826,16 @@ terminate_pids() {
 	fi
 }
 
-cleanup_project_runtimes() {
+cleanup_project_node_runtimes() {
 	local app_dir="${1:-$(pwd)}"
 	local -a pids=()
 	mapfile -t pids < <(
 		{
-			list_project_runtime_pids "$app_dir" "bin/azure-panel-go"
 			list_project_runtime_pids "$app_dir" "build/index.js"
 			list_project_runtime_pids "$app_dir" "build/worker.js"
 		} | sort -n -u
 	)
-	terminate_pids "old Azure Panel runtime" "${pids[@]}"
-}
-
-cleanup_project_node_runtimes() {
-	cleanup_project_runtimes "$@"
+	terminate_pids "old Web/Worker Node" "${pids[@]}"
 }
 
 cleanup_managed_proxy_runtimes() {
@@ -922,7 +871,7 @@ runtime_memory_cleanup_before_restart() {
 		return 0
 	fi
 	cleanup_managed_proxy_runtimes "$app_dir"
-	cleanup_project_runtimes "$app_dir"
+	cleanup_project_node_runtimes "$app_dir"
 }
 
 npm_build_all() {
@@ -972,334 +921,6 @@ npm_build_all() {
 
 	prune_production_dependencies "$npm_bin"
 	post_deploy_cleanup "$(pwd)" "$npm_bin"
-}
-
-find_go_bin() {
-	if [[ -n "${GO_BIN:-}" && -x "$GO_BIN" ]]; then
-		echo "$GO_BIN"
-		return 0
-	fi
-	local app_dir="${APP_DIR:-$(pwd)}"
-	for candidate in \
-		"${app_dir}/bin/go-toolchain/current/bin/go" \
-		"${app_dir}/bin/go-toolchain"/go*/bin/go; do
-		[[ -x "$candidate" ]] || continue
-		echo "$candidate"
-		return 0
-	done
-	if command -v go >/dev/null 2>&1; then
-		command -v go
-		return 0
-	fi
-	for candidate in /usr/local/go/bin/go /usr/bin/go /usr/local/bin/go; do
-		[[ -x "$candidate" ]] || continue
-		echo "$candidate"
-		return 0
-	done
-	return 1
-}
-
-go_version_at_least() {
-	local go_bin="$1"
-	local min_major="${2:-1}"
-	local min_minor="${3:-22}"
-	local version major rest minor
-
-	[[ -x "$go_bin" ]] || return 1
-	version="$("$go_bin" version 2>/dev/null | sed -n 's/.* go\([0-9][0-9.]*\).*/\1/p' | head -1)"
-	[[ -n "$version" ]] || return 1
-	major="${version%%.*}"
-	rest="${version#*.}"
-	minor="${rest%%.*}"
-	[[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
-	(( major > min_major || (major == min_major && minor >= min_minor) ))
-}
-
-find_go_bin_at_least() {
-	local min_major="${1:-1}"
-	local min_minor="${2:-22}"
-	local app_dir="${APP_DIR:-$(pwd)}"
-	local candidate
-
-	for candidate in \
-		"${GO_BIN:-}" \
-		"$(command -v go 2>/dev/null || true)" \
-		/usr/local/go/bin/go \
-		/usr/bin/go \
-		/usr/local/bin/go \
-		"${app_dir}/bin/go-toolchain/current/bin/go" \
-		"${app_dir}/bin/go-toolchain"/go*/bin/go; do
-		[[ -n "$candidate" && -x "$candidate" ]] || continue
-		if go_version_at_least "$candidate" "$min_major" "$min_minor"; then
-			echo "$candidate"
-			return 0
-		fi
-	done
-	return 1
-}
-
-go_toolchain_version() {
-	local fallback="${GO_TOOLCHAIN_FALLBACK_VERSION:-1.22.12}"
-	local raw=""
-
-	if [[ -n "${GO_TOOLCHAIN_VERSION:-}" ]]; then
-		echo "${GO_TOOLCHAIN_VERSION#go}"
-		return 0
-	fi
-	if command -v curl >/dev/null 2>&1; then
-		raw="$(curl -fsSL --connect-timeout 8 https://go.dev/VERSION?m=text 2>/dev/null | head -1 || true)"
-	elif command -v wget >/dev/null 2>&1; then
-		raw="$(wget -qO- https://go.dev/VERSION?m=text 2>/dev/null | head -1 || true)"
-	fi
-	raw="${raw#go}"
-	echo "${raw:-$fallback}"
-}
-
-ensure_go_toolchain() {
-	local app_dir="${1:-${APP_DIR:-$(pwd)}}"
-	local go_bin version arch install_root install_dir tmp_dir archive primary_url fallback_url cn_url extracted url downloaded
-
-	go_bin="$(find_go_bin_at_least 1 22 2>/dev/null || true)"
-	if [[ -n "$go_bin" ]]; then
-		export GO_BIN="$go_bin"
-		export PATH="$(dirname "$go_bin"):${PATH}"
-		return 0
-	fi
-	go_bin="$(find_go_bin 2>/dev/null || true)"
-	if [[ -n "$go_bin" ]]; then
-		warn "检测到 Go 版本低于 1.22: $("$go_bin" version 2>/dev/null || echo "$go_bin")"
-	fi
-
-	if [[ "${SKIP_GO_TOOLCHAIN_INSTALL:-0}" == "1" || "${SKIP_GO_INSTALL:-0}" == "1" ]]; then
-		return 1
-	fi
-	if [[ "$(uname -s 2>/dev/null)" != "Linux" ]]; then
-		warn "当前系统不是 Linux，无法自动安装 Go；请手动安装 Go 1.22+ 或设置 GO_BIN"
-		return 1
-	fi
-	if ! command -v tar >/dev/null 2>&1; then
-		warn "未找到 tar，无法自动解压 Go 工具链"
-		return 1
-	fi
-
-	arch="$(detect_arch_label)"
-	if [[ -z "$arch" ]]; then
-		warn "未识别 CPU 架构，无法自动安装 Go；请手动安装 Go 1.22+ 或设置 GO_BIN"
-		return 1
-	fi
-
-	version="$(go_toolchain_version)"
-	install_root="${GO_INSTALL_ROOT:-${app_dir}/bin/go-toolchain}"
-	install_dir="${install_root}/go${version}"
-	tmp_dir="${app_dir}/deploy/aapanel/generated/go-download"
-	archive="${tmp_dir}/go${version}.linux-${arch}.tar.gz"
-	primary_url="${GO_TOOLCHAIN_URL:-https://go.dev/dl/go${version}.linux-${arch}.tar.gz}"
-	fallback_url="https://dl.google.com/go/go${version}.linux-${arch}.tar.gz"
-	cn_url="https://golang.google.cn/dl/go${version}.linux-${arch}.tar.gz"
-
-	if [[ -x "${install_dir}/bin/go" ]] && go_version_at_least "${install_dir}/bin/go" 1 22; then
-		ln -sfn "$install_dir" "${install_root}/current" 2>/dev/null || true
-		export GO_BIN="${install_dir}/bin/go"
-		export PATH="${install_dir}/bin:${PATH}"
-		return 0
-	fi
-
-	mkdir -p "$install_root" "$tmp_dir"
-	log "未检测到 Go 1.22+，自动下载 Go ${version} (${arch})..."
-	downloaded=0
-	for url in "$primary_url" "$fallback_url" "$cn_url"; do
-		[[ -n "$url" ]] || continue
-		if [[ "$downloaded" == "1" ]]; then
-			break
-		fi
-		if download_file "$url" "$archive"; then
-			downloaded=1
-		else
-			warn "Go 下载失败: $url"
-		fi
-	done
-	[[ "$downloaded" == "1" ]] || return 1
-
-	rm -rf "${tmp_dir}/extract"
-	mkdir -p "${tmp_dir}/extract"
-	if ! tar -xzf "$archive" -C "${tmp_dir}/extract"; then
-		warn "Go 工具链解压失败: $archive"
-		return 1
-	fi
-	extracted="${tmp_dir}/extract/go"
-	[[ -x "${extracted}/bin/go" ]] || {
-		warn "Go 工具链包内未找到 go 可执行文件"
-		return 1
-	}
-
-	rm -rf "$install_dir"
-	mv "$extracted" "$install_dir" || return 1
-	ln -sfn "$install_dir" "${install_root}/current" 2>/dev/null || true
-	chmod +x "${install_dir}/bin/go" 2>/dev/null || true
-	if go_version_at_least "${install_dir}/bin/go" 1 22; then
-		export GO_BIN="${install_dir}/bin/go"
-		export PATH="${install_dir}/bin:${PATH}"
-		log "Go 工具链已准备: $("${install_dir}/bin/go" version)"
-		return 0
-	fi
-
-	warn "自动安装的 Go 版本仍低于 1.22: $("${install_dir}/bin/go" version 2>/dev/null || echo unknown)"
-	return 1
-}
-
-go_panel_enabled() {
-	local env_file="${1:-.env}"
-	local enabled="${GO_PANEL_ENABLED:-}"
-	[[ -z "$enabled" && -f "$env_file" ]] && enabled="$(get_env_value GO_PANEL_ENABLED "$env_file")"
-	is_truthy_value "$enabled"
-}
-
-go_panel_binary_path() {
-	local app_dir="${1:-$(pwd)}"
-	echo "${GO_PANEL_BIN:-${app_dir}/bin/azure-panel-go}"
-}
-
-build_go_panel() {
-	local app_dir="${1:-$(pwd)}"
-	local service_dir="${app_dir}/services/panel"
-	local bin_path
-	local go_bin
-	local enabled
-
-	if [[ "${SKIP_GO_PANEL_BUILD:-0}" == "1" ]]; then
-		warn "Skipped Go panel build (SKIP_GO_PANEL_BUILD=1)"
-		return 0
-	fi
-
-	[[ -d "$service_dir" ]] || {
-		warn "Go panel source not found: $service_dir"
-		return 0
-	}
-
-	if go_panel_enabled "${app_dir}/.env"; then
-		if ! ensure_go_toolchain "$app_dir"; then
-			if [[ "${ALLOW_NODE_COMPAT_ONLY:-0}" == "1" ]]; then
-				warn "GO_PANEL_ENABLED=true but Go 1.22+ is unavailable; ALLOW_NODE_COMPAT_ONLY=1 keeps the Node compatibility runtime active"
-			else
-				die "GO_PANEL_ENABLED=true 但无法准备 Go 1.22+ 工具链；请检查服务器网络/架构，或临时设置 ALLOW_NODE_COMPAT_ONLY=1"
-			fi
-		fi
-	fi
-
-	go_bin="$(find_go_bin 2>/dev/null || true)"
-	if [[ -z "$go_bin" ]]; then
-		if go_panel_enabled "${app_dir}/.env"; then
-			if [[ "${ALLOW_NODE_COMPAT_ONLY:-0}" == "1" ]]; then
-				warn "GO_PANEL_ENABLED=true but Go toolchain was not found; ALLOW_NODE_COMPAT_ONLY=1 keeps the Node compatibility runtime active"
-			else
-				die "GO_PANEL_ENABLED=true 但未找到 Go 1.22+ 工具链；请安装 Go 后重试，或临时设置 ALLOW_NODE_COMPAT_ONLY=1"
-			fi
-		else
-			warn "Go toolchain not found; skip Go panel build"
-		fi
-		return 0
-	fi
-	if ! go_version_at_least "$go_bin" 1 22; then
-		if go_panel_enabled "${app_dir}/.env" && [[ "${ALLOW_NODE_COMPAT_ONLY:-0}" != "1" ]]; then
-			die "GO_PANEL_ENABLED=true 但 Go 版本低于 1.22: $("$go_bin" version 2>/dev/null || echo "$go_bin")"
-		fi
-		warn "Go version is lower than 1.22; skip Go panel build: $("$go_bin" version 2>/dev/null || echo "$go_bin")"
-		return 0
-	fi
-
-	bin_path="$(go_panel_binary_path "$app_dir")"
-	mkdir -p "$(dirname "$bin_path")"
-	log "Building Go panel -> $bin_path"
-	if (
-		cd "$service_dir"
-		CGO_ENABLED=0 "$go_bin" build -trimpath -ldflags "-s -w" -o "$bin_path" ./cmd/panel
-	); then
-		chmod +x "$bin_path" 2>/dev/null || true
-		log "Go panel build completed"
-		return 0
-	fi
-
-	enabled=0
-	go_panel_enabled "${app_dir}/.env" && enabled=1
-	if [[ "${REQUIRE_GO_PANEL:-1}" != "0" && "${ALLOW_NODE_COMPAT_ONLY:-0}" != "1" && "$enabled" == "1" ]]; then
-		die "Go panel build failed and REQUIRE_GO_PANEL=1"
-	fi
-	warn "Go panel build failed; Node compatibility runtime remains active"
-	return 0
-}
-
-write_go_panel_supervisor_config() {
-	local app_dir="$1"
-	local program="${2:-azure-panel-go}"
-	local bin_path env_file port host mode token deadline queue_limit compat_enabled compat_url static_dir conf_dir conf_file body
-
-	env_file="${app_dir}/.env"
-	if ! go_panel_enabled "$env_file"; then
-		return 0
-	fi
-
-	bin_path="$(go_panel_binary_path "$app_dir")"
-	if [[ ! -x "$bin_path" ]]; then
-		warn "Go panel is enabled but binary is missing: $bin_path"
-		return 1
-	fi
-
-	host="${GO_PANEL_HOST:-$(get_env_value GO_PANEL_HOST "$env_file")}"
-	port="${GO_PANEL_PORT:-$(get_env_value GO_PANEL_PORT "$env_file")}"
-	mode="${GO_PANEL_MODE:-$(get_env_value GO_PANEL_MODE "$env_file")}"
-	token="${GO_PANEL_TOKEN:-$(get_env_value GO_PANEL_TOKEN "$env_file")}"
-	deadline="${GO_PANEL_SUBMIT_DEADLINE_SECONDS:-$(get_env_value GO_PANEL_SUBMIT_DEADLINE_SECONDS "$env_file")}"
-	queue_limit="${GO_PANEL_QUEUE_LIMIT:-$(get_env_value GO_PANEL_QUEUE_LIMIT "$env_file")}"
-	compat_enabled="${GO_PANEL_NODE_COMPAT_ENABLED:-$(get_env_value GO_PANEL_NODE_COMPAT_ENABLED "$env_file")}"
-	compat_url="${GO_PANEL_NODE_COMPAT_URL:-$(get_env_value GO_PANEL_NODE_COMPAT_URL "$env_file")}"
-	static_dir="${GO_PANEL_STATIC_DIR:-$(get_env_value GO_PANEL_STATIC_DIR "$env_file")}"
-	host="${host:-127.0.0.1}"
-	port="${port:-3000}"
-	mode="${mode:-go}"
-	deadline="${deadline:-30}"
-	queue_limit="${queue_limit:-128}"
-	compat_enabled="${compat_enabled:-true}"
-	compat_url="${compat_url:-http://127.0.0.1:3001}"
-	static_dir="${static_dir:-${app_dir}/build/client}"
-
-	body="; Azure Panel Go web/API runtime - generated by install.sh/update.sh
-[program:${program}]
-command=${bin_path}
-directory=${app_dir}
-user=www
-autostart=true
-autorestart=true
-startsecs=2
-startretries=3
-stopwaitsecs=10
-stdout_logfile=/www/wwwlogs/${program}.log
-stderr_logfile=/www/wwwlogs/${program}-error.log
-environment=AZURE_PANEL_APP_DIR=\"${app_dir}\",GO_PANEL_HOST=\"${host}\",GO_PANEL_PORT=\"${port}\",GO_PANEL_MODE=\"${mode}\",GO_PANEL_TOKEN=\"${token}\",GO_PANEL_NODE_COMPAT_ENABLED=\"${compat_enabled}\",GO_PANEL_NODE_COMPAT_URL=\"${compat_url}\",GO_PANEL_STATIC_DIR=\"${static_dir}\",GO_PANEL_SUBMIT_DEADLINE_SECONDS=\"${deadline}\",GO_PANEL_QUEUE_LIMIT=\"${queue_limit}\""
-
-	mkdir -p /www/wwwlogs 2>/dev/null || true
-	mkdir -p "${app_dir}/deploy/aapanel/generated"
-
-	while IFS= read -r conf_dir; do
-		[[ -n "$conf_dir" ]] || continue
-		mkdir -p "$conf_dir" 2>/dev/null || continue
-		if [[ "$conf_dir" == *"/profile" ]]; then
-			conf_file="${conf_dir}/${program}.ini"
-		else
-			conf_file="${conf_dir}/${program}.conf"
-		fi
-		log "Writing Go panel Supervisor config -> $conf_file"
-		printf '%s\n' "$body" >"$conf_file"
-	done < <(supervisor_conf_dirs)
-
-	printf '%s\n' "$body" >"${app_dir}/deploy/aapanel/generated/${program}.conf"
-}
-
-go_panel_supervisor_program() {
-	local env_file="${1:-.env}"
-	local app_dir="${2:-$(pwd)}"
-	if go_panel_enabled "$env_file" && [[ -x "$(go_panel_binary_path "$app_dir")" ]]; then
-		echo "${GO_PANEL_PROGRAM:-azure-panel-go}"
-	fi
 }
 
 detect_arch_label() {
@@ -1470,7 +1091,7 @@ sys.exit(0 if public.M("sites").where("name=?", ("${name}",)).count() > 0 else 1
 PY
 }
 
-# 在 aaPanel 面板中注册 Node 兼容后端与 Worker，主 Web/API 入口由 Go Panel 接管。
+# 在 aaPanel 面板中注册 Web（Node 项目）与 Worker（通用项目），便于网站列表统一管理
 setup_aapanel_site() {
 	local app_dir="$1"
 	local domain="$2"
@@ -1501,7 +1122,7 @@ setup_aapanel_site() {
 	[[ -n "$panel_py" ]] || { warn "未找到 python3，无法调用 aaPanel API"; return 1; }
 
 	node_version="$(detect_nodejs_version_label)"
-	log "注册 aaPanel 兼容项目: ${domain} (Go Panel :${port}, Node ${node_version} compat :${GO_PANEL_NODE_COMPAT_PORT:-3001})"
+	log "注册 aaPanel 站点: ${domain} (Node ${node_version})"
 
 	release_app_port "$port" "${WEB_PROGRAM:-azure-panel-web}" "${WORKER_PROGRAM:-azure-panel-worker}"
 
@@ -1578,107 +1199,17 @@ sys.exit(0 if restarted > 0 else 1)
 PY
 }
 
-stop_aapanel_node_projects() {
-	local web_name="${1:-Azure-Panel}"
-	local worker_name="${2:-azure-panel-worker}"
-	local app_dir="${3:-${APP_DIR:-$(pwd)}}"
-	local panel_py="/www/server/panel/pyenv/bin/python3"
-
-	[[ -d /www/server/panel ]] || return 1
-	[[ -x "$panel_py" ]] || return 1
-
-	log "停止 aaPanel Node 项目，释放 Go 主入口端口: $web_name, $worker_name"
-	AAPANEL_WEB_PROJECT_NAME="$web_name" \
-	AAPANEL_WORKER_PROJECT_NAME="$worker_name" \
-	AAPANEL_APP_DIR="$app_dir" \
-	"$panel_py" - <<'PY'
-import os
-import signal
-import sys
-import time
-
-sys.path.insert(0, "/www/server/panel/class")
-sys.path.insert(0, "/www/server/panel")
-os.chdir("/www/server/panel")
-import public
-from mod.project.nodejs import generalMod, nodeMod
-
-web_name = os.environ.get("AAPANEL_WEB_PROJECT_NAME", "Azure-Panel")
-worker_name = os.environ.get("AAPANEL_WORKER_PROJECT_NAME", "azure-panel-worker")
-app_dir = os.environ.get("AAPANEL_APP_DIR", "")
-
-
-def project_exists(name):
-    try:
-        return public.M("sites").where("name=?", (name,)).count() > 0
-    except Exception:
-        return False
-
-
-def stop_project(mod, name):
-    if not project_exists(name):
-        return
-    get = public.dict_obj()
-    get.project_name = name
-    try:
-        res = mod.main().stop_project(get)
-        print("[aapanel] stop {} -> {}".format(name, res))
-    except Exception as exc:
-        print("[aapanel] stop {} failed: {}".format(name, exc))
-
-
-def cleanup_runtime(entry_file):
-    if not app_dir or not os.path.isdir("/proc"):
-        return
-    target = os.path.join(app_dir, entry_file)
-    pids = []
-    for item in os.listdir("/proc"):
-        if not item.isdigit() or int(item) == os.getpid():
-            continue
-        try:
-            with open(os.path.join("/proc", item, "cmdline"), "rb") as fh:
-                cmd = fh.read().replace(b"\x00", b" ").decode("utf-8", "ignore")
-        except Exception:
-            continue
-        if target in cmd:
-            pids.append(int(item))
-    if not pids:
-        return
-    print("[aapanel] cleanup {} -> {}".format(entry_file, pids))
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except Exception:
-            pass
-    time.sleep(2)
-    for pid in pids:
-        if os.path.exists("/proc/{}".format(pid)):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except Exception:
-                pass
-
-
-stop_project(nodeMod, web_name)
-stop_project(generalMod, worker_name)
-cleanup_runtime("build/index.js")
-cleanup_runtime("build/worker.js")
-PY
-}
-
 write_supervisor_configs() {
 	local node_bin="$1"
 	local app_dir="$2"
 	local app_port="$3"
 	local web_program="$4"
 	local worker_program="$5"
-	local conf_dir web_conf worker_conf web_body worker_body node_opts compat_port
+	local conf_dir web_conf worker_conf web_body worker_body node_opts
 
 	node_opts="$(node_memory_options)"
-	compat_port="${GO_PANEL_NODE_COMPAT_PORT:-$(get_env_value GO_PANEL_NODE_COMPAT_PORT "${app_dir}/.env")}"
-	compat_port="${compat_port:-3001}"
 
-	web_body="; Azure Panel Node compatibility Web — 由 install.sh 自动生成
+	web_body="; Azure Panel Web — 由 install.sh 自动生成
 [program:${web_program}]
 command=${node_bin} ${app_dir}/build/index.js
 directory=${app_dir}
@@ -1690,7 +1221,7 @@ startretries=3
 stopwaitsecs=10
 stdout_logfile=/www/wwwlogs/${web_program}.log
 stderr_logfile=/www/wwwlogs/${web_program}-error.log
-environment=NODE_ENV=\"production\",ENABLE_EMBEDDED_WORKER=\"false\",NODE_OPTIONS=\"${node_opts}\",HOST=\"127.0.0.1\",PORT=\"${compat_port}\""
+environment=NODE_ENV=\"production\",ENABLE_EMBEDDED_WORKER=\"false\",NODE_OPTIONS=\"${node_opts}\",HOST=\"127.0.0.1\",PORT=\"${app_port}\""
 
 	worker_body="; Azure Panel Worker — 由 install.sh 自动生成
 [program:${worker_program}]
@@ -1743,7 +1274,6 @@ environment=NODE_ENV=\"production\",ENABLE_EMBEDDED_WORKER=\"false\",NODE_OPTION
 supervisor_reload_and_start() {
 	local web_program="$1"
 	local worker_program="$2"
-	local extra_program="${3:-}"
 	local main_conf update_out
 
 	if [[ -z "$(find_supervisorctl)" ]]; then
@@ -1770,7 +1300,6 @@ supervisor_reload_and_start() {
 	local -a progs=()
 	[[ "${SKIP_SUPERVISOR_WEB:-0}" != "1" ]] && progs+=("$web_program")
 	[[ "${SKIP_SUPERVISOR_WORKER:-0}" != "1" ]] && progs+=("$worker_program")
-	[[ -n "$extra_program" ]] && progs+=("$extra_program")
 
 	if [[ ${#progs[@]} -eq 0 ]]; then
 		warn "无 Supervisor 进程需启动（已由 aaPanel Node 项目管理）"
@@ -1794,12 +1323,10 @@ supervisor_reload_and_start() {
 restart_supervisor_programs() {
 	local web_program="$1"
 	local worker_program="$2"
-	local extra_program="${3:-}"
 	local -a progs=()
 
 	[[ "${SKIP_SUPERVISOR_WEB:-0}" != "1" ]] && progs+=("$web_program")
 	[[ "${SKIP_SUPERVISOR_WORKER:-0}" != "1" ]] && progs+=("$worker_program")
-	[[ -n "$extra_program" ]] && progs+=("$extra_program")
 
 	if [[ ${#progs[@]} -eq 0 ]]; then
 		return 0
@@ -1822,15 +1349,11 @@ restart_supervisor_programs() {
 
 health_check() {
 	local port="$1"
-	local body status attempt max_attempts interval endpoint url health_body
+	local body status attempt max_attempts interval url
 	max_attempts="${HEALTHCHECK_RETRIES:-12}"
 	interval="${HEALTHCHECK_INTERVAL:-5}"
-	endpoint="/api/health"
-	if go_panel_enabled "${APP_DIR:-$(pwd)}/.env" && [[ "${ALLOW_NODE_COMPAT_ONLY:-0}" != "1" ]]; then
-		endpoint="/api/go/status"
-	fi
-	url="http://127.0.0.1:${port}${endpoint}"
-	log "健康检查 ${url} ..."
+	url="http://127.0.0.1:${port}/api/health"
+	log "健康检查 http://127.0.0.1:${port}/api/health ..."
 	sleep 2
 	if command -v curl >/dev/null 2>&1; then
 		for attempt in $(seq 1 "$max_attempts"); do
@@ -1848,11 +1371,7 @@ health_check() {
 		done
 		[[ -n "$status" ]] && warn "健康检查 HTTP 状态: $status"
 		[[ -n "$body" ]] && warn "健康检查响应: $body"
-		if [[ "$endpoint" != "/api/health" ]]; then
-			health_body="$(curl -sS --connect-timeout 3 --max-time 6 "http://127.0.0.1:${port}/api/health" 2>&1 || true)"
-			[[ -n "$health_body" ]] && warn "Go 专属端点未通过；/api/health 当前响应: $health_body"
-		fi
-		warn "健康检查未通过或响应超时，请查看 Go Panel / Node 兼容后端日志，以及端口 ${port} 是否被正确监听；数据库状态以前面的 MySQL 端口/账号验收为准"
+		warn "健康检查未通过或响应超时，请查看 aaPanel Node 项目日志，以及端口 ${port} 是否被正确监听；数据库状态以前面的 MySQL 端口/账号验收为准"
 		return 1
 	fi
 	warn "未安装 curl，跳过健康检查"

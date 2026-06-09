@@ -74,7 +74,6 @@ GIT_REMOTE="${GIT_REMOTE:-origin}"
 REPO_URL="${REPO_URL:-https://github.com/kexue-aihao/Azure-Panel.git}"
 WEB_PROGRAM="${WEB_PROGRAM:-azure-panel-web}"
 WORKER_PROGRAM="${WORKER_PROGRAM:-azure-panel-worker}"
-GO_PANEL_PROGRAM="${GO_PANEL_PROGRAM:-azure-panel-go}"
 HEALTH_PORT="${HEALTH_PORT:-3000}"
 
 # ---------- 前置检查 ----------
@@ -150,22 +149,15 @@ fi
 
 ensure_proxy_cores
 npm_build_all
-build_go_panel "$APP_DIR"
-write_go_panel_supervisor_config "$APP_DIR" "$GO_PANEL_PROGRAM" || true
 
-# ---------- 重启 Supervisor / aaPanel 兼容项目 ----------
+# ---------- 重启 Supervisor / aaPanel Node 项目 ----------
 runtime_memory_cleanup_before_restart "$APP_DIR" || true
 
 if [[ "${SKIP_SUPERVISOR:-0}" != "1" ]]; then
-	go_program="$(go_panel_supervisor_program "${APP_DIR}/.env" "$APP_DIR")"
-	if go_panel_enabled "${APP_DIR}/.env" && [[ -n "$go_program" ]]; then
-		stop_aapanel_node_projects "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}" "$WORKER_PROGRAM" "$APP_DIR" || true
-		write_supervisor_configs "$(find_node_bin)" "$APP_DIR" "$HEALTH_PORT" "$WEB_PROGRAM" "$WORKER_PROGRAM"
-		supervisor_reload_and_start "$WEB_PROGRAM" "$WORKER_PROGRAM" "$go_program" || true
-	elif restart_aapanel_node_projects "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}" "$WORKER_PROGRAM" 2>/dev/null; then
+	if restart_aapanel_node_projects "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}" "$WORKER_PROGRAM" 2>/dev/null; then
 		log "已通过 aaPanel 重启 Node 项目"
 	else
-		restart_supervisor_programs "$WEB_PROGRAM" "$WORKER_PROGRAM" "$go_program" || true
+		restart_supervisor_programs "$WEB_PROGRAM" "$WORKER_PROGRAM" || true
 	fi
 else
 	warn "已跳过进程重启 (SKIP_SUPERVISOR=1)"

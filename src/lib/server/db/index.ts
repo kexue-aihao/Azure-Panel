@@ -175,7 +175,7 @@ const MYSQL_SCHEMA_STATEMENTS = [
 		enable_ddos_protection tinyint(1) NOT NULL DEFAULT 0,
 		ip_prefix varchar(32) NOT NULL DEFAULT '85.211',
 		ip_brush_max_attempts int NOT NULL DEFAULT 30,
-		check_interval_seconds int NOT NULL DEFAULT 30,
+		check_interval_seconds int NOT NULL DEFAULT 60,
 		status_check_enabled tinyint(1) NOT NULL DEFAULT 1,
 		status_trigger_states varchar(120) NOT NULL DEFAULT 'banned,warning,warned,disabled',
 		replenishment_account_order varchar(32) NOT NULL DEFAULT 'pool_added_at',
@@ -1040,7 +1040,7 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 		pool,
 		'workflow_policies',
 		'check_interval_seconds',
-		'check_interval_seconds int NOT NULL DEFAULT 30'
+		'check_interval_seconds int NOT NULL DEFAULT 60'
 	);
 	const hadReplenishTargetCount = await mysqlColumnExists(
 		pool,
@@ -1099,7 +1099,7 @@ async function ensureMysqlSchemaAfterLock(pool: Pool) {
 	);
 	await mysqlInitQuery(
 		pool,
-		'UPDATE workflow_policies SET check_interval_seconds = 30 WHERE check_interval_seconds IS NULL OR check_interval_seconds <= 0 OR check_interval_seconds = 60',
+		'UPDATE workflow_policies SET check_interval_seconds = 60 WHERE check_interval_seconds <> 60',
 		undefined,
 		'mysql-schema:workflow-policies:normalize-check-interval'
 	);
@@ -1361,7 +1361,7 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 			enable_ddos_protection INTEGER NOT NULL DEFAULT 0,
 			ip_prefix TEXT NOT NULL DEFAULT '85.211',
 			ip_brush_max_attempts INTEGER NOT NULL DEFAULT 30,
-			check_interval_seconds INTEGER NOT NULL DEFAULT 30,
+			check_interval_seconds INTEGER NOT NULL DEFAULT 60,
 			status_check_enabled INTEGER NOT NULL DEFAULT 1,
 			status_trigger_states TEXT NOT NULL DEFAULT 'banned,warning,warned,disabled',
 			replenishment_account_order TEXT NOT NULL DEFAULT 'pool_added_at',
@@ -1491,7 +1491,7 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	}
 	if (!workflowColumns.some((column) => column.name === 'check_interval_seconds')) {
 		sqlite.exec(
-			'ALTER TABLE workflow_policies ADD COLUMN check_interval_seconds INTEGER NOT NULL DEFAULT 30'
+			'ALTER TABLE workflow_policies ADD COLUMN check_interval_seconds INTEGER NOT NULL DEFAULT 60'
 		);
 	}
 	if (!workflowColumns.some((column) => column.name === 'replenish_target_count')) {
@@ -1518,7 +1518,7 @@ export async function initDatabase(options: InitDatabaseOptions = {}) {
 	);
 	sqlite.exec("UPDATE workflow_policies SET ip_prefix = '85.211' WHERE ip_prefix IS NULL OR trim(ip_prefix) = ''");
 	sqlite.exec('UPDATE workflow_policies SET ip_brush_max_attempts = 30 WHERE ip_brush_max_attempts IS NULL OR ip_brush_max_attempts < 1');
-	sqlite.exec('UPDATE workflow_policies SET check_interval_seconds = 30 WHERE check_interval_seconds IS NULL OR check_interval_seconds <= 0 OR check_interval_seconds = 60');
+	sqlite.exec('UPDATE workflow_policies SET check_interval_seconds = 60 WHERE check_interval_seconds <> 60');
 	if (!workflowColumns.some((column) => column.name === 'replenishment_account_order')) {
 		sqlite.exec(
 			"ALTER TABLE workflow_policies ADD COLUMN replenishment_account_order TEXT NOT NULL DEFAULT 'pool_added_at'"
