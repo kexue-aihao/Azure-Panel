@@ -15,17 +15,17 @@
 
 ## 一、安装 Go 和 Node.js
 
-Go 主进程监听 `127.0.0.1:3000`，Node 仅作为兼容后端监听 `127.0.0.1:3001`。`GO_PANEL_ENABLED=true` 时脚本默认要求 Go 1.22+ 可用；如需临时退回仅 Node 兼容运行，可显式设置 `ALLOW_NODE_COMPAT_ONLY=1`。
+Go 主进程监听 `127.0.0.1:3000`，Node 仅作为兼容后端监听 `127.0.0.1:3001`。`GO_PANEL_ENABLED=true` 时脚本会优先使用系统 Go 1.22+，缺失或版本过低时自动下载安装到项目 `bin/go-toolchain`；如需临时退回仅 Node 兼容运行，可显式设置 `ALLOW_NODE_COMPAT_ONLY=1`。
 
 在 aaPanel「软件商店」搜索 **Node.js版本管理器** 或 **PM2**，安装后选择 **Node 20 LTS**。
 
 SSH 验证：
 
 ```bash
-go version
 node -v
 npm -v
 which node
+go version || /www/wwwroot/Azure-Panel/bin/go-toolchain/current/bin/go version
 ```
 
 记下 `node` 绝对路径（如 `/usr/bin/node`），后续 Supervisor 配置需使用相同路径。

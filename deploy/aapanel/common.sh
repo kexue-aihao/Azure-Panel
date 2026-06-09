@@ -979,6 +979,14 @@ find_go_bin() {
 		echo "$GO_BIN"
 		return 0
 	fi
+	local app_dir="${APP_DIR:-$(pwd)}"
+	for candidate in \
+		"${app_dir}/bin/go-toolchain/current/bin/go" \
+		"${app_dir}/bin/go-toolchain"/go*/bin/go; do
+		[[ -x "$candidate" ]] || continue
+		echo "$candidate"
+		return 0
+	done
 	if command -v go >/dev/null 2>&1; then
 		command -v go
 		return 0
@@ -988,6 +996,154 @@ find_go_bin() {
 		echo "$candidate"
 		return 0
 	done
+	return 1
+}
+
+go_version_at_least() {
+	local go_bin="$1"
+	local min_major="${2:-1}"
+	local min_minor="${3:-22}"
+	local version major rest minor
+
+	[[ -x "$go_bin" ]] || return 1
+	version="$("$go_bin" version 2>/dev/null | sed -n 's/.* go\([0-9][0-9.]*\).*/\1/p' | head -1)"
+	[[ -n "$version" ]] || return 1
+	major="${version%%.*}"
+	rest="${version#*.}"
+	minor="${rest%%.*}"
+	[[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+	(( major > min_major || (major == min_major && minor >= min_minor) ))
+}
+
+find_go_bin_at_least() {
+	local min_major="${1:-1}"
+	local min_minor="${2:-22}"
+	local app_dir="${APP_DIR:-$(pwd)}"
+	local candidate
+
+	for candidate in \
+		"${GO_BIN:-}" \
+		"$(command -v go 2>/dev/null || true)" \
+		/usr/local/go/bin/go \
+		/usr/bin/go \
+		/usr/local/bin/go \
+		"${app_dir}/bin/go-toolchain/current/bin/go" \
+		"${app_dir}/bin/go-toolchain"/go*/bin/go; do
+		[[ -n "$candidate" && -x "$candidate" ]] || continue
+		if go_version_at_least "$candidate" "$min_major" "$min_minor"; then
+			echo "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
+go_toolchain_version() {
+	local fallback="${GO_TOOLCHAIN_FALLBACK_VERSION:-1.22.12}"
+	local raw=""
+
+	if [[ -n "${GO_TOOLCHAIN_VERSION:-}" ]]; then
+		echo "${GO_TOOLCHAIN_VERSION#go}"
+		return 0
+	fi
+	if command -v curl >/dev/null 2>&1; then
+		raw="$(curl -fsSL --connect-timeout 8 https://go.dev/VERSION?m=text 2>/dev/null | head -1 || true)"
+	elif command -v wget >/dev/null 2>&1; then
+		raw="$(wget -qO- https://go.dev/VERSION?m=text 2>/dev/null | head -1 || true)"
+	fi
+	raw="${raw#go}"
+	echo "${raw:-$fallback}"
+}
+
+ensure_go_toolchain() {
+	local app_dir="${1:-${APP_DIR:-$(pwd)}}"
+	local go_bin version arch install_root install_dir tmp_dir archive primary_url fallback_url cn_url extracted url downloaded
+
+	go_bin="$(find_go_bin_at_least 1 22 2>/dev/null || true)"
+	if [[ -n "$go_bin" ]]; then
+		export GO_BIN="$go_bin"
+		export PATH="$(dirname "$go_bin"):${PATH}"
+		return 0
+	fi
+	go_bin="$(find_go_bin 2>/dev/null || true)"
+	if [[ -n "$go_bin" ]]; then
+		warn "检测到 Go 版本低于 1.22: $("$go_bin" version 2>/dev/null || echo "$go_bin")"
+	fi
+
+	if [[ "${SKIP_GO_TOOLCHAIN_INSTALL:-0}" == "1" || "${SKIP_GO_INSTALL:-0}" == "1" ]]; then
+		return 1
+	fi
+	if [[ "$(uname -s 2>/dev/null)" != "Linux" ]]; then
+		warn "当前系统不是 Linux，无法自动安装 Go；请手动安装 Go 1.22+ 或设置 GO_BIN"
+		return 1
+	fi
+	if ! command -v tar >/dev/null 2>&1; then
+		warn "未找到 tar，无法自动解压 Go 工具链"
+		return 1
+	fi
+
+	arch="$(detect_arch_label)"
+	if [[ -z "$arch" ]]; then
+		warn "未识别 CPU 架构，无法自动安装 Go；请手动安装 Go 1.22+ 或设置 GO_BIN"
+		return 1
+	fi
+
+	version="$(go_toolchain_version)"
+	install_root="${GO_INSTALL_ROOT:-${app_dir}/bin/go-toolchain}"
+	install_dir="${install_root}/go${version}"
+	tmp_dir="${app_dir}/deploy/aapanel/generated/go-download"
+	archive="${tmp_dir}/go${version}.linux-${arch}.tar.gz"
+	primary_url="${GO_TOOLCHAIN_URL:-https://go.dev/dl/go${version}.linux-${arch}.tar.gz}"
+	fallback_url="https://dl.google.com/go/go${version}.linux-${arch}.tar.gz"
+	cn_url="https://golang.google.cn/dl/go${version}.linux-${arch}.tar.gz"
+
+	if [[ -x "${install_dir}/bin/go" ]] && go_version_at_least "${install_dir}/bin/go" 1 22; then
+		ln -sfn "$install_dir" "${install_root}/current" 2>/dev/null || true
+		export GO_BIN="${install_dir}/bin/go"
+		export PATH="${install_dir}/bin:${PATH}"
+		return 0
+	fi
+
+	mkdir -p "$install_root" "$tmp_dir"
+	log "未检测到 Go 1.22+，自动下载 Go ${version} (${arch})..."
+	downloaded=0
+	for url in "$primary_url" "$fallback_url" "$cn_url"; do
+		[[ -n "$url" ]] || continue
+		if [[ "$downloaded" == "1" ]]; then
+			break
+		fi
+		if download_file "$url" "$archive"; then
+			downloaded=1
+		else
+			warn "Go 下载失败: $url"
+		fi
+	done
+	[[ "$downloaded" == "1" ]] || return 1
+
+	rm -rf "${tmp_dir}/extract"
+	mkdir -p "${tmp_dir}/extract"
+	if ! tar -xzf "$archive" -C "${tmp_dir}/extract"; then
+		warn "Go 工具链解压失败: $archive"
+		return 1
+	fi
+	extracted="${tmp_dir}/extract/go"
+	[[ -x "${extracted}/bin/go" ]] || {
+		warn "Go 工具链包内未找到 go 可执行文件"
+		return 1
+	}
+
+	rm -rf "$install_dir"
+	mv "$extracted" "$install_dir" || return 1
+	ln -sfn "$install_dir" "${install_root}/current" 2>/dev/null || true
+	chmod +x "${install_dir}/bin/go" 2>/dev/null || true
+	if go_version_at_least "${install_dir}/bin/go" 1 22; then
+		export GO_BIN="${install_dir}/bin/go"
+		export PATH="${install_dir}/bin:${PATH}"
+		log "Go 工具链已准备: $("${install_dir}/bin/go" version)"
+		return 0
+	fi
+
+	warn "自动安装的 Go 版本仍低于 1.22: $("${install_dir}/bin/go" version 2>/dev/null || echo unknown)"
 	return 1
 }
 
@@ -1020,6 +1176,16 @@ build_go_panel() {
 		return 0
 	}
 
+	if go_panel_enabled "${app_dir}/.env"; then
+		if ! ensure_go_toolchain "$app_dir"; then
+			if [[ "${ALLOW_NODE_COMPAT_ONLY:-0}" == "1" ]]; then
+				warn "GO_PANEL_ENABLED=true but Go 1.22+ is unavailable; ALLOW_NODE_COMPAT_ONLY=1 keeps the Node compatibility runtime active"
+			else
+				die "GO_PANEL_ENABLED=true 但无法准备 Go 1.22+ 工具链；请检查服务器网络/架构，或临时设置 ALLOW_NODE_COMPAT_ONLY=1"
+			fi
+		fi
+	fi
+
 	go_bin="$(find_go_bin 2>/dev/null || true)"
 	if [[ -z "$go_bin" ]]; then
 		if go_panel_enabled "${app_dir}/.env"; then
@@ -1031,6 +1197,13 @@ build_go_panel() {
 		else
 			warn "Go toolchain not found; skip Go panel build"
 		fi
+		return 0
+	fi
+	if ! go_version_at_least "$go_bin" 1 22; then
+		if go_panel_enabled "${app_dir}/.env" && [[ "${ALLOW_NODE_COMPAT_ONLY:-0}" != "1" ]]; then
+			die "GO_PANEL_ENABLED=true 但 Go 版本低于 1.22: $("$go_bin" version 2>/dev/null || echo "$go_bin")"
+		fi
+		warn "Go version is lower than 1.22; skip Go panel build: $("$go_bin" version 2>/dev/null || echo "$go_bin")"
 		return 0
 	fi
 

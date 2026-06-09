@@ -153,7 +153,7 @@ update.sh              后续升级脚本
 - Nginx
 - MySQL 8.0
 - Node.js 20 LTS
-- Go 1.22 或更高版本
+- Go 1.22 或更高版本，脚本可在 Linux 上自动下载安装到项目 `bin/go-toolchain`
 - Git
 - curl、unzip、tar
 - 可选：Supervisor 或 aaPanel 兼容项目守护进程
@@ -345,7 +345,7 @@ NODE_ENV=production ENABLE_EMBEDDED_WORKER=false node build/worker.js
 | Node Compat | `node build/index.js` 或 `node build` | 迁移期本地兼容后端，默认监听 `3001` |
 | Worker | `node build/worker.js` | 自动补机与订阅检测迁移期执行层 |
 
-`install.sh` 和 `update.sh` 会自动检测 Go 工具链；`GO_PANEL_ENABLED=true` 时默认要求 Go 1.22+ 可用，并构建 `services/panel` 到 `bin/azure-panel-go`。如需临时退回仅 Node 兼容运行，可显式设置 `ALLOW_NODE_COMPAT_ONLY=1`。`GO_PANEL_NODE_COMPAT_ENABLED=true` 时，尚未迁移到 Go 的旧 API 会转发到本机 Node 兼容后端。
+`install.sh` 和 `update.sh` 会自动检测 Go 工具链；`GO_PANEL_ENABLED=true` 时会优先使用系统 Go 1.22+，缺失或版本过低时在 Linux 上自动下载安装到项目 `bin/go-toolchain`，并构建 `services/panel` 到 `bin/azure-panel-go`。如需临时退回仅 Node 兼容运行，可显式设置 `ALLOW_NODE_COMPAT_ONLY=1`。`GO_PANEL_NODE_COMPAT_ENABLED=true` 时，尚未迁移到 Go 的旧 API 会转发到本机 Node 兼容后端。
 
 Go 面板提供这些运行时端点：
 

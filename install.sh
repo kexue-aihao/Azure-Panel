@@ -146,7 +146,7 @@ check_prerequisites() {
 	require_cmd git
 	require_node_tools
 	if ! find_go_bin >/dev/null 2>&1; then
-		warn "未检测到 Go 工具链；GO_PANEL_ENABLED=true 时安装会停止。请先安装 Go 1.22+，或临时设置 ALLOW_NODE_COMPAT_ONLY=1"
+		warn "未检测到 Go 工具链；GO_PANEL_ENABLED=true 时会自动下载安装到项目 bin/go-toolchain，失败时可临时设置 ALLOW_NODE_COMPAT_ONLY=1"
 	fi
 
 	if [[ "${EUID}" -ne 0 ]]; then
