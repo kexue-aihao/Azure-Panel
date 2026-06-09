@@ -3312,6 +3312,8 @@ async function createPublicIp(
 		step?: string;
 		progressDetail?: CreateVmProgressEvent['detail'];
 		waitForAddress?: boolean;
+		addressWaitAttempts?: number;
+		addressWaitDelayMs?: number;
 		failureProgressStatus?: CreateVmProgressStatus;
 	}
 ): Promise<PublicIPAddress> {
@@ -3394,8 +3396,8 @@ async function createPublicIp(
 				: await getPublicIpWithRawFallback(clients, options.resourceGroup, options.name);
 		const ready = options.waitForAddress === true && !publicIpAddressValue(pip)
 			? await waitForPublicIpAddress(clients, options.resourceGroup, options.name, {
-					attempts: options.version === 'IPv4' ? 30 : 20,
-					delayMs: 1500,
+					attempts: options.addressWaitAttempts ?? (options.version === 'IPv4' ? 30 : 20),
+					delayMs: options.addressWaitDelayMs ?? 1500,
 					progress: options.progress,
 					step,
 					version: options.version,
@@ -3406,6 +3408,13 @@ async function createPublicIp(
 				})
 			: pip;
 		if (!ready.id) throw new Error(`Azure 未返回 ${options.version} 公网 IP 资源 ID`);
+		if (options.waitForAddress === true && !publicIpAddressValue(ready)) {
+			throw new Error(
+				`Azure 已创建 ${options.version} 公网 IP 资源 ${options.name}，但等待 ${
+					options.addressWaitAttempts ?? (options.version === 'IPv4' ? 30 : 20)
+				} 次后仍未返回 IP 地址`
+			);
+		}
 		await reportCreateVmProgress(options.progress, step, 'success', `${options.version} 公网 IP 已创建`, withPublicIpDetail({
 			name: options.name,
 			ip: publicIpAddressValue(ready),
@@ -3565,6 +3574,7 @@ async function createMatchingIPv4PublicIp(
 				progress: options.progress,
 				step: 'public-ipv4',
 				waitForAddress: Boolean(targetPrefix),
+				addressWaitAttempts: targetPrefix ? 12 : undefined,
 				failureProgressStatus: options.failureProgressStatus,
 				progressDetail: {
 					attempt,

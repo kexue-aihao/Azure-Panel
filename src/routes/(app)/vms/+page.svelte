@@ -105,6 +105,8 @@
 		targetPrefix: string;
 		publicIpName: string;
 		pending: boolean;
+		failed: boolean;
+		error: string;
 		matched: boolean;
 		kept: boolean;
 		deleted: boolean;
@@ -362,11 +364,13 @@
 		if (!ip && !publicIpName) return null;
 		const waitAttempt = progressDetailNumber(event.detail, 'waitAttempt');
 		const waitAttempts = progressDetailNumber(event.detail, 'waitAttempts');
+		const error = progressDetailString(event.detail, 'error');
+		const failed = Boolean(error) || (event.status === 'error' && !ip);
 		const explicitMatched = event.detail?.matched === true;
 		const explicitMissed = event.detail?.matched === false;
 		const matched =
 			explicitMatched || (!explicitMissed && Boolean(targetPrefix) && ip.startsWith(targetPrefix));
-		const pending = !ip;
+		const pending = !ip && !failed;
 		const kept =
 			event.detail?.kept === true ||
 			(matched && event.status === 'success') ||
@@ -380,6 +384,8 @@
 			targetPrefix,
 			publicIpName,
 			pending,
+			failed,
+			error,
 			matched,
 			kept,
 			deleted,
@@ -405,14 +411,25 @@
 		if (lastMissed) return `${prefixText}，最近未命中 ${lastMissed.ip}，记录 ${records.length} 个公网 IP`;
 		const pending = [...records].reverse().find((item) => item.pending);
 		if (pending) return `${prefixText}，正在创建 ${pending.publicIpName || '公网 IP'}，等待 Azure 分配 IPv4`;
+		const failedCount = records.filter((item) => item.failed).length;
+		if (failedCount) return `${prefixText}，已有 ${failedCount} 次创建失败，正在继续尝试`;
 		return `${prefixText}，已记录 ${records.length} 个公网 IP`;
 	}
 
+	function brushedIpPanelTitle(records: BrushedIpRecord[]) {
+		if (records.some((item) => item.ip)) return '已刷到 IPv4';
+		if (records.some((item) => item.pending)) return '等待 IPv4 分配';
+		if (records.some((item) => item.failed)) return 'IPv4 创建重试';
+		return 'IPv4 刷段记录';
+	}
+
 	function brushedIpPrimaryLabel(item: BrushedIpRecord) {
+		if (item.failed) return '失败原因';
 		return item.ip ? '完整 IPv4' : '等待 IPv4';
 	}
 
 	function brushedIpPrimaryValue(item: BrushedIpRecord) {
+		if (item.failed) return item.error || '创建失败';
 		return item.ip || '等待 Azure 分配';
 	}
 
@@ -421,8 +438,9 @@
 		const kept = records.find((item) => item.kept);
 		if (kept?.targetPrefix) return '保留最后 IP';
 		if (kept) return '最终 IP';
-		if (records.some((item) => item.deleted)) return '刷段中';
 		if (records.some((item) => item.pending)) return '等待分配';
+		if (records.some((item) => item.deleted)) return '刷段中';
+		if (records.some((item) => item.failed)) return '创建重试中';
 		return '已刷到';
 	}
 
@@ -430,6 +448,7 @@
 		if (item.matched) return '命中';
 		if (item.kept) return item.targetPrefix ? '未命中保留' : '最终使用';
 		if (item.deleted) return '未命中删除';
+		if (item.failed) return '创建失败';
 		if (item.pending) return '等待分配';
 		if (item.targetPrefix) return '待判定';
 		return '已创建';
@@ -439,6 +458,7 @@
 		if (item.matched) return 'bg-green-900/50 text-green-300';
 		if (item.kept) return 'bg-amber-900/50 text-amber-200';
 		if (item.deleted) return 'bg-slate-800 text-slate-300';
+		if (item.failed) return 'bg-red-950/60 text-red-200';
 		if (item.pending) return 'bg-yellow-900/50 text-yellow-200';
 		return 'bg-blue-900/50 text-blue-200';
 	}
@@ -472,6 +492,8 @@
 					matched: false,
 					kept: true,
 					deleted: false,
+					failed: false,
+					error: '',
 					timestamp
 				}
 			];
@@ -488,6 +510,8 @@
 				matched,
 				kept: true,
 				deleted: false,
+				failed: false,
+				error: '',
 				timestamp
 			};
 		});
@@ -1892,7 +1916,7 @@
 					<div class="rounded-xl border border-blue-500/30 bg-blue-950/20 p-4">
 						<div class="flex flex-wrap items-center justify-between gap-2">
 							<div>
-								<div class="text-sm font-medium text-blue-100">已刷到 IPv4</div>
+								<div class="text-sm font-medium text-blue-100">{brushedIpPanelTitle(createBrushedIps)}</div>
 								<div class="mt-1 text-xs text-muted">
 									{brushedIpSummary(createBrushedIps)}
 								</div>
@@ -2036,7 +2060,7 @@
 			<div class="rounded-xl border border-blue-500/30 bg-blue-950/20 p-4">
 				<div class="flex flex-wrap items-center justify-between gap-2">
 					<div>
-						<div class="text-sm font-medium text-blue-100">已刷到 IPv4</div>
+						<div class="text-sm font-medium text-blue-100">{brushedIpPanelTitle(operationBrushedIps)}</div>
 						<div class="mt-1 text-xs text-muted">
 							{brushedIpSummary(operationBrushedIps)}
 						</div>
