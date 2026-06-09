@@ -158,11 +158,12 @@ runtime_memory_cleanup_before_restart "$APP_DIR" || true
 
 if [[ "${SKIP_SUPERVISOR:-0}" != "1" ]]; then
 	go_program="$(go_panel_supervisor_program "${APP_DIR}/.env" "$APP_DIR")"
-	if restart_aapanel_node_projects "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}" "$WORKER_PROGRAM" 2>/dev/null; then
-		log "已通过 aaPanel 重启 Node 兼容项目"
-		if [[ -n "$go_program" ]]; then
-			supervisor_reload_and_start "$WEB_PROGRAM" "$WORKER_PROGRAM" "$go_program" || true
-		fi
+	if go_panel_enabled "${APP_DIR}/.env" && [[ -n "$go_program" ]]; then
+		stop_aapanel_node_projects "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}" "$WORKER_PROGRAM" "$APP_DIR" || true
+		write_supervisor_configs "$(find_node_bin)" "$APP_DIR" "$HEALTH_PORT" "$WEB_PROGRAM" "$WORKER_PROGRAM"
+		supervisor_reload_and_start "$WEB_PROGRAM" "$WORKER_PROGRAM" "$go_program" || true
+	elif restart_aapanel_node_projects "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}" "$WORKER_PROGRAM" 2>/dev/null; then
+		log "已通过 aaPanel 重启 Node 项目"
 	else
 		restart_supervisor_programs "$WEB_PROGRAM" "$WORKER_PROGRAM" "$go_program" || true
 	fi

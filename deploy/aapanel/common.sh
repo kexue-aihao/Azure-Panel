@@ -1578,6 +1578,94 @@ sys.exit(0 if restarted > 0 else 1)
 PY
 }
 
+stop_aapanel_node_projects() {
+	local web_name="${1:-Azure-Panel}"
+	local worker_name="${2:-azure-panel-worker}"
+	local app_dir="${3:-${APP_DIR:-$(pwd)}}"
+	local panel_py="/www/server/panel/pyenv/bin/python3"
+
+	[[ -d /www/server/panel ]] || return 1
+	[[ -x "$panel_py" ]] || return 1
+
+	log "停止 aaPanel Node 项目，释放 Go 主入口端口: $web_name, $worker_name"
+	AAPANEL_WEB_PROJECT_NAME="$web_name" \
+	AAPANEL_WORKER_PROJECT_NAME="$worker_name" \
+	AAPANEL_APP_DIR="$app_dir" \
+	"$panel_py" - <<'PY'
+import os
+import signal
+import sys
+import time
+
+sys.path.insert(0, "/www/server/panel/class")
+sys.path.insert(0, "/www/server/panel")
+os.chdir("/www/server/panel")
+import public
+from mod.project.nodejs import generalMod, nodeMod
+
+web_name = os.environ.get("AAPANEL_WEB_PROJECT_NAME", "Azure-Panel")
+worker_name = os.environ.get("AAPANEL_WORKER_PROJECT_NAME", "azure-panel-worker")
+app_dir = os.environ.get("AAPANEL_APP_DIR", "")
+
+
+def project_exists(name):
+    try:
+        return public.M("sites").where("name=?", (name,)).count() > 0
+    except Exception:
+        return False
+
+
+def stop_project(mod, name):
+    if not project_exists(name):
+        return
+    get = public.dict_obj()
+    get.project_name = name
+    try:
+        res = mod.main().stop_project(get)
+        print("[aapanel] stop {} -> {}".format(name, res))
+    except Exception as exc:
+        print("[aapanel] stop {} failed: {}".format(name, exc))
+
+
+def cleanup_runtime(entry_file):
+    if not app_dir or not os.path.isdir("/proc"):
+        return
+    target = os.path.join(app_dir, entry_file)
+    pids = []
+    for item in os.listdir("/proc"):
+        if not item.isdigit() or int(item) == os.getpid():
+            continue
+        try:
+            with open(os.path.join("/proc", item, "cmdline"), "rb") as fh:
+                cmd = fh.read().replace(b"\x00", b" ").decode("utf-8", "ignore")
+        except Exception:
+            continue
+        if target in cmd:
+            pids.append(int(item))
+    if not pids:
+        return
+    print("[aapanel] cleanup {} -> {}".format(entry_file, pids))
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+    time.sleep(2)
+    for pid in pids:
+        if os.path.exists("/proc/{}".format(pid)):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+
+stop_project(nodeMod, web_name)
+stop_project(generalMod, worker_name)
+cleanup_runtime("build/index.js")
+cleanup_runtime("build/worker.js")
+PY
+}
+
 write_supervisor_configs() {
 	local node_bin="$1"
 	local app_dir="$2"
@@ -1734,11 +1822,15 @@ restart_supervisor_programs() {
 
 health_check() {
 	local port="$1"
-	local body status attempt max_attempts interval url
+	local body status attempt max_attempts interval endpoint url health_body
 	max_attempts="${HEALTHCHECK_RETRIES:-12}"
 	interval="${HEALTHCHECK_INTERVAL:-5}"
-	url="http://127.0.0.1:${port}/api/health"
-	log "健康检查 http://127.0.0.1:${port}/api/health ..."
+	endpoint="/api/health"
+	if go_panel_enabled "${APP_DIR:-$(pwd)}/.env" && [[ "${ALLOW_NODE_COMPAT_ONLY:-0}" != "1" ]]; then
+		endpoint="/api/go/status"
+	fi
+	url="http://127.0.0.1:${port}${endpoint}"
+	log "健康检查 ${url} ..."
 	sleep 2
 	if command -v curl >/dev/null 2>&1; then
 		for attempt in $(seq 1 "$max_attempts"); do
@@ -1756,6 +1848,10 @@ health_check() {
 		done
 		[[ -n "$status" ]] && warn "健康检查 HTTP 状态: $status"
 		[[ -n "$body" ]] && warn "健康检查响应: $body"
+		if [[ "$endpoint" != "/api/health" ]]; then
+			health_body="$(curl -sS --connect-timeout 3 --max-time 6 "http://127.0.0.1:${port}/api/health" 2>&1 || true)"
+			[[ -n "$health_body" ]] && warn "Go 专属端点未通过；/api/health 当前响应: $health_body"
+		fi
 		warn "健康检查未通过或响应超时，请查看 Go Panel / Node 兼容后端日志，以及端口 ${port} 是否被正确监听；数据库状态以前面的 MySQL 端口/账号验收为准"
 		return 1
 	fi

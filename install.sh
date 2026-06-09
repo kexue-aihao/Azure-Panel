@@ -300,8 +300,8 @@ setup_aapanel_resources() {
 
 	if setup_aapanel_site "$APP_DIR" "$DOMAIN" "$port" "${AAPANEL_WEB_PROJECT_NAME:-Azure-Panel}"; then
 		if go_panel_enabled "${APP_DIR}/.env"; then
-			export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-0}"
-			export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-0}"
+			export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-1}"
+			export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-1}"
 		else
 			export SKIP_SUPERVISOR_WEB="${SKIP_SUPERVISOR_WEB:-1}"
 			export SKIP_SUPERVISOR_WORKER="${SKIP_SUPERVISOR_WORKER:-1}"
