@@ -32,6 +32,16 @@ function streamMessage(controller: ReadableStreamDefaultController<Uint8Array>, 
 	controller.enqueue(new TextEncoder().encode(`${JSON.stringify(payload)}\n`));
 }
 
+function progressLogMessage(event: CreateVmProgressEvent) {
+	const detailError =
+		typeof event.detail?.error === 'string' && event.detail.error.trim()
+			? event.detail.error.trim()
+			: '';
+	if (!detailError || event.message.includes(detailError)) return event.message;
+	const error = detailError.length > 1000 ? `${detailError.slice(0, 1000)}...` : detailError;
+	return `${event.message}: ${error}`;
+}
+
 export function vmOperationStream<T>(options: {
 	run: (progress: VmOperationProgress) => Promise<T>;
 	onProgress?: (event: CreateVmProgressEvent) => void | Promise<void>;
@@ -57,7 +67,8 @@ export function vmOperationStream<T>(options: {
 						lastErrorStep:
 							specificErrorEvent && specificErrorEvent.step !== options.errorStep
 								? specificErrorEvent.step
-								: null
+								: null,
+						error: message
 					}));
 				}
 				streamMessage(controller, { type: 'error', message, event: specificErrorEvent ?? lastErrorEvent });
@@ -90,7 +101,7 @@ export async function writeVmOperationLog(options: {
 		source: options.source,
 		action: options.event.step,
 		status: options.event.status,
-		message: options.event.message,
+		message: progressLogMessage(options.event),
 		resourceGroup: options.resourceGroup,
 		vmName: options.vmName
 	}).catch((logErr) => {

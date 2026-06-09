@@ -3431,10 +3431,12 @@ async function createPublicIp(
 			return recovered;
 		}
 		await deletePublicIpByName(clients, options.resourceGroup, options.name).catch(() => undefined);
+		const shortMessage = conciseProgressError(message);
 		await reportCreateVmProgress(options.progress, step, 'error', `${options.version} 公网 IP 创建失败`, withPublicIpDetail({
 			name: options.name,
 			version: options.version,
 			failureProgressStatus,
+			reason: shortMessage,
 			error: message.length > 800 ? `${message.slice(0, 800)}...` : message
 		}));
 		throw new Error(`${options.version} 公网 IP 创建失败 ${options.name}: ${message}`);
@@ -3467,6 +3469,12 @@ function enrichPublicIpCreateFailureMessage(version: 'IPv4' | 'IPv6', message: s
 		`then updating the NIC ipConfiguration publicIPAddress reference. This failed before NIC binding while creating the new ${version} Public IP. ` +
 		`Common causes: regional Public IP capacity, Public IP quota, subscription/policy restrictions, or Microsoft.Network provider issues.`
 	);
+}
+
+function conciseProgressError(message: string, maxLength = 240) {
+	const singleLine = message.replace(/\s+/g, ' ').trim();
+	if (singleLine.length <= maxLength) return singleLine;
+	return `${singleLine.slice(0, maxLength)}...`;
 }
 
 function isPublicIpQuotaFailure(message: string) {
@@ -3570,11 +3578,14 @@ async function createMatchingIPv4PublicIp(
 			});
 		} catch (err) {
 			lastCreateError = formatAzureError(err);
+			const shortError = conciseProgressError(lastCreateError);
 			await reportCreateVmProgress(
 				options.progress,
 				'public-ipv4',
 				attempt >= maxAttempts ? 'error' : 'info',
-				`第 ${attempt}/${maxAttempts} 次 IPv4 公网 IP 创建失败，${attempt >= maxAttempts ? '已达到最大次数' : '将继续尝试下一次'}`,
+				`第 ${attempt}/${maxAttempts} 次 IPv4 公网 IP 创建失败：${shortError}，${
+					attempt >= maxAttempts ? '已达到最大次数' : '将继续尝试下一次'
+				}`,
 				{
 					attempt,
 					maxAttempts,
@@ -3584,6 +3595,7 @@ async function createMatchingIPv4PublicIp(
 				}
 			);
 			await deletePublicIpByName(clients, options.resourceGroup, name).catch(() => undefined);
+			if (attempt < maxAttempts) await sleep(Math.min(12000, 2000 + attempt * 500));
 			continue;
 		}
 		const address = publicIpAddressValue(pip);
