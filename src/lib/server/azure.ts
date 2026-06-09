@@ -326,6 +326,7 @@ const ARM_ENDPOINT = 'https://management.azure.com';
 const ARM_SCOPE = `${ARM_ENDPOINT}/.default`;
 const AZURE_AUTHORITY_HOST = 'https://login.microsoftonline.com';
 const SUBSCRIPTIONS_API_VERSION = '2020-01-01';
+const COMPUTE_RESOURCE_SKUS_API_VERSION = '2021-07-01';
 const COGNITIVE_SERVICES_API_VERSION = '2024-10-01';
 const CAPACITY_QUOTA_API_VERSION = '2020-10-25';
 const NETWORK_PUBLIC_IP_API_VERSION = '2024-05-01';
@@ -491,6 +492,40 @@ const FEATURED_IMAGE_CANDIDATES: FeaturedImageCandidate[] = [
 ];
 
 const IMAGE_QUERY_CONCURRENCY = 4;
+const IMAGE_DISCOVERY_CONCURRENCY = 3;
+const DEFAULT_IMAGE_DISCOVERY_LIMIT = 80;
+
+type ImageDiscoveryConfig = {
+	publisher: string;
+	osType: 'Linux' | 'Windows';
+	offerMatches: (offer: string) => boolean;
+	skuMatches: (offer: string, sku: string) => boolean;
+	label: (offer: string, sku: string) => string;
+};
+
+const IMAGE_DISCOVERY_CONFIGS: ImageDiscoveryConfig[] = [
+	{
+		publisher: 'Canonical',
+		osType: 'Linux',
+		offerMatches: (offer) => /ubuntu/i.test(offer),
+		skuMatches: (offer, sku) => isUbuntuServerLtsCandidate(offer, sku),
+		label: (offer, sku) => ubuntuImageLabel(offer, sku)
+	},
+	{
+		publisher: 'Debian',
+		osType: 'Linux',
+		offerMatches: (offer) => /debian/i.test(offer),
+		skuMatches: (offer, sku) => Boolean(debianMajorFromOfferOrSku(offer, sku)),
+		label: (offer, sku) => debianImageLabel(debianMajorFromOfferOrSku(offer, sku), sku)
+	},
+	{
+		publisher: 'MicrosoftWindowsServer',
+		osType: 'Windows',
+		offerMatches: (offer) => /^windowsserver$/i.test(offer),
+		skuMatches: (_offer, sku) => isWindowsServerCandidate(sku),
+		label: (_offer, sku) => windowsServerImageLabel(sku)
+	}
+];
 
 type TimedCacheEntry<T> = {
 	expiresAt: number;
@@ -1131,6 +1166,16 @@ function capabilityNumberAny(sku: ResourceSku, names: string[]): number {
 	return 0;
 }
 
+function resourceSkuRestUrl(subscriptionId: string, filter?: string) {
+	const params = new URLSearchParams({ 'api-version': COMPUTE_RESOURCE_SKUS_API_VERSION });
+	if (filter) params.set('$filter', filter);
+	return `/subscriptions/${encodeURIComponent(subscriptionId)}/providers/Microsoft.Compute/skus?${params.toString()}`;
+}
+
+function isVirtualMachineSku(sku: ResourceSku) {
+	return String(sku.resourceType ?? '').toLowerCase() === 'virtualmachines' && Boolean(sku.name);
+}
+
 function normalizeLocationName(location: string) {
 	return location.toLowerCase().replace(/\s+/g, '');
 }
@@ -1653,6 +1698,101 @@ async function mapWithConcurrency<T, R>(
 	return results;
 }
 
+async function listResourceSkusBySdkForLocation(
+	clients: AzureClients,
+	normalizedLocation: string
+): Promise<ResourceSku[]> {
+	const skus: ResourceSku[] = [];
+	for await (const sku of clients.compute.resourceSkus.list({
+		filter: `location eq '${normalizedLocation}'`
+	})) {
+		if (!isVirtualMachineSku(sku)) continue;
+		if (!skuAppliesToLocation(sku, normalizedLocation)) continue;
+		skus.push(sku);
+	}
+	return skus;
+}
+
+async function listResourceSkusByRestForLocation(
+	clients: AzureClients,
+	normalizedLocation: string
+): Promise<ResourceSku[]> {
+	const skus = await collectArmPages<ResourceSku>(
+		clients.credential,
+		clients.clientOptions,
+		resourceSkuRestUrl(clients.subscriptionId, `location eq '${normalizedLocation}'`)
+	);
+	return skus.filter((sku) => isVirtualMachineSku(sku) && skuAppliesToLocation(sku, normalizedLocation));
+}
+
+async function listResourceSkusForLocation(
+	clients: AzureClients,
+	normalizedLocation: string
+): Promise<ResourceSku[]> {
+	let sdkError: unknown = null;
+	try {
+		const skus = await listResourceSkusBySdkForLocation(clients, normalizedLocation);
+		if (skus.length > 0) return skus;
+	} catch (err) {
+		sdkError = err;
+	}
+
+	try {
+		const skus = await listResourceSkusByRestForLocation(clients, normalizedLocation);
+		if (skus.length > 0 || !sdkError) return skus;
+	} catch (restErr) {
+		if (sdkError) {
+			throw new Error(
+				`ResourceSkus SDK 查询失败：${azureErrorMessage(sdkError)}；REST 兜底查询失败：${azureErrorMessage(restErr)}`
+			);
+		}
+		throw restErr;
+	}
+
+	return [];
+}
+
+async function listResourceSkusBySdk(clients: AzureClients): Promise<ResourceSku[]> {
+	const skus: ResourceSku[] = [];
+	for await (const sku of clients.compute.resourceSkus.list()) {
+		if (isVirtualMachineSku(sku)) skus.push(sku);
+	}
+	return skus;
+}
+
+async function listResourceSkusByRest(clients: AzureClients): Promise<ResourceSku[]> {
+	const skus = await collectArmPages<ResourceSku>(
+		clients.credential,
+		clients.clientOptions,
+		resourceSkuRestUrl(clients.subscriptionId)
+	);
+	return skus.filter(isVirtualMachineSku);
+}
+
+async function listResourceSkus(clients: AzureClients): Promise<ResourceSku[]> {
+	let sdkError: unknown = null;
+	try {
+		const skus = await listResourceSkusBySdk(clients);
+		if (skus.length > 0) return skus;
+	} catch (err) {
+		sdkError = err;
+	}
+
+	try {
+		const skus = await listResourceSkusByRest(clients);
+		if (skus.length > 0 || !sdkError) return skus;
+	} catch (restErr) {
+		if (sdkError) {
+			throw new Error(
+				`ResourceSkus SDK 查询失败：${azureErrorMessage(sdkError)}；REST 兜底查询失败：${azureErrorMessage(restErr)}`
+			);
+		}
+		throw restErr;
+	}
+
+	return [];
+}
+
 async function listResourceSkuCapabilitiesForLocation(
 	clients: AzureClients,
 	location: string
@@ -1660,15 +1800,8 @@ async function listResourceSkuCapabilitiesForLocation(
 	const normalizedLocation = normalizeLocationName(location);
 	const key = `vm-skus:${clients.subscriptionId}:${normalizedLocation}`;
 	const capabilities = await cachedAzureQuery(key, cacheTtlMs('AZURE_SKU_CACHE_TTL_SECONDS', 300), async () => {
-		const list: VmCapability[] = [];
-		for await (const sku of clients.compute.resourceSkus.list({
-			filter: `location eq '${normalizedLocation}'`
-		})) {
-			if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
-			if (!skuAppliesToLocation(sku, normalizedLocation)) continue;
-			list.push(skuToCapability(sku, normalizedLocation));
-		}
-		return list;
+		const skus = await listResourceSkusForLocation(clients, normalizedLocation);
+		return skus.map((sku) => skuToCapability(sku, normalizedLocation));
 	});
 	return capabilities.map((capability) => ({
 		...capability,
@@ -1700,8 +1833,7 @@ async function listResourceSkuCapabilitiesByRegion(
 		cacheTtlMs('AZURE_SKU_CACHE_TTL_SECONDS', 300),
 		async () => {
 			const grouped = new Map<string, VmCapability[]>();
-			for await (const sku of clients.compute.resourceSkus.list()) {
-				if (sku.resourceType !== 'virtualMachines' || !sku.name) continue;
+			for (const sku of await listResourceSkus(clients)) {
 				for (const region of skuLocations(sku)) {
 					const location = normalizeLocationName(region);
 					const capability = skuToCapability(sku, location);
@@ -1834,7 +1966,7 @@ function imageResourceName(resource: VirtualMachineImageResource) {
 
 function debianMajorFromOfferOrSku(offer: string, sku = '') {
 	const text = `${offer} ${sku}`;
-	return text.match(/\b(12|11)\b/)?.[1] ?? '';
+	return text.match(/\b(1[0-9]|[7-9])\b/)?.[1] ?? '';
 }
 
 function debianImageLabel(major: string, sku: string) {
@@ -1842,48 +1974,119 @@ function debianImageLabel(major: string, sku: string) {
 	return `Debian ${major}${genText}`;
 }
 
-async function discoverDebianImageCandidates(clients: AzureClients, location: string): Promise<FeaturedImageCandidate[]> {
-	const candidates: FeaturedImageCandidate[] = [];
-	const seen = new Set<string>();
-	const offers = await clients.compute.virtualMachineImages.listOffers(location, 'Debian').catch(() => []);
-	for (const offerResource of offers) {
-		const offer = imageResourceName(offerResource);
-		if (!/debian/i.test(offer)) continue;
-		const offerMajor = debianMajorFromOfferOrSku(offer);
-		if (offerMajor && !['11', '12'].includes(offerMajor)) continue;
+function ubuntuVersionFromOfferOrSku(offer: string, sku = '') {
+	const text = `${offer} ${sku}`;
+	const match = text.match(/\b(\d{2}[_-]?\d{2})\b/i);
+	return match?.[1]?.replace('-', '.').replace('_', '.') ?? '';
+}
 
-		const skus = await clients.compute.virtualMachineImages.listSkus(location, 'Debian', offer).catch(() => []);
-		const rankedSkus = skus
-			.map(imageResourceName)
-			.filter((sku) => {
-				const major = debianMajorFromOfferOrSku(offer, sku);
-				return major === '12' || major === '11';
-			})
-			.sort((a, b) => {
-				const majorA = debianMajorFromOfferOrSku(offer, a);
-				const majorB = debianMajorFromOfferOrSku(offer, b);
-				if (majorA !== majorB) return Number(majorB) - Number(majorA);
-				const genA = /gen2|gensecond/i.test(a) ? 0 : 1;
-				const genB = /gen2|gensecond/i.test(b) ? 0 : 1;
-				if (genA !== genB) return genA - genB;
-				return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
-			});
+function isUbuntuServerLtsCandidate(offer: string, sku: string) {
+	const text = `${offer} ${sku}`.toLowerCase();
+	const version = ubuntuVersionFromOfferOrSku(offer, sku);
+	if (!version) return false;
+	if (!/lts|server/.test(text)) return false;
+	if (!version.endsWith('.04')) return false;
+	return !/minimal|daily|pro|fips|cvm|confidential|arm64|raspi|desktop/i.test(text);
+}
 
-		for (const sku of rankedSkus) {
-			const major = debianMajorFromOfferOrSku(offer, sku);
-			const key = `${offer}:${sku}`.toLowerCase();
-			if (!major || seen.has(key)) continue;
-			seen.add(key);
-			candidates.push({
-				label: debianImageLabel(major, sku),
-				publisher: 'Debian',
-				offer,
-				sku,
-				osType: 'Linux'
-			});
-		}
+function ubuntuImageLabel(offer: string, sku: string) {
+	const version = ubuntuVersionFromOfferOrSku(offer, sku);
+	const genText = /gen2|gensecond|server/i.test(sku) && !/^server$/i.test(sku) ? ' Gen2' : '';
+	return version ? `Ubuntu ${version} LTS${genText}` : `Ubuntu ${sku}`;
+}
+
+function windowsServerVersionFromSku(sku: string) {
+	return sku.match(/\b(20\d{2})\b/)?.[1] ?? '';
+}
+
+function isWindowsServerCandidate(sku: string) {
+	const version = Number(windowsServerVersionFromSku(sku));
+	if (!Number.isFinite(version) || version < 2016) return false;
+	return /datacenter/i.test(sku) && !/core|smalldisk|zh-cn|de-de|fr-fr|ja-jp|ko-kr|es-es/i.test(sku);
+}
+
+function windowsServerImageLabel(sku: string) {
+	const version = windowsServerVersionFromSku(sku);
+	const azureEdition = /azure-edition/i.test(sku) ? ' Azure Edition' : '';
+	const genText = /g2|gen2|gensecond/i.test(sku) ? ' Gen2' : '';
+	return version
+		? `Windows Server ${version}${azureEdition} Datacenter${genText}`
+		: `Windows Server ${sku}`;
+}
+
+function imageCandidateRank(candidate: FeaturedImageCandidate) {
+	const text = `${candidate.offer} ${candidate.sku}`.toLowerCase();
+	let osRank = 900;
+	if (candidate.publisher === 'Canonical') {
+		const version = ubuntuVersionFromOfferOrSku(candidate.offer, candidate.sku);
+		const versionNumber = Number(version.replace('.', ''));
+		osRank = Number.isFinite(versionNumber) ? Math.max(0, 3000 - versionNumber) : 90;
+	} else if (candidate.publisher === 'Debian') {
+		const major = debianMajorFromOfferOrSku(candidate.offer, candidate.sku);
+		osRank = major ? Math.max(0, 130 - Number(major)) : 130;
+	} else if (candidate.publisher === 'MicrosoftWindowsServer') {
+		const version = windowsServerVersionFromSku(candidate.sku);
+		osRank = version ? Math.max(0, 4200 - Number(version)) : 230;
 	}
-	return candidates;
+	const genRank = /gen2|gensecond|g2|server/i.test(text) ? 0 : 5;
+	const azureRank = /azure-edition/i.test(text) ? 0 : 1;
+	return osRank + genRank + azureRank;
+}
+
+async function discoverFeaturedImageCandidates(
+	clients: AzureClients,
+	location: string
+): Promise<FeaturedImageCandidate[]> {
+	const discovered = await mapWithConcurrency(
+		IMAGE_DISCOVERY_CONFIGS,
+		IMAGE_DISCOVERY_CONCURRENCY,
+		async (config) => {
+			const offers = await clients.compute.virtualMachineImages
+				.listOffers(location, config.publisher)
+				.catch(() => []);
+			const matchingOffers = offers.map(imageResourceName).filter((offer) => config.offerMatches(offer));
+			const nested = await mapWithConcurrency(
+				matchingOffers,
+				IMAGE_DISCOVERY_CONCURRENCY,
+				async (offer) => {
+					const skus = await clients.compute.virtualMachineImages
+						.listSkus(location, config.publisher, offer)
+						.catch(() => []);
+					return skus
+						.map(imageResourceName)
+						.filter((sku) => config.skuMatches(offer, sku))
+						.map((sku) => ({
+							label: config.label(offer, sku),
+							publisher: config.publisher,
+							offer,
+							sku,
+							osType: config.osType
+						}));
+				}
+			);
+			return nested.flat();
+		}
+	);
+	const byKey = new Map<string, FeaturedImageCandidate>();
+	for (const candidate of [...FEATURED_IMAGE_CANDIDATES, ...discovered.flat()]) {
+		const key = `${candidate.publisher}:${candidate.offer}:${candidate.sku}`.toLowerCase();
+		if (!byKey.has(key)) byKey.set(key, candidate);
+	}
+	const configuredLimit = Number(readEnv('AZURE_IMAGE_DISCOVERY_LIMIT') ?? DEFAULT_IMAGE_DISCOVERY_LIMIT);
+	const limit =
+		Number.isFinite(configuredLimit) && configuredLimit > 0
+			? Math.min(200, Math.max(1, configuredLimit))
+			: DEFAULT_IMAGE_DISCOVERY_LIMIT;
+	return [...byKey.values()]
+		.sort((a, b) => {
+			const rank = imageCandidateRank(a) - imageCandidateRank(b);
+			if (rank !== 0) return rank;
+			return `${a.label}:${a.offer}:${a.sku}`.localeCompare(`${b.label}:${b.offer}:${b.sku}`, undefined, {
+				numeric: true,
+				sensitivity: 'base'
+			});
+		})
+		.slice(0, limit);
 }
 
 function isPublicIpResourceIPv6(pip: PublicIPAddress) {
@@ -2597,6 +2800,9 @@ export async function listVmCapabilities(
 		includeQuotas ? listComputeQuotas(clients, location) : Promise.resolve([])
 	]);
 	const merged = mergeVisibleVmCapabilities(resourceSkus, legacySizes);
+	if (merged.length === 0) {
+		throw new Error(`Azure 官方 API 没有返回 ${location} 可创建 VM 的规格，请检查区域、订阅权限或 Microsoft.Compute 注册状态`);
+	}
 	const quotaAware = includeQuotas
 		? applyQuotaToCapabilities(merged, quotas, { restrictByQuota: false })
 		: merged;
@@ -2851,8 +3057,11 @@ export async function listFeaturedVmImages(
 		cacheKey,
 		cacheTtlMs('AZURE_IMAGE_CACHE_TTL_SECONDS', 3600),
 		async () => {
+			const candidates = await discoverFeaturedImageCandidates(clients, location).catch(() => [
+				...FEATURED_IMAGE_CANDIDATES
+			]);
 			const images = await mapWithConcurrency(
-				FEATURED_IMAGE_CANDIDATES,
+				candidates,
 				IMAGE_QUERY_CONCURRENCY,
 				async (candidate) => {
 					try {
@@ -2896,7 +3105,10 @@ export async function listFeaturedVmImages(
 				return true;
 			});
 
-			return uniqueImages.length > 0 ? uniqueImages : fallbackFeaturedVmImages();
+			if (uniqueImages.length === 0) {
+				throw new Error(`Azure 官方镜像 API 没有返回 ${location} 可创建 VM 的系统镜像`);
+			}
+			return uniqueImages;
 		}
 	);
 }

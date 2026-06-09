@@ -45,9 +45,7 @@ export const GET: RequestHandler = async (event) => {
 		}
 
 		const { clients, location } = await getVmQueryContext(event, user.id);
-		const result = await listVmCapabilities(clients, location, { includeQuotas: false }).catch(() =>
-			fallbackVmCapabilities(location)
-		);
+		const result = await listVmCapabilities(clients, location, { includeQuotas: false });
 		return ok(toSizesResponse(result));
 	} catch (err) {
 		return fail(err instanceof Error ? err.message : String(err), 500);

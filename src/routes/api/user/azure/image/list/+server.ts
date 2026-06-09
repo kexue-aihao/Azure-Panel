@@ -10,7 +10,7 @@ import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import type { RequestHandler } from './$types';
 
 type VmImageCache = Record<string, VmImageOption[]>;
-const IMAGE_CACHE_VERSION = 2;
+const IMAGE_CACHE_VERSION = 3;
 
 function shouldRefreshCache(value: string | null) {
 	return ['1', 'true', 'yes', 'force'].includes((value ?? '').trim().toLowerCase());
@@ -99,9 +99,7 @@ export const GET: RequestHandler = async (event) => {
 			proxyMode: event.url.searchParams.get('proxy_mode'),
 			proxyProfileId: Number(event.url.searchParams.get('proxy_profile_id') ?? 0) || null
 		});
-		const images = await listFeaturedVmImages(createAzureClients(account, proxy), location).catch(() =>
-			cache.locations[locationKey]?.length ? cache.locations[locationKey] : fallbackFeaturedVmImages()
-		);
+		const images = await listFeaturedVmImages(createAzureClients(account, proxy), location);
 		if (images.length > 0 && !isFallbackImageList(images)) {
 			await updateAccountImageCache(
 				user.id,

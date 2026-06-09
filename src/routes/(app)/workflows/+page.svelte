@@ -373,8 +373,9 @@
 				vmSizes = result.sizes;
 				if (!selected && !preserveCurrent) form.vm_size = vmSizes[0].name;
 			})
-			.catch(() => {
-				// Fast fallback already made the selector usable; background refresh is best effort.
+			.catch((err) => {
+				if (requestId !== createOptionsRequestId) return;
+				sizeError = err instanceof Error ? err.message : 'Azure 官方规格刷新失败';
 			});
 	}
 
@@ -428,8 +429,9 @@
 					form.image_reference = vmImages[0].imageReference;
 				}
 			})
-			.catch(() => {
-				// Fast fallback already made the selector usable; background refresh is best effort.
+			.catch((err) => {
+				if (requestId !== createOptionsRequestId) return;
+				imageError = err instanceof Error ? err.message : 'Azure 官方系统镜像刷新失败';
 			});
 	}
 
