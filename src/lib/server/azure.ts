@@ -3469,6 +3469,12 @@ function enrichPublicIpCreateFailureMessage(version: 'IPv4' | 'IPv6', message: s
 	);
 }
 
+function isPublicIpQuotaFailure(message: string) {
+	return /quota|limit|maximum|exceed|publicipaddresscountlimitreached|publicipcountlimitreached|public ip count|public ip address count/i.test(
+		message
+	);
+}
+
 async function deletePublicIpById(clients: AzureClients, publicIpId?: string) {
 	if (!publicIpId) return;
 	const name = parseResourceName(publicIpId);
@@ -3564,7 +3570,6 @@ async function createMatchingIPv4PublicIp(
 			});
 		} catch (err) {
 			lastCreateError = formatAzureError(err);
-			if (options.failureProgressStatus === 'info') throw err;
 			await reportCreateVmProgress(
 				options.progress,
 				'public-ipv4',
@@ -4276,15 +4281,14 @@ async function releaseOldIPv4PublicIpForRetry(
 		await reportCreateVmProgress(
 			options.progress,
 			`${options.prefix}-delete-old`,
-			'error',
-			'Delete old IPv4 Public IP failed',
+			'info',
+			'Delete old IPv4 Public IP has not completed; continue retrying new IPv4 creation',
 			{
 				oldPublicIpName: options.oldPublicIpName,
 				oldPublicIPv4: options.oldPublicIPv4,
 				error: message.length > 1000 ? `${message.slice(0, 1000)}...` : message
 			}
 		);
-		throw new Error(`delete old IPv4 public IP failed (${options.prefix}-delete-old): ${message}`);
 	});
 }
 
@@ -5575,18 +5579,21 @@ export async function replaceVmPublicIPv4(
 			failureProgressStatus: 'info'
 		});
 	} catch (err) {
-		await releaseOldIPv4PublicIpForRetry(clients, {
-			nicResourceGroup,
-			nicName,
-			nic,
-			ipConfig: targetIpConfig,
-			oldPublicIpId,
-			oldPublicIpName,
-			oldPublicIPv4,
-			progress,
-			prefix: 'replace-ip',
-			reason: formatAzureError(err)
-		});
+		const createFailureMessage = formatAzureError(err);
+		if (isPublicIpQuotaFailure(createFailureMessage)) {
+			await releaseOldIPv4PublicIpForRetry(clients, {
+				nicResourceGroup,
+				nicName,
+				nic,
+				ipConfig: targetIpConfig,
+				oldPublicIpId,
+				oldPublicIpName,
+				oldPublicIPv4,
+				progress,
+				prefix: 'replace-ip',
+				reason: createFailureMessage
+			});
+		}
 		created = await createPublicIp(clients, {
 			resourceGroup: nicResourceGroup,
 			location: vmLocation,
@@ -5755,6 +5762,8 @@ export async function brushVmPublicIPv4Prefix(
 			progress: options.progress
 		});
 	} catch (err) {
+		const createFailureMessage = formatAzureError(err);
+		if (!isPublicIpQuotaFailure(createFailureMessage)) throw err;
 		await releaseOldIPv4PublicIpForRetry(clients, {
 			nicResourceGroup,
 			nicName,
@@ -5765,7 +5774,7 @@ export async function brushVmPublicIPv4Prefix(
 			oldPublicIPv4,
 			progress: options.progress,
 			prefix: 'brush-ip',
-			reason: formatAzureError(err)
+			reason: createFailureMessage
 		});
 		created = await createMatchingIPv4PublicIp(clients, {
 			resourceGroup: nicResourceGroup,
