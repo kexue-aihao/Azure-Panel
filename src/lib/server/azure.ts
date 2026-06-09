@@ -22,7 +22,8 @@ import {
 	createHttpHeaders,
 	createPipelineFromOptions,
 	createPipelineRequest,
-	type PipelineOptions
+	type PipelineOptions,
+	type PipelineResponse
 } from '@azure/core-rest-pipeline';
 import type {
 	AccessToken,
@@ -228,6 +229,7 @@ export type AzureCredentialValidationResult = {
 };
 
 type AzureClientOptions = TokenCredentialOptions & PipelineOptions;
+type ArmRequestMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
 export type AzureSubscription = {
 	subscriptionId?: string;
@@ -802,22 +804,41 @@ async function sendArmRequest(
 	credential: TokenCredential,
 	clientOptions: AzureClientOptions,
 	options: {
-		method: 'GET' | 'POST' | 'PUT';
+		method: ArmRequestMethod;
 		pathOrUrl: string;
 		body?: unknown;
 	}
 ) {
+	const response = await sendArmPipelineRequest(credential, clientOptions, options);
+	if (response.status < 200 || response.status >= 300) {
+		throw new Error(armResponseError(response.status, response.bodyAsText));
+	}
+	return parseArmJson(response.bodyAsText);
+}
+
+async function sendArmPipelineRequest(
+	credential: TokenCredential,
+	clientOptions: AzureClientOptions,
+	options: {
+		method: ArmRequestMethod;
+		pathOrUrl: string;
+		body?: unknown;
+	}
+): Promise<PipelineResponse> {
+	const url = options.pathOrUrl.startsWith('http') ? options.pathOrUrl : `${ARM_ENDPOINT}${options.pathOrUrl}`;
+	if (!url.toLowerCase().startsWith(`${ARM_ENDPOINT}/`)) {
+		throw new Error('Azure ARM 请求地址不在 management.azure.com 范围内');
+	}
+
 	const token = await credential.getToken(ARM_SCOPE);
 	if (!token?.token) throw new Error('无法获取 Azure 访问令牌，请检查 Tenant ID、Client ID 和 Client Secret');
 
 	const pipeline = createPipelineFromOptions(clientOptions);
 	const httpClient = clientOptions.httpClient ?? createDefaultHttpClient();
-	const response = await pipeline.sendRequest(
+	return pipeline.sendRequest(
 		httpClient,
 		createPipelineRequest({
-			url: options.pathOrUrl.startsWith('http')
-				? options.pathOrUrl
-				: `${ARM_ENDPOINT}${options.pathOrUrl}`,
+			url,
 			method: options.method,
 			body: options.body === undefined ? undefined : JSON.stringify(options.body),
 			headers: createHttpHeaders({
@@ -827,11 +848,6 @@ async function sendArmRequest(
 			})
 		})
 	);
-
-	if (response.status < 200 || response.status >= 300) {
-		throw new Error(armResponseError(response.status, response.bodyAsText));
-	}
-	return parseArmJson(response.bodyAsText);
 }
 
 async function collectArmPages<T>(
@@ -1952,6 +1968,122 @@ function publicIpListArmPath(clients: AzureClients, resourceGroup: string) {
 		`/providers/Microsoft.Network/publicIPAddresses` +
 		`?api-version=${NETWORK_PUBLIC_IP_API_VERSION}`
 	);
+}
+
+function armHeader(response: PipelineResponse, name: string) {
+	return String(response.headers.get(name) ?? '').trim();
+}
+
+function armBodySummary(bodyAsText?: string | null) {
+	return formatAzureError(parseArmJson(bodyAsText));
+}
+
+function publicIpCreateBody(options: {
+	location: string;
+	version: 'IPv4' | 'IPv6';
+	ddosProtectionPlanId?: string;
+}) {
+	return {
+		location: options.location,
+		sku: { name: 'Standard' },
+		properties: {
+			publicIPAllocationMethod: 'Static',
+			publicIPAddressVersion: options.version,
+			deleteOption: 'Delete',
+			...(options.ddosProtectionPlanId
+				? {
+						ddosSettings: {
+							protectionMode: 'Enabled',
+							ddosProtectionPlan: { id: options.ddosProtectionPlanId }
+						}
+					}
+				: {})
+		}
+	};
+}
+
+function publicIpLroStatus(payload: unknown) {
+	const record = payload as Record<string, unknown>;
+	const properties = record.properties as Record<string, unknown> | undefined;
+	return String(record.status ?? properties?.provisioningState ?? '').trim().toLowerCase();
+}
+
+async function createPublicIpViaArm(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		location: string;
+		name: string;
+		version: 'IPv4' | 'IPv6';
+		ddosProtectionPlanId?: string;
+		progress?: CreateVmProgressReporter;
+		step: string;
+		detail: CreateVmProgressEvent['detail'];
+	}
+): Promise<{ pip: PublicIPAddress; polls: number }> {
+	const response = await sendArmPipelineRequest(clients.credential, clients.clientOptions, {
+		method: 'PUT',
+		pathOrUrl: publicIpArmPath(clients, options.resourceGroup, options.name),
+		body: publicIpCreateBody(options)
+	});
+	if (response.status < 200 || response.status >= 300) {
+		throw new Error(armResponseError(response.status, response.bodyAsText));
+	}
+
+	const asyncOperationUrl = armHeader(response, 'Azure-AsyncOperation');
+	const locationUrl = armHeader(response, 'Location');
+	const requestId = armHeader(response, 'x-ms-request-id');
+	const pollUrl = asyncOperationUrl || locationUrl;
+	let polls = 0;
+
+	if (pollUrl) {
+		await reportCreateVmProgress(
+			options.progress,
+			`${options.step}-polling`,
+			'running',
+			`${options.version} 公网 IP 创建中，已获取 Azure 长任务地址`,
+			{
+				...options.detail,
+				name: options.name,
+				requestId: requestId || null,
+				pollMode: asyncOperationUrl ? 'Azure-AsyncOperation' : 'Location'
+			}
+		);
+		for (polls = 1; polls <= 120; polls++) {
+			await sleep(2000);
+			const pollResponse = await sendArmPipelineRequest(clients.credential, clients.clientOptions, {
+				method: 'GET',
+				pathOrUrl: pollUrl
+			});
+			const payload = parseArmJson(pollResponse.bodyAsText);
+			const status = publicIpLroStatus(payload);
+			await reportCreateVmProgress(
+				options.progress,
+				`${options.step}-polling`,
+				'running',
+				`${options.version} 公网 IP 创建中，轮询第 ${polls} 次`,
+				{
+					...options.detail,
+					name: options.name,
+					status: status || String(pollResponse.status),
+					polls
+				}
+			);
+			if (pollResponse.status < 200 || pollResponse.status >= 300) {
+				throw new Error(`Public IP LRO poll failed: ${armResponseError(pollResponse.status, pollResponse.bodyAsText)}`);
+			}
+			if (status === 'failed' || status === 'canceled' || status === 'cancelled') {
+				throw new Error(`Public IP LRO ${status}: ${armBodySummary(pollResponse.bodyAsText)}`);
+			}
+			if (status === 'succeeded' || status === 'success') break;
+		}
+		if (polls > 120) throw new Error('Public IP LRO polling timed out after 120 attempts');
+	} else if (response.status !== 200 && response.status !== 201) {
+		throw new Error(`Azure 未返回 Public IP 长任务地址: HTTP ${response.status}`);
+	}
+
+	const pip = await getPublicIpWithRawFallback(clients, options.resourceGroup, options.name);
+	return { pip, polls };
 }
 
 async function getPublicIpViaArm(
@@ -3523,56 +3655,20 @@ async function createPublicIp(
 				})
 			);
 		}
-		const poller = await clients.network.publicIPAddresses.beginCreateOrUpdate(
-			options.resourceGroup,
-			options.name,
-			{
-				location: options.location,
-				publicIPAllocationMethod: 'Static',
-				publicIPAddressVersion: options.version,
-				sku: { name: 'Standard' },
-				...(options.ddosProtectionPlanId
-					? {
-							ddosSettings: {
-								protectionMode: 'Enabled',
-								ddosProtectionPlan: { id: options.ddosProtectionPlanId }
-							}
-						}
-				: {}),
-				deleteOption: 'Delete'
-			},
-			{ updateIntervalInMs: 2000 }
-		);
-		let polls = 0;
-		while (!poller.isDone()) {
-			polls += 1;
-			const state = poller.getOperationState();
-			await reportCreateVmProgress(
-				options.progress,
-				`${step}-polling`,
-				'running',
-				`${options.version} 公网 IP 创建中，轮询第 ${polls} 次`,
-				withPublicIpDetail({
-					name: options.name,
-					status: state.status,
-					polls
-				})
-			);
-			await poller.poll();
-			if (!poller.isDone()) await sleep(2000);
-		}
-		const state = poller.getOperationState();
-		if (state.error) {
-			const stateError = formatAzureError(state.error);
-			await reportCreateVmProgress(options.progress, step, 'error', `${options.version} 公网 IP 长任务失败`, withPublicIpDetail({
+		const { pip: pollerResult, polls } = await createPublicIpViaArm(clients, {
+			resourceGroup: options.resourceGroup,
+			location: options.location,
+			name: options.name,
+			version: options.version,
+			ddosProtectionPlanId: options.ddosProtectionPlanId,
+			progress: options.progress,
+			step,
+			detail: withPublicIpDetail({
 				name: options.name,
-				status: state.status,
-				error: stateError.length > 800 ? `${stateError.slice(0, 800)}...` : stateError
-			}));
-			throw state.error;
-		}
-		const pollerResult =
-			poller.getResult() ?? (await clients.network.publicIPAddresses.get(options.resourceGroup, options.name));
+				version: options.version,
+				ddosProtection: Boolean(options.ddosProtectionPlanId)
+			})
+		});
 		const pip =
 			publicIpAddressValue(pollerResult) && publicIpIpConfigurationId(pollerResult)
 				? pollerResult
