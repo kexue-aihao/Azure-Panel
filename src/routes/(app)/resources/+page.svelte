@@ -143,9 +143,16 @@
 		groupedResourceCounts.filter((group) => !resourceGroup || group.name === resourceGroup)
 	);
 	const visibleResourceGroupNames = $derived(visibleResourceGroups.map((group) => group.name));
+	const resourceTableGroupNames = $derived(
+		uniqueNames(resources.map((resource) => resource.resource_group))
+	);
 	const allVisibleResourceGroupsSelected = $derived(
 		visibleResourceGroupNames.length > 0 &&
 			visibleResourceGroupNames.every((name) => selectedResourceGroups.includes(name))
+	);
+	const allResourceTableGroupsSelected = $derived(
+		resourceTableGroupNames.length > 0 &&
+			resourceTableGroupNames.every((name) => selectedResourceGroups.includes(name))
 	);
 	const recentDeleteProgress = $derived(deleteProgress.slice(-12).reverse());
 	const deleteProgressPercent = $derived(resourceGroupDeleteProgressPercent(deleteProgress));
@@ -188,6 +195,12 @@
 		selectedResourceGroups = allVisibleResourceGroupsSelected
 			? selectedResourceGroups.filter((name) => !visibleResourceGroupNames.includes(name))
 			: uniqueNames([...selectedResourceGroups, ...visibleResourceGroupNames]);
+	}
+
+	function toggleResourceTableGroups() {
+		selectedResourceGroups = allResourceTableGroupsSelected
+			? selectedResourceGroups.filter((name) => !resourceTableGroupNames.includes(name))
+			: uniqueNames([...selectedResourceGroups, ...resourceTableGroupNames]);
 	}
 
 	function clearResourceGroupSelection() {
@@ -1021,6 +1034,16 @@
 	<table class="w-full text-sm">
 		<thead class="text-muted">
 			<tr class="border-b border-border">
+				<th class="w-12 p-3 text-left">
+					<input
+						type="checkbox"
+						class="h-4 w-4 accent-red-500"
+						aria-label="选择当前资源列表中的资源组"
+						checked={allResourceTableGroupsSelected}
+						disabled={deletingGroups || resourceTableGroupNames.length === 0}
+						onchange={toggleResourceTableGroups}
+					/>
+				</th>
 				<th class="p-3 text-left">名称</th>
 				<th class="p-3 text-left">资源组</th>
 				<th class="p-3 text-left">类型</th>
@@ -1031,12 +1054,22 @@
 		</thead>
 		<tbody>
 			{#if loading}
-				<tr><td class="p-3 text-muted" colspan="6">正在加载资源...</td></tr>
+				<tr><td class="p-3 text-muted" colspan="7">正在加载资源...</td></tr>
 			{:else if resources.length === 0}
-				<tr><td class="p-3 text-muted" colspan="6">暂无资源</td></tr>
+				<tr><td class="p-3 text-muted" colspan="7">暂无资源</td></tr>
 			{:else}
 				{#each resources as resource}
 					<tr class="border-b border-border/60">
+						<td class="p-3">
+							<input
+								type="checkbox"
+								class="h-4 w-4 accent-red-500"
+								aria-label={`选择删除资源组 ${resource.resource_group}`}
+								checked={selectedResourceGroups.includes(resource.resource_group)}
+								disabled={deletingGroups || !resource.resource_group}
+								onchange={() => toggleResourceGroupSelection(resource.resource_group)}
+							/>
+						</td>
 						<td class="max-w-[220px] break-all p-3">{resource.name}</td>
 						<td class="p-3">{resource.resource_group}</td>
 						<td class="max-w-[280px] break-all p-3">{resource.type}</td>
