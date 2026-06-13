@@ -67,6 +67,7 @@ const MIN_POLICY_CHECK_INTERVAL_SECONDS = 10;
 const DEFAULT_POLICY_CHECK_INTERVAL_SECONDS = 60;
 const SUBSCRIPTION_STATUS_NOTIFY_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_REPLENISHMENT_IP_PREFIX = '85.211';
+const REPLENISHMENT_FALLBACK_IP_PREFIXES = ['172.197'];
 const DEFAULT_REPLENISHMENT_IP_BRUSH_ATTEMPTS = 30;
 const REPLENISHMENT_ACCOUNT_ORDER_LABELS: Record<string, string> = {
 	pool_added_at: '加入 Azure 号池时间',
@@ -1292,6 +1293,7 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 			const trackedVmNames = parseVmNames(policy.vmNamesJson);
 			const replenishmentVmSize = policy.vmSize;
 			const ipPrefix = replenishmentIpPrefix(policy);
+			const ipPrefixText = [ipPrefix, ...REPLENISHMENT_FALLBACK_IP_PREFIXES].join(' / ');
 			const ipBrushMaxAttempts = replenishmentIpBrushMaxAttempts(policy);
 			const enableAcceleratedNetworking = Boolean(policy.enableAcceleratedNetworking);
 			const enableDdosProtection = Boolean(policy.enableDdosProtection);
@@ -1306,7 +1308,7 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 				policy.id,
 				'auto_create',
 				deficit > 0 ? 'running' : 'skipped',
-				`订阅异常已触发补机计划：触发账号=${account.name}，订阅状态=${status.state}，已记录补机=${trackedVmNames.length}，已运行/已提交启动=${started.runningOrStarted}，自动开机失败=${started.failed}，目标=${targetCount}，需新建=${deficit}，规格=${replenishmentVmSize}，刷 IPv4 前缀=${ipPrefix}，最大次数=${ipBrushMaxAttempts}`
+				`订阅异常已触发补机计划：触发账号=${account.name}，订阅状态=${status.state}，已记录补机=${trackedVmNames.length}，已运行/已提交启动=${started.runningOrStarted}，自动开机失败=${started.failed}，目标=${targetCount}，需新建=${deficit}，规格=${replenishmentVmSize}，刷 IPv4 前缀=${ipPrefixText}，优先 ${ipPrefix}，最大次数=${ipBrushMaxAttempts}`
 			);
 			if (deficit <= 0) {
 				await insertWorkflowLog(
@@ -1411,6 +1413,7 @@ async function runPolicies(policies: WorkflowPolicy[], options: { force?: boolea
 							enableDdosProtection,
 							customData: userdata,
 							ipPrefix,
+							ipFallbackPrefixes: REPLENISHMENT_FALLBACK_IP_PREFIXES,
 							ipBrushMaxAttempts,
 							progress: (event) => logReplenishmentCreateProgress(policy, vmName, event)
 						});

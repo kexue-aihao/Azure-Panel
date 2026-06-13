@@ -140,6 +140,7 @@ export type CreateVmOptions = {
 	enableDdosProtection?: boolean;
 	customData?: string;
 	ipPrefix?: string;
+	ipFallbackPrefixes?: string[];
 	ipBrushMaxAttempts?: number;
 	progress?: CreateVmProgressReporter;
 };
@@ -3729,6 +3730,10 @@ function normalizeCreateIpPrefix(prefix?: string) {
 	return normalizeIpPrefix(prefix) || DEFAULT_CREATE_IP_PREFIX;
 }
 
+function normalizeIpPrefixes(prefixes?: string[]) {
+	return [...new Set((prefixes ?? []).map((prefix) => normalizeIpPrefix(prefix)).filter(Boolean))];
+}
+
 function normalizeAttempts(value?: number, fallback = 30) {
 	const parsed = Math.floor(Number(value ?? fallback));
 	if (!Number.isFinite(parsed) || parsed < 1) return fallback;
@@ -4115,6 +4120,7 @@ async function createMatchingIPv4PublicIp(
 		location: string;
 		vmName: string;
 		targetPrefix?: string;
+		fallbackPrefixes?: string[];
 		maxAttempts?: number;
 		nameSalt?: string;
 		ddosProtectionPlanId?: string;
@@ -4124,19 +4130,24 @@ async function createMatchingIPv4PublicIp(
 	}
 ): Promise<{ pip: PublicIPAddress; attempts: number; matched: boolean }> {
 	const targetPrefix = normalizeIpPrefix(options.targetPrefix);
+	const fallbackPrefixes = normalizeIpPrefixes(options.fallbackPrefixes).filter(
+		(prefix) => prefix !== targetPrefix
+	);
 	const maxAttempts = targetPrefix ? normalizeAttempts(options.maxAttempts) : normalizeAttempts(options.maxAttempts, 1);
 	const salt = options.nameSalt ?? String(Date.now());
+	const targetText = [targetPrefix, ...fallbackPrefixes].filter(Boolean).join(' / ');
 	await reportCreateVmProgress(
 		options.progress,
 		'public-ipv4',
 		'running',
 		targetPrefix
-			? `开始刷 IPv4 前缀 ${targetPrefix}，最多 ${maxAttempts} 次`
+			? `开始刷 IPv4 前缀 ${targetText || targetPrefix}，最多 ${maxAttempts} 次`
 			: '创建 IPv4 公网 IP',
-		{ targetPrefix: targetPrefix || null, maxAttempts }
+		{ targetPrefix: targetPrefix || null, fallbackPrefixes: fallbackPrefixes.join(','), maxAttempts }
 	);
 
 	let lastCreateError = '';
+	let fallbackCandidate: { pip: PublicIPAddress; attempts: number; prefix: string; address: string } | null = null;
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		const name = resourceName(options.vmName, `pip4-${salt}-${attempt}`);
 		await reportCreateVmProgress(options.progress, 'public-ipv4', 'running', `创建 IPv4 公网 IP，第 ${attempt}/${maxAttempts} 次`, {
@@ -4193,7 +4204,9 @@ async function createMatchingIPv4PublicIp(
 		}
 		const address = publicIpAddressValue(pip);
 		const matched = !targetPrefix || address.startsWith(targetPrefix);
+		const fallbackPrefix = fallbackPrefixes.find((prefix) => address.startsWith(prefix)) ?? '';
 		if (matched) {
+			if (fallbackCandidate?.pip.id) await deletePublicIpById(clients, fallbackCandidate.pip.id).catch(() => undefined);
 			await reportCreateVmProgress(
 				options.progress,
 				'public-ipv4',
@@ -4213,7 +4226,55 @@ async function createMatchingIPv4PublicIp(
 			return { pip, attempts: attempt, matched: Boolean(targetPrefix) };
 		}
 
+		if (fallbackPrefix) {
+			if (fallbackCandidate?.pip.id) await deletePublicIpById(clients, fallbackCandidate.pip.id).catch(() => undefined);
+			fallbackCandidate = { pip, attempts: attempt, prefix: fallbackPrefix, address };
+			await reportCreateVmProgress(
+				options.progress,
+				'public-ipv4',
+				attempt >= maxAttempts ? 'success' : 'info',
+				attempt >= maxAttempts
+					? `IPv4 ${address} 命中备用前缀 ${fallbackPrefix}，未刷到 ${targetPrefix}，作为最终 IPv4 使用`
+					: `IPv4 ${address} 命中备用前缀 ${fallbackPrefix}，继续优先尝试 ${targetPrefix}`,
+				{
+					attempt,
+					maxAttempts,
+					ip: address,
+					targetPrefix: targetPrefix || null,
+					fallbackPrefix,
+					publicIpName: name,
+					matched: true,
+					kept: true,
+					deleted: false,
+					brushRecordOnly: attempt < maxAttempts
+				}
+			);
+			if (attempt >= maxAttempts) return { pip, attempts: attempt, matched: true };
+			continue;
+		}
+
 		if (options.fallbackToLastOnMiss && attempt >= maxAttempts) {
+			if (fallbackCandidate) {
+				await deletePublicIpById(clients, pip.id).catch(() => undefined);
+				await reportCreateVmProgress(
+					options.progress,
+					'public-ipv4',
+					'success',
+					`未刷到 ${targetPrefix}，使用已命中的备用 IPv4 ${fallbackCandidate.address}`,
+					{
+						attempt: fallbackCandidate.attempts,
+						maxAttempts,
+						ip: fallbackCandidate.address,
+						targetPrefix: targetPrefix || null,
+						fallbackPrefix: fallbackCandidate.prefix,
+						publicIpName: parseResourceName(fallbackCandidate.pip.id ?? ''),
+						matched: true,
+						kept: true,
+						deleted: false
+					}
+				);
+				return { pip: fallbackCandidate.pip, attempts: attempt, matched: true };
+			}
 			await reportCreateVmProgress(
 				options.progress,
 				'public-ipv4',
@@ -4252,6 +4313,27 @@ async function createMatchingIPv4PublicIp(
 			}
 		);
 		await deletePublicIpById(clients, pip.id);
+	}
+
+	if (fallbackCandidate) {
+		await reportCreateVmProgress(
+			options.progress,
+			'public-ipv4',
+			'success',
+			`未刷到 ${targetPrefix}，使用已命中的备用 IPv4 ${fallbackCandidate.address}`,
+			{
+				attempt: fallbackCandidate.attempts,
+				maxAttempts,
+				ip: fallbackCandidate.address,
+				targetPrefix: targetPrefix || null,
+				fallbackPrefix: fallbackCandidate.prefix,
+				publicIpName: parseResourceName(fallbackCandidate.pip.id ?? ''),
+				matched: true,
+				kept: true,
+				deleted: false
+			}
+		);
+		return { pip: fallbackCandidate.pip, attempts: maxAttempts, matched: true };
 	}
 
 	throw new Error(
@@ -5644,6 +5726,7 @@ async function createNetworkForVm(
 		openPorts?: string | string[];
 		enableDdosProtection?: boolean;
 		ipPrefix?: string;
+		ipFallbackPrefixes?: string[];
 		ipBrushMaxAttempts?: number;
 		progress?: CreateVmProgressReporter;
 	}
@@ -5745,6 +5828,7 @@ async function createNetworkForVm(
 				location: options.location,
 				vmName: options.vmName,
 				targetPrefix: createIpPrefix,
+				fallbackPrefixes: options.ipFallbackPrefixes,
 				maxAttempts: options.ipBrushMaxAttempts,
 				ddosProtectionPlanId: ddosPlan?.id,
 				nameSalt: String(Date.now()),
@@ -5964,6 +6048,7 @@ export async function createVmAdvanced(
 		openPorts: options.openPorts,
 		enableDdosProtection: options.enableDdosProtection === true,
 		ipPrefix: options.ipPrefix,
+		ipFallbackPrefixes: options.ipFallbackPrefixes,
 		ipBrushMaxAttempts: options.ipBrushMaxAttempts,
 		progress: options.progress
 	});
