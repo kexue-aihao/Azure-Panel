@@ -5367,6 +5367,39 @@ function stringArrayValue(value: unknown): string[] {
 	return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
 }
 
+class VirtualNetworkDdosConfirmationError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'VirtualNetworkDdosConfirmationError';
+	}
+}
+
+async function getVirtualNetworkRawArm(
+	clients: AzureClients,
+	resourceGroup: string,
+	virtualNetworkName: string
+) {
+	const response = await sendArmPipelineRequest(clients.credential, clients.clientOptions, {
+		method: 'GET',
+		pathOrUrl: virtualNetworkArmPath(clients, resourceGroup, virtualNetworkName)
+	});
+	if (response.status < 200 || response.status >= 300) {
+		throw new Error(`读取虚拟网络原始 ARM 配置失败: ${armResponseError(response.status, response.bodyAsText)}`);
+	}
+	return recordValue(parseArmJson(response.bodyAsText));
+}
+
+function cleanRawSubResource(value: unknown) {
+	const resource = recordValue(value);
+	return typeof resource.id === 'string' && resource.id.trim() ? { id: resource.id } : undefined;
+}
+
+function cleanRawSubResourceList(value: unknown) {
+	if (!Array.isArray(value)) return undefined;
+	const list = value.map(cleanRawSubResource).filter((resource): resource is { id: string } => Boolean(resource?.id));
+	return list.length ? list : undefined;
+}
+
 function cleanSubnetForVnetUpdate(subnet: Subnet) {
 	return omitUndefinedDeep({
 		name: subnet.name,
@@ -5398,6 +5431,36 @@ function cleanSubnetForVnetUpdate(subnet: Subnet) {
 	});
 }
 
+function cleanSubnetForSdkVnetUpdate(subnet: Subnet): Subnet {
+	return omitUndefinedDeep({
+		id: subnet.id,
+		name: subnet.name,
+		addressPrefix: subnet.addressPrefix,
+		addressPrefixes: subnet.addressPrefixes,
+		networkSecurityGroup: cleanSubResource(subnet.networkSecurityGroup),
+		routeTable: cleanSubResource(subnet.routeTable),
+		natGateway: cleanSubResource(subnet.natGateway),
+		serviceEndpoints: subnet.serviceEndpoints?.map(cleanServiceEndpoint),
+		serviceEndpointPolicies: cleanSubResourceList(subnet.serviceEndpointPolicies),
+		ipAllocations: cleanSubResourceList(subnet.ipAllocations),
+		delegations: subnet.delegations?.map((delegation) => ({
+			id: delegation.id,
+			name: delegation.name,
+			serviceName: delegation.serviceName,
+			actions: delegation.actions
+		})),
+		privateEndpointNetworkPolicies: subnet.privateEndpointNetworkPolicies,
+		privateLinkServiceNetworkPolicies: subnet.privateLinkServiceNetworkPolicies,
+		applicationGatewayIPConfigurations: cleanSubResourceList(subnet.applicationGatewayIPConfigurations),
+		sharingScope: subnet.sharingScope,
+		defaultOutboundAccess: subnet.defaultOutboundAccess,
+		ipamPoolPrefixAllocations: subnet.ipamPoolPrefixAllocations?.map((allocation) => ({
+			id: allocation.id,
+			numberOfIpAddresses: allocation.numberOfIpAddresses
+		}))
+	}) as Subnet;
+}
+
 function cleanRawSubnetForVnetUpdate(value: unknown) {
 	const subnet = recordValue(value);
 	const properties = recordValue(subnet.properties);
@@ -5423,12 +5486,73 @@ function cleanRawSubnetForVnetUpdate(value: unknown) {
 	});
 }
 
+function cleanRawServiceEndpointForSdk(value: unknown) {
+	const endpoint = recordValue(value);
+	return omitUndefinedDeep({
+		service: endpoint.service,
+		locations: endpoint.locations,
+		networkIdentifier: cleanRawSubResource(endpoint.networkIdentifier)
+	});
+}
+
+function cleanRawDelegationForSdk(value: unknown) {
+	const delegation = recordValue(value);
+	const properties = recordValue(delegation.properties);
+	return omitUndefinedDeep({
+		id: typeof delegation.id === 'string' ? delegation.id : undefined,
+		name: typeof delegation.name === 'string' ? delegation.name : undefined,
+		serviceName: properties.serviceName,
+		actions: properties.actions
+	});
+}
+
+function cleanRawSubnetForSdkVnetUpdate(value: unknown): Subnet {
+	const subnet = recordValue(value);
+	const properties = recordValue(subnet.properties);
+	return omitUndefinedDeep({
+		id: typeof subnet.id === 'string' ? subnet.id : undefined,
+		name: typeof subnet.name === 'string' ? subnet.name : undefined,
+		addressPrefix: properties.addressPrefix,
+		addressPrefixes: properties.addressPrefixes,
+		networkSecurityGroup: cleanRawSubResource(properties.networkSecurityGroup),
+		routeTable: cleanRawSubResource(properties.routeTable),
+		natGateway: cleanRawSubResource(properties.natGateway),
+		serviceEndpoints: Array.isArray(properties.serviceEndpoints)
+			? properties.serviceEndpoints.map(cleanRawServiceEndpointForSdk)
+			: undefined,
+		serviceEndpointPolicies: cleanRawSubResourceList(properties.serviceEndpointPolicies),
+		ipAllocations: cleanRawSubResourceList(properties.ipAllocations),
+		delegations: Array.isArray(properties.delegations)
+			? properties.delegations.map(cleanRawDelegationForSdk)
+			: undefined,
+		privateEndpointNetworkPolicies: properties.privateEndpointNetworkPolicies,
+		privateLinkServiceNetworkPolicies: properties.privateLinkServiceNetworkPolicies,
+		applicationGatewayIPConfigurations: cleanRawSubResourceList(properties.applicationGatewayIPConfigurations),
+		sharingScope: properties.sharingScope,
+		defaultOutboundAccess: properties.defaultOutboundAccess,
+		ipamPoolPrefixAllocations: Array.isArray(properties.ipamPoolPrefixAllocations)
+			? properties.ipamPoolPrefixAllocations.map((allocation) => {
+					const record = recordValue(allocation);
+					return omitUndefinedDeep({
+						id: record.id,
+						numberOfIpAddresses: record.numberOfIpAddresses
+					});
+				})
+			: undefined
+	}) as Subnet;
+}
+
 function subnetUpdateAddressPrefixes(subnet: unknown) {
-	const properties = recordValue(recordValue(subnet).properties);
+	const record = recordValue(subnet);
+	const properties = recordValue(record.properties);
 	return [
 		...stringArrayValue(properties.addressPrefixes),
+		...stringArrayValue(record.addressPrefixes),
 		...(typeof properties.addressPrefix === 'string' && properties.addressPrefix.trim()
 			? [properties.addressPrefix.trim()]
+			: []),
+		...(typeof record.addressPrefix === 'string' && record.addressPrefix.trim()
+			? [record.addressPrefix.trim()]
 			: [])
 	];
 }
@@ -5449,6 +5573,14 @@ function resolveVnetSubnetsForUpdate(vnet: VirtualNetwork, rawProperties: Record
 	return (vnet.subnets ?? []).map(cleanSubnetForVnetUpdate);
 }
 
+function resolveVnetSdkSubnetsForUpdate(vnet: VirtualNetwork, rawProperties: Record<string, unknown>) {
+	const rawSubnets = Array.isArray(rawProperties.subnets)
+		? rawProperties.subnets.map(cleanRawSubnetForSdkVnetUpdate)
+		: [];
+	if (rawSubnets.length) return rawSubnets;
+	return (vnet.subnets ?? []).map(cleanSubnetForSdkVnetUpdate);
+}
+
 function resolveVnetAddressSpaceForUpdate(
 	vnet: VirtualNetwork,
 	rawProperties: Record<string, unknown>,
@@ -5463,6 +5595,51 @@ function resolveVnetAddressSpaceForUpdate(
 	throw new Error('虚拟网络地址空间为空，无法提交 DDoS 配置更新：Azure 未返回 addressSpace.addressPrefixes，且无法从子网推断地址前缀');
 }
 
+function virtualNetworkRawDdosState(rawVnet: Record<string, unknown>) {
+	const properties = recordValue(rawVnet.properties);
+	const ddosProtectionPlan = recordValue(properties.ddosProtectionPlan);
+	return {
+		enableDdosProtection: properties.enableDdosProtection === true,
+		ddosProtectionPlanId: typeof ddosProtectionPlan.id === 'string' ? ddosProtectionPlan.id : '',
+		provisioningState: String(properties.provisioningState ?? '').trim()
+	};
+}
+
+function rawVirtualNetworkString(rawVnet: Record<string, unknown> | null | undefined, key: string) {
+	const value = rawVnet ? rawVnet[key] : undefined;
+	return typeof value === 'string' ? value : '';
+}
+
+function virtualNetworkFromRawDdosState(rawVnet: Record<string, unknown>, fallbackName: string): VirtualNetwork {
+	const properties = recordValue(rawVnet.properties);
+	const state = virtualNetworkRawDdosState(rawVnet);
+	return omitUndefinedDeep({
+		id: rawVirtualNetworkString(rawVnet, 'id'),
+		name: rawVirtualNetworkString(rawVnet, 'name') || fallbackName,
+		location: rawVirtualNetworkString(rawVnet, 'location'),
+		addressSpace: properties.addressSpace,
+		provisioningState: state.provisioningState,
+		enableDdosProtection: state.enableDdosProtection,
+		ddosProtectionPlan: state.ddosProtectionPlanId ? { id: state.ddosProtectionPlanId } : undefined
+	}) as VirtualNetwork;
+}
+
+function virtualNetworkRawDdosStateMatches(
+	rawVnet: Record<string, unknown>,
+	options: {
+		enable: boolean;
+		ddosProtectionPlanId?: string;
+	}
+) {
+	const state = virtualNetworkRawDdosState(rawVnet);
+	const currentPlanId = normalizeResourceToken(state.ddosProtectionPlanId);
+	if (options.enable) {
+		const expectedPlanId = normalizeResourceToken(options.ddosProtectionPlanId ?? '');
+		return state.enableDdosProtection && (!expectedPlanId || currentPlanId === expectedPlanId);
+	}
+	return !state.enableDdosProtection && !currentPlanId;
+}
+
 function cleanVirtualNetworkForDdosUpdate(
 	vnet: VirtualNetwork,
 	options: {
@@ -5470,10 +5647,11 @@ function cleanVirtualNetworkForDdosUpdate(
 		ddosProtectionPlanId?: string;
 		rawVnet?: Record<string, unknown> | null;
 	}
-): { body: Record<string, unknown>; addressPrefixSource: string; addressPrefixes: string[] } {
+): { body: Record<string, unknown>; sdkBody: VirtualNetwork; addressPrefixSource: string; addressPrefixes: string[] } {
 	const rawVnet = recordValue(options.rawVnet);
 	const rawProperties = recordValue(rawVnet.properties);
 	const subnets = resolveVnetSubnetsForUpdate(vnet, rawProperties);
+	const sdkSubnets = resolveVnetSdkSubnetsForUpdate(vnet, rawProperties);
 	const { addressSpace, source } = resolveVnetAddressSpaceForUpdate(vnet, rawProperties, subnets);
 	const properties: Record<string, unknown> = {
 		addressSpace,
@@ -5498,8 +5676,30 @@ function cleanVirtualNetworkForDdosUpdate(
 		extendedLocation: rawVnet.extendedLocation ?? vnet.extendedLocation,
 		properties
 	});
+	const sdkBody = omitUndefinedDeep({
+		location: (typeof rawVnet.location === 'string' ? rawVnet.location : undefined) ?? vnet.location,
+		tags: rawVnet.tags ?? vnet.tags,
+		extendedLocation: rawVnet.extendedLocation ?? vnet.extendedLocation,
+		addressSpace,
+		dhcpOptions: rawProperties.dhcpOptions ?? vnet.dhcpOptions,
+		flowTimeoutInMinutes: rawProperties.flowTimeoutInMinutes ?? vnet.flowTimeoutInMinutes,
+		subnets: sdkSubnets,
+		enableDdosProtection: options.enable,
+		enableVmProtection: rawProperties.enableVmProtection ?? vnet.enableVmProtection,
+		bgpCommunities: rawProperties.bgpCommunities ?? vnet.bgpCommunities,
+		encryption: rawProperties.encryption ?? vnet.encryption,
+		ipAllocations: rawProperties.ipAllocations ?? cleanSubResourceList(vnet.ipAllocations),
+		privateEndpointVNetPolicies: rawProperties.privateEndpointVNetPolicies ?? vnet.privateEndpointVNetPolicies,
+		ddosProtectionPlan:
+			options.enable && options.ddosProtectionPlanId
+				? { id: options.ddosProtectionPlanId }
+				: !options.enable
+					? null
+					: undefined
+	}) as VirtualNetwork;
 	return {
 		body,
+		sdkBody,
 		addressPrefixSource: source,
 		addressPrefixes: addressSpace.addressPrefixes
 	};
@@ -5532,35 +5732,59 @@ async function updateVirtualNetworkDdosProtection(
 		progress?: CreateVmProgressReporter;
 		step: string;
 	}
-) {
-	const assertReachedTarget = async (fallback?: VirtualNetwork | null) => {
-		let latest = fallback ?? null;
-		let lastPlanId = latest?.ddosProtectionPlan?.id ?? '';
-		let lastEnabled = Boolean(latest?.enableDdosProtection);
-		for (let attempt = 1; attempt <= 6; attempt++) {
-			latest = await clients.network.virtualNetworks
-				.get(options.resourceGroup, options.virtualNetworkName)
-				.catch(() => latest);
-			if (latest && virtualNetworkDdosStateMatches(latest, options)) return latest;
-			lastPlanId = latest?.ddosProtectionPlan?.id ?? '';
-			lastEnabled = Boolean(latest?.enableDdosProtection);
-			if (attempt < 6) await sleep(2000);
+): Promise<VirtualNetwork> {
+	const assertReachedTarget = async (
+		source: string,
+		maxAttempts = 15
+	): Promise<{ latest: VirtualNetwork | null; rawVnet: Record<string, unknown> | null }> => {
+		let latest: VirtualNetwork | null = null;
+		let rawVnet: Record<string, unknown> | null = null;
+		let lastPlanId = '';
+		let lastEnabled = false;
+		let lastProvisioningState = '';
+		let lastError = '';
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			try {
+				rawVnet = await getVirtualNetworkRawArm(clients, options.resourceGroup, options.virtualNetworkName);
+				const state = virtualNetworkRawDdosState(rawVnet);
+				lastPlanId = state.ddosProtectionPlanId;
+				lastEnabled = state.enableDdosProtection;
+				lastProvisioningState = state.provisioningState;
+				if (virtualNetworkRawDdosStateMatches(rawVnet, options)) {
+					latest = await clients.network.virtualNetworks
+						.get(options.resourceGroup, options.virtualNetworkName)
+						.catch(() => null);
+					return { latest, rawVnet };
+				}
+			} catch (err) {
+				lastError = conciseProgressError(formatAzureError(err), 500);
+			}
+			await reportCreateVmProgress(
+				options.progress,
+				`${options.step}-confirm`,
+				'running',
+				`等待虚拟网络 DDoS ${options.enable ? '开启' : '关闭'}状态生效 (${attempt}/${maxAttempts})`,
+				{
+					virtualNetwork: options.virtualNetworkName,
+					source,
+					enableDdosProtection: lastEnabled,
+					planId: lastPlanId || '',
+					provisioningState: lastProvisioningState || '',
+					error: lastError || null
+				}
+			);
+			if (attempt < maxAttempts) {
+				await sleep(Math.min(2000 + attempt * 1000, 10000));
+			}
 		}
-		throw new Error(
-			`虚拟网络 DDoS ${options.enable ? '开启' : '关闭'}请求已提交，但回读确认未生效：enableDdosProtection=${lastEnabled}，ddosProtectionPlan=${lastPlanId || '-'}`
+		throw new VirtualNetworkDdosConfirmationError(
+			`虚拟网络 DDoS ${options.enable ? '开启' : '关闭'}请求已提交，但 ARM 原始回读确认未生效：enableDdosProtection=${lastEnabled}，ddosProtectionPlan=${lastPlanId || '-'}，provisioningState=${lastProvisioningState || '-'}${lastError ? `，lastError=${lastError}` : ''}`
 		);
 	};
 
 	const updateViaArm = async () => {
 		const vnetPath = virtualNetworkArmPath(clients, options.resourceGroup, options.virtualNetworkName);
-		const rawResponse = await sendArmPipelineRequest(clients.credential, clients.clientOptions, {
-			method: 'GET',
-			pathOrUrl: vnetPath
-		});
-		if (rawResponse.status < 200 || rawResponse.status >= 300) {
-			throw new Error(`读取虚拟网络原始 ARM 配置失败: ${armResponseError(rawResponse.status, rawResponse.bodyAsText)}`);
-		}
-		const rawVnet = recordValue(parseArmJson(rawResponse.bodyAsText));
+		const rawVnet = await getVirtualNetworkRawArm(clients, options.resourceGroup, options.virtualNetworkName);
 		const prepared = cleanVirtualNetworkForDdosUpdate(options.vnet, {
 			enable: options.enable,
 			ddosProtectionPlanId: options.ddosProtectionPlanId,
@@ -5635,30 +5859,73 @@ async function updateVirtualNetworkDdosProtection(
 			throw new Error(`Azure 未返回虚拟网络 DDoS 长任务地址: HTTP ${response.status}`);
 		}
 
-		return clients.network.virtualNetworks.get(options.resourceGroup, options.virtualNetworkName);
+		return prepared;
+	};
+
+	const updateViaSdk = async (prepared: { sdkBody: VirtualNetwork }) => {
+		await reportCreateVmProgress(
+			options.progress,
+			`${options.step}-sdk-retry`,
+			'running',
+			'ARM 长任务已成功但状态未生效，改用 Azure SDK 同款流程重试虚拟网络 DDoS 更新',
+			{
+				virtualNetwork: options.virtualNetworkName,
+				enableDdosProtection: options.enable,
+				planId: options.ddosProtectionPlanId ?? ''
+			}
+		);
+		await clients.network.virtualNetworks.beginCreateOrUpdateAndWait(
+			options.resourceGroup,
+			options.virtualNetworkName,
+			prepared.sdkBody,
+			{ updateIntervalInMs: 3000 }
+		);
 	};
 
 	try {
-		const updated = await updateViaArm();
-		return await assertReachedTarget(updated);
+		const prepared = await updateViaArm();
+		try {
+			const confirmed = await assertReachedTarget('arm-put', 12);
+			return confirmed.latest ?? clients.network.virtualNetworks.get(options.resourceGroup, options.virtualNetworkName);
+		} catch (err) {
+			if (!(err instanceof VirtualNetworkDdosConfirmationError)) throw err;
+			await reportCreateVmProgress(
+				options.progress,
+				`${options.step}-sdk-retry`,
+				'info',
+				'ARM 原始回读未确认 DDoS 状态，准备使用 SDK 完整模型重试',
+				{
+					virtualNetwork: options.virtualNetworkName,
+					error: conciseProgressError(formatAzureError(err), 600)
+				}
+			);
+			await updateViaSdk(prepared);
+			const confirmed = await assertReachedTarget('sdk-retry', 18);
+			return confirmed.latest ?? clients.network.virtualNetworks.get(options.resourceGroup, options.virtualNetworkName);
+		}
 	} catch (err) {
-		const latest = await clients.network.virtualNetworks
-			.get(options.resourceGroup, options.virtualNetworkName)
-			.catch(() => null);
-		if (latest && virtualNetworkDdosStateMatches(latest, options)) {
+		const rawVnet = await getVirtualNetworkRawArm(
+			clients,
+			options.resourceGroup,
+			options.virtualNetworkName
+		).catch(() => null);
+		const latest = await clients.network.virtualNetworks.get(options.resourceGroup, options.virtualNetworkName).catch(() => null);
+		if ((rawVnet && virtualNetworkRawDdosStateMatches(rawVnet, options)) || (latest && virtualNetworkDdosStateMatches(latest, options))) {
+			const rawState = rawVnet ? virtualNetworkRawDdosState(rawVnet) : null;
 			await reportCreateVmProgress(
 				options.progress,
 				options.step,
 				'success',
 				'Azure 长操作返回失败，但回读确认虚拟网络 DDoS 状态已生效',
 				{
-					virtualNetwork: latest.name ?? options.virtualNetworkName,
-					enableDdosProtection: Boolean(latest.enableDdosProtection),
-					planId: latest.ddosProtectionPlan?.id ?? '',
+					virtualNetwork: (latest?.name ?? rawVirtualNetworkString(rawVnet, 'name')) || options.virtualNetworkName,
+					enableDdosProtection: rawState?.enableDdosProtection ?? Boolean(latest?.enableDdosProtection),
+					planId: rawState?.ddosProtectionPlanId ?? latest?.ddosProtectionPlan?.id ?? '',
 					lroError: conciseProgressError(formatAzureError(err), 600)
 				}
 			);
-			return latest;
+			if (latest) return latest;
+			if (rawVnet) return virtualNetworkFromRawDdosState(rawVnet, options.virtualNetworkName);
 		}
 		throw err;
 	}
