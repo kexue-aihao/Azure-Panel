@@ -15,7 +15,8 @@ import type {
 	NetworkSecurityGroup,
 	PublicIPAddress,
 	SecurityRule,
-	Usage as NetworkUsage
+	Usage as NetworkUsage,
+	VirtualNetwork
 } from '@azure/arm-network';
 import {
 	createDefaultHttpClient,
@@ -1155,6 +1156,112 @@ function parseVirtualNetworkFromSubnetId(subnetId: string) {
 		virtualNetworkName: vnetMatch ? decodeURIComponent(vnetMatch[1]) : '',
 		subnetName: subnetMatch ? decodeURIComponent(subnetMatch[1]) : ''
 	};
+}
+
+type VmVirtualNetworkRef = {
+	resourceGroup: string;
+	virtualNetworkName: string;
+	subnetName: string;
+	subnetId: string;
+	source: string;
+	vnet?: VirtualNetwork;
+};
+
+async function resolveVmVirtualNetworkRef(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		vmName: string;
+		nicResourceGroup: string;
+		ipConfig: NetworkInterfaceIPConfiguration;
+		progress?: CreateVmProgressReporter;
+		step: string;
+		actionLabel: string;
+	}
+): Promise<VmVirtualNetworkRef> {
+	const subnetId = options.ipConfig.subnet?.id ?? '';
+	const parsed = parseVirtualNetworkFromSubnetId(subnetId);
+	if (parsed.resourceGroup && parsed.virtualNetworkName) {
+		return {
+			...parsed,
+			subnetId,
+			source: 'ip_config_subnet_id'
+		};
+	}
+
+	const namedVnetName = resourceName(options.vmName, 'vnet');
+	const candidateResourceGroups = [
+		...new Set([options.nicResourceGroup, options.resourceGroup].filter(Boolean))
+	];
+	for (const candidateResourceGroup of candidateResourceGroups) {
+		const namedVnet = await clients.network.virtualNetworks
+			.get(candidateResourceGroup, namedVnetName)
+			.catch(() => null);
+		if (!namedVnet) continue;
+		const subnet = namedVnet.subnets?.find((item) => item.name === 'default') ?? namedVnet.subnets?.[0];
+		const resolvedSubnetId =
+			subnet?.id || subnetResourceId(clients, candidateResourceGroup, namedVnetName, subnet?.name || 'default');
+		const resolvedSubnet = parseVirtualNetworkFromSubnetId(resolvedSubnetId);
+		await reportCreateVmProgress(
+			options.progress,
+			options.step,
+			'info',
+			`${options.actionLabel}未从 VM 子网信息中直接识别虚拟网络，已按面板标准命名定位 VNet`,
+			{
+				virtualNetwork: namedVnet.name ?? namedVnetName,
+				virtualNetworkResourceGroup: candidateResourceGroup,
+				subnet: resolvedSubnet.subnetName || subnet?.name || 'default'
+			}
+		);
+		return {
+			resourceGroup: resolvedSubnet.resourceGroup || candidateResourceGroup,
+			virtualNetworkName: resolvedSubnet.virtualNetworkName || namedVnet.name || namedVnetName,
+			subnetName: resolvedSubnet.subnetName || subnet?.name || 'default',
+			subnetId: resolvedSubnetId,
+			source: 'standard_vnet_name',
+			vnet: namedVnet
+		};
+	}
+
+	const vnets: VirtualNetwork[] = [];
+	for (const candidateResourceGroup of candidateResourceGroups) {
+		for await (const vnet of clients.network.virtualNetworks.list(candidateResourceGroup)) {
+			vnets.push(vnet);
+		}
+	}
+	const selected =
+		vnets.find((vnet) => normalizeResourceToken(vnet.name ?? '') === normalizeResourceToken(namedVnetName)) ??
+		(vnets.length === 1 ? vnets[0] : null);
+	if (selected?.name) {
+		const subnet = selected.subnets?.find((item) => item.name === 'default') ?? selected.subnets?.[0];
+		const selectedResourceGroup = parseResourceGroup(selected.id ?? '') || options.nicResourceGroup;
+		const resolvedSubnetId =
+			subnet?.id || subnetResourceId(clients, selectedResourceGroup, selected.name, subnet?.name || 'default');
+		const resolvedSubnet = parseVirtualNetworkFromSubnetId(resolvedSubnetId);
+		await reportCreateVmProgress(
+			options.progress,
+			options.step,
+			'info',
+			`${options.actionLabel}未从 VM 子网信息中直接识别虚拟网络，已从资源组 VNet 列表中定位`,
+			{
+				virtualNetwork: selected.name,
+				virtualNetworkResourceGroup: selectedResourceGroup,
+				subnet: resolvedSubnet.subnetName || subnet?.name || 'default'
+			}
+		);
+		return {
+			resourceGroup: resolvedSubnet.resourceGroup || selectedResourceGroup,
+			virtualNetworkName: resolvedSubnet.virtualNetworkName || selected.name,
+			subnetName: resolvedSubnet.subnetName || subnet?.name || 'default',
+			subnetId: resolvedSubnetId,
+			source: 'resource_group_vnet_list',
+			vnet: selected
+		};
+	}
+
+	throw new Error(
+		`未能从 VM 子网信息中识别虚拟网络，无法${options.actionLabel}；资源组内可候选 VNet ${vnets.length} 个`
+	);
 }
 
 function capabilityValue(sku: ResourceSku, name: string): string {
@@ -5237,17 +5344,22 @@ export async function enableVmDdosProtection(
 		resourceGroup,
 		vmName
 	});
-	const { vmLocation, ipConfig } = await getPrimaryNicAndIPv4Config(clients, resourceGroup, vmName);
-	const subnetId = ipConfig.subnet?.id ?? '';
+	const { vmLocation, nicResourceGroup, ipConfig } = await getPrimaryNicAndIPv4Config(clients, resourceGroup, vmName);
 	const publicIpId = ipConfig.publicIPAddress?.id ?? '';
-	const vnetRef = parseVirtualNetworkFromSubnetId(subnetId);
-	if (!vnetRef.resourceGroup || !vnetRef.virtualNetworkName) {
-		throw new Error('未能从 VM 子网信息中识别虚拟网络，无法关联 DDoS 防护计划');
-	}
+	const vnetRef = await resolveVmVirtualNetworkRef(clients, {
+		resourceGroup,
+		vmName,
+		nicResourceGroup,
+		ipConfig,
+		progress,
+		step: 'ddos-inspect-vm',
+		actionLabel: '关联 DDoS 防护计划'
+	});
 	await reportCreateVmProgress(progress, 'ddos-inspect-vm', 'success', '已定位 VM 所属虚拟网络', {
 		virtualNetwork: vnetRef.virtualNetworkName,
 		virtualNetworkResourceGroup: vnetRef.resourceGroup,
-		subnet: vnetRef.subnetName || '-'
+		subnet: vnetRef.subnetName || '-',
+		source: vnetRef.source
 	});
 
 	await reportCreateVmProgress(progress, 'ddos-vnet-load', 'running', '读取虚拟网络当前配置', {
@@ -5362,17 +5474,22 @@ export async function disableVmDdosProtection(
 		resourceGroup,
 		vmName
 	});
-	const { vmLocation, ipConfig } = await getPrimaryNicAndIPv4Config(clients, resourceGroup, vmName);
-	const subnetId = ipConfig.subnet?.id ?? '';
+	const { vmLocation, nicResourceGroup, ipConfig } = await getPrimaryNicAndIPv4Config(clients, resourceGroup, vmName);
 	const publicIpId = ipConfig.publicIPAddress?.id ?? '';
-	const vnetRef = parseVirtualNetworkFromSubnetId(subnetId);
-	if (!vnetRef.resourceGroup || !vnetRef.virtualNetworkName) {
-		throw new Error('未能从 VM 子网信息中识别虚拟网络，无法关闭 DDoS 防护');
-	}
+	const vnetRef = await resolveVmVirtualNetworkRef(clients, {
+		resourceGroup,
+		vmName,
+		nicResourceGroup,
+		ipConfig,
+		progress,
+		step: 'ddos-inspect-vm',
+		actionLabel: '关闭 DDoS 防护'
+	});
 	await reportCreateVmProgress(progress, 'ddos-inspect-vm', 'success', '已定位 VM 所属虚拟网络', {
 		virtualNetwork: vnetRef.virtualNetworkName,
 		virtualNetworkResourceGroup: vnetRef.resourceGroup,
-		subnet: vnetRef.subnetName || '-'
+		subnet: vnetRef.subnetName || '-',
+		source: vnetRef.source
 	});
 
 	let publicIPv4 = '';
