@@ -4470,7 +4470,8 @@ async function loadNetworkInterfaceIpConfigurations(
 		byName.set(key, config);
 	}
 
-	if (options.forceList || byName.size === 0 || !pickNicIPv4ConfigFromList([...byName.values()])) {
+	const selected = pickNicIPv4ConfigFromList([...byName.values()]);
+	if (options.forceList || byName.size === 0 || !selected || !selected.subnet?.id) {
 		for await (const config of clients.network.networkInterfaceIPConfigurations.list(nicResourceGroup, nicName)) {
 			const key = config.name || `config-${byName.size + 1}`;
 			byName.set(key, mergeNicIpConfig(byName.get(key), config));
