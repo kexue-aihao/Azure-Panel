@@ -5342,6 +5342,109 @@ export async function enableVmDdosProtection(
 	};
 }
 
+export async function disableVmDdosProtection(
+	clients: AzureClients,
+	resourceGroup: string,
+	vmName: string,
+	progress?: CreateVmProgressReporter
+): Promise<{
+	vmName: string;
+	resourceGroup: string;
+	ddosProtectionPlanName: string;
+	ddosProtectionPlanId: string;
+	virtualNetworkName: string;
+	virtualNetworkResourceGroup: string;
+	publicIPv4: string;
+	publicIPv4DdosEnabled: boolean;
+}> {
+	await reportCreateVmProgress(progress, 'ddos-inspect-vm', 'running', '读取 VM 网卡、子网和公网 IP 信息', {
+		resourceGroup,
+		vmName
+	});
+	const { vmLocation, ipConfig } = await getPrimaryNicAndIPv4Config(clients, resourceGroup, vmName);
+	const subnetId = ipConfig.subnet?.id ?? '';
+	const publicIpId = ipConfig.publicIPAddress?.id ?? '';
+	const vnetRef = parseVirtualNetworkFromSubnetId(subnetId);
+	if (!vnetRef.resourceGroup || !vnetRef.virtualNetworkName) {
+		throw new Error('未能从 VM 子网信息中识别虚拟网络，无法关闭 DDoS 防护');
+	}
+	await reportCreateVmProgress(progress, 'ddos-inspect-vm', 'success', '已定位 VM 所属虚拟网络', {
+		virtualNetwork: vnetRef.virtualNetworkName,
+		virtualNetworkResourceGroup: vnetRef.resourceGroup,
+		subnet: vnetRef.subnetName || '-'
+	});
+
+	let publicIPv4 = '';
+	if (publicIpId) {
+		const publicIpResourceGroup = parseResourceGroup(publicIpId);
+		const publicIpName = parseResourceName(publicIpId);
+		await reportCreateVmProgress(progress, 'ddos-public-ip', 'running', '关闭当前 IPv4 公网 IP 的 DDoS 保护模式', {
+			publicIpName,
+			resourceGroup: publicIpResourceGroup
+		});
+		const publicIp = await getPublicIpWithRawFallback(clients, publicIpResourceGroup, publicIpName);
+		publicIPv4 = publicIpAddressValue(publicIp);
+		publicIp.ddosSettings = {
+			protectionMode: 'Disabled'
+		};
+		const updatedPublicIp = await clients.network.publicIPAddresses.beginCreateOrUpdateAndWait(
+			publicIpResourceGroup,
+			publicIpName,
+			publicIp
+		);
+		publicIPv4 = publicIpAddressValue(updatedPublicIp) || publicIPv4;
+		await reportCreateVmProgress(progress, 'ddos-public-ip', 'success', '当前 IPv4 公网 IP 已关闭 DDoS 保护模式', {
+			publicIpName,
+			ip: publicIPv4 || '-'
+		});
+	} else {
+		await reportCreateVmProgress(progress, 'ddos-public-ip', 'info', 'VM 未绑定 IPv4 公网 IP，已跳过公网 IP DDoS 设置');
+	}
+
+	await reportCreateVmProgress(progress, 'ddos-vnet-load', 'running', '读取虚拟网络当前配置', {
+		virtualNetwork: vnetRef.virtualNetworkName,
+		resourceGroup: vnetRef.resourceGroup
+	});
+	const vnet = await clients.network.virtualNetworks.get(
+		vnetRef.resourceGroup,
+		vnetRef.virtualNetworkName
+	);
+	const existingPlanId = vnet.ddosProtectionPlan?.id ?? '';
+	const existingPlanName = parseResourceName(existingPlanId);
+	await reportCreateVmProgress(progress, 'ddos-vnet-detach', 'running', '从虚拟网络关闭 DDoS 防护计划', {
+		virtualNetwork: vnetRef.virtualNetworkName,
+		planId: existingPlanId
+	});
+	vnet.enableDdosProtection = false;
+	delete vnet.ddosProtectionPlan;
+	const updatedVnet = await clients.network.virtualNetworks.beginCreateOrUpdateAndWait(
+		vnetRef.resourceGroup,
+		vnetRef.virtualNetworkName,
+		vnet
+	);
+	await reportCreateVmProgress(progress, 'ddos-vnet-detach', 'success', '虚拟网络 DDoS 防护已关闭', {
+		virtualNetwork: updatedVnet.name ?? vnetRef.virtualNetworkName,
+		provisioningState: updatedVnet.provisioningState ?? '',
+		location: updatedVnet.location ?? vmLocation ?? ''
+	});
+
+	await reportCreateVmProgress(progress, 'ddos-complete', 'success', 'VM DDoS 防护关闭流程完成', {
+		vmName,
+		virtualNetwork: vnetRef.virtualNetworkName,
+		planName: existingPlanName
+	});
+	return {
+		vmName,
+		resourceGroup,
+		ddosProtectionPlanName: existingPlanName,
+		ddosProtectionPlanId: existingPlanId,
+		virtualNetworkName: vnetRef.virtualNetworkName,
+		virtualNetworkResourceGroup: vnetRef.resourceGroup,
+		publicIPv4,
+		publicIPv4DdosEnabled: false
+	};
+}
+
 async function createNetworkSecurityGroupForVm(
 	clients: AzureClients,
 	options: {

@@ -1390,14 +1390,17 @@
 		}
 	}
 
-	async function enableDdos(vm: Vm) {
+	async function manageDdos(vm: Vm, action: 'enable' | 'disable') {
 		if (!accountId) return;
+		const isDisable = action === 'disable';
 		const ok = confirm(
-			`确认为 ${vm.name} 单独开启 Azure DDoS 防护计划吗？DDoS Protection Plan 可能产生 Azure 官方额外费用。`
+			isDisable
+				? `确认关闭 ${vm.name} 的 Azure DDoS 防护吗？如果该 VM 所在虚拟网络还有其他资源，也会受到关闭虚拟网络 DDoS 防护的影响。`
+				: `确认为 ${vm.name} 单独开启 Azure DDoS 防护计划吗？DDoS Protection Plan 可能产生 Azure 官方额外费用。`
 		);
 		if (!ok) return;
-		ipActionLoading = `${vm.name}:ddos`;
-		beginOperationProgress('开启 DDoS 防护计划', vm.name);
+		ipActionLoading = `${vm.name}:ddos:${action}`;
+		beginOperationProgress(`${isDisable ? '关闭' : '开启'} DDoS 防护`, vm.name);
 		try {
 			const result = await requestOperationWithProgress<{
 				message: string;
@@ -1410,13 +1413,14 @@
 					account_id: accountId,
 					...proxyPayload(),
 					resource_group: vm.resource_group,
-					vm_name: vm.name
+					vm_name: vm.name,
+					action
 				}
 			});
 			toast = `${result.message}，VNet=${result.virtual_network_name || '-'}，Plan=${result.ddos_protection_plan_name || '-'}`;
 			await loadVms();
 		} catch (err) {
-			const message = err instanceof Error ? err.message : 'DDoS 防护开启失败';
+			const message = err instanceof Error ? err.message : `DDoS 防护${isDisable ? '关闭' : '开启'}失败`;
 			failOperationProgress(message);
 			toast = message;
 		} finally {
@@ -2262,10 +2266,17 @@
 							</button>
 							<button
 								class="btn-secondary"
-								onclick={() => void enableDdos(vm)}
+								onclick={() => void manageDdos(vm, 'enable')}
 								disabled={vmActionBusy(vm.name)}
 							>
-								{ipActionLoading === `${vm.name}:ddos` ? '开启中...' : 'DDoS'}
+								{ipActionLoading === `${vm.name}:ddos:enable` ? '开启中...' : '开 DDoS'}
+							</button>
+							<button
+								class="btn-secondary"
+								onclick={() => void manageDdos(vm, 'disable')}
+								disabled={vmActionBusy(vm.name)}
+							>
+								{ipActionLoading === `${vm.name}:ddos:disable` ? '关闭中...' : '关 DDoS'}
 							</button>
 							<button
 								class="btn-danger"

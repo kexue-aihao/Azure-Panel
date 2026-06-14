@@ -1,5 +1,5 @@
 import { getUserAccountWithSelectedProxy } from '$lib/server/accounts';
-import { createAzureClients, enableVmDdosProtection } from '$lib/server/azure';
+import { createAzureClients, disableVmDdosProtection, enableVmDdosProtection } from '$lib/server/azure';
 import { fail, getRequestClientIp, ok, requireUser } from '$lib/server/http';
 import {
 	operationProgressEvent,
@@ -21,7 +21,11 @@ type EnableDdosPublicResult = {
 	message: string;
 };
 
-function publicResult(result: Awaited<ReturnType<typeof enableVmDdosProtection>>): EnableDdosPublicResult {
+type DdosAction = 'enable' | 'disable';
+
+type DdosResult = Awaited<ReturnType<typeof enableVmDdosProtection | typeof disableVmDdosProtection>>;
+
+function publicResult(result: DdosResult, action: DdosAction): EnableDdosPublicResult {
 	return {
 		vm_name: result.vmName,
 		resource_group: result.resourceGroup,
@@ -31,7 +35,10 @@ function publicResult(result: Awaited<ReturnType<typeof enableVmDdosProtection>>
 		virtual_network_resource_group: result.virtualNetworkResourceGroup,
 		public_ipv4: result.publicIPv4,
 		public_ipv4_ddos_enabled: result.publicIPv4DdosEnabled,
-		message: `已为 VM ${result.vmName} 开启 DDoS 防护计划`
+		message:
+			action === 'disable'
+				? `已为 VM ${result.vmName} 关闭 DDoS 防护`
+				: `已为 VM ${result.vmName} 开启 DDoS 防护计划`
 	};
 }
 
@@ -41,6 +48,7 @@ export const POST: RequestHandler = async (event) => {
 	const accountId = Number(body.account_id);
 	const resourceGroup = String(body.resource_group ?? '').trim();
 	const vmName = String(body.vm_name ?? '').trim();
+	const action: DdosAction = String(body.action ?? 'enable') === 'disable' ? 'disable' : 'enable';
 	if (!accountId || !resourceGroup || !vmName) return fail('参数不完整');
 
 	try {
@@ -64,24 +72,27 @@ export const POST: RequestHandler = async (event) => {
 					}),
 				run: async (progress) => {
 					await progress(
-						operationProgressEvent('ddos-auth', 'success', 'Azure 账号已连接，准备开启 DDoS 防护', {
+						operationProgressEvent('ddos-auth', 'success', `Azure 账号已连接，准备${action === 'disable' ? '关闭' : '开启'} DDoS 防护`, {
 							resourceGroup,
 							vmName
 						})
 					);
-					const result = await enableVmDdosProtection(
-						createAzureClients(account, proxy),
-						resourceGroup,
-						vmName,
-						progress
-					);
-					return publicResult(result);
+					const clients = createAzureClients(account, proxy);
+					const result =
+						action === 'disable'
+							? await disableVmDdosProtection(clients, resourceGroup, vmName, progress)
+							: await enableVmDdosProtection(clients, resourceGroup, vmName, progress);
+					return publicResult(result, action);
 				}
 			});
 		}
 
-		const result = await enableVmDdosProtection(createAzureClients(account, proxy), resourceGroup, vmName);
-		return ok(publicResult(result));
+		const clients = createAzureClients(account, proxy);
+		const result =
+			action === 'disable'
+				? await disableVmDdosProtection(clients, resourceGroup, vmName)
+				: await enableVmDdosProtection(clients, resourceGroup, vmName);
+		return ok(publicResult(result, action));
 	} catch (err) {
 		return fail(err instanceof Error ? err.message : String(err), 500);
 	}
