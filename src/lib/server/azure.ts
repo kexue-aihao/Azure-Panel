@@ -5387,6 +5387,8 @@ function cleanVirtualNetworkForDdosUpdate(
 	};
 	if (options.enable && options.ddosProtectionPlanId) {
 		cleaned.ddosProtectionPlan = { id: options.ddosProtectionPlanId };
+	} else if (!options.enable) {
+		(cleaned as unknown as { ddosProtectionPlan: null }).ddosProtectionPlan = null;
 	}
 	return cleaned;
 }
@@ -5399,12 +5401,12 @@ function virtualNetworkDdosStateMatches(
 	}
 ) {
 	const enabled = Boolean(vnet.enableDdosProtection);
+	const currentPlanId = normalizeResourceToken(vnet.ddosProtectionPlan?.id ?? '');
 	if (options.enable) {
 		const expectedPlanId = normalizeResourceToken(options.ddosProtectionPlanId ?? '');
-		const currentPlanId = normalizeResourceToken(vnet.ddosProtectionPlan?.id ?? '');
 		return enabled && (!expectedPlanId || currentPlanId === expectedPlanId);
 	}
-	return !enabled;
+	return !enabled && !currentPlanId;
 }
 
 async function updateVirtualNetworkDdosProtection(
@@ -5419,8 +5421,26 @@ async function updateVirtualNetworkDdosProtection(
 		step: string;
 	}
 ) {
+	const assertReachedTarget = async (fallback?: VirtualNetwork | null) => {
+		let latest = fallback ?? null;
+		let lastPlanId = latest?.ddosProtectionPlan?.id ?? '';
+		let lastEnabled = Boolean(latest?.enableDdosProtection);
+		for (let attempt = 1; attempt <= 6; attempt++) {
+			latest = await clients.network.virtualNetworks
+				.get(options.resourceGroup, options.virtualNetworkName)
+				.catch(() => latest);
+			if (latest && virtualNetworkDdosStateMatches(latest, options)) return latest;
+			lastPlanId = latest?.ddosProtectionPlan?.id ?? '';
+			lastEnabled = Boolean(latest?.enableDdosProtection);
+			if (attempt < 6) await sleep(2000);
+		}
+		throw new Error(
+			`虚拟网络 DDoS ${options.enable ? '开启' : '关闭'}请求已提交，但回读确认未生效：enableDdosProtection=${lastEnabled}，ddosProtectionPlan=${lastPlanId || '-'}`
+		);
+	};
+
 	try {
-		return await clients.network.virtualNetworks.beginCreateOrUpdateAndWait(
+		const updated = await clients.network.virtualNetworks.beginCreateOrUpdateAndWait(
 			options.resourceGroup,
 			options.virtualNetworkName,
 			cleanVirtualNetworkForDdosUpdate(options.vnet, {
@@ -5429,6 +5449,7 @@ async function updateVirtualNetworkDdosProtection(
 			}),
 			{ updateIntervalInMs: 3000 }
 		);
+		return await assertReachedTarget(updated);
 	} catch (err) {
 		const latest = await clients.network.virtualNetworks
 			.get(options.resourceGroup, options.virtualNetworkName)
