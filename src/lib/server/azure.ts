@@ -17,6 +17,7 @@ import type {
 	SecurityRule,
 	Subnet,
 	Usage as NetworkUsage,
+	DdosProtectionPlan,
 	VirtualNetwork
 } from '@azure/arm-network';
 import {
@@ -2312,10 +2313,22 @@ type ArmPublicIpResource = {
 	id?: string;
 	name?: string;
 	location?: string;
+	tags?: PublicIPAddress['tags'];
+	extendedLocation?: PublicIPAddress['extendedLocation'];
+	sku?: PublicIPAddress['sku'];
+	zones?: PublicIPAddress['zones'];
 	properties?: {
 		ipAddress?: string;
+		publicIPAllocationMethod?: PublicIPAddress['publicIPAllocationMethod'];
 		publicIPAddressVersion?: string;
 		ipConfiguration?: { id?: string };
+		dnsSettings?: PublicIPAddress['dnsSettings'];
+		ddosSettings?: PublicIPAddress['ddosSettings'];
+		ipTags?: PublicIPAddress['ipTags'];
+		publicIPPrefix?: PublicIPAddress['publicIPPrefix'];
+		idleTimeoutInMinutes?: PublicIPAddress['idleTimeoutInMinutes'];
+		natGateway?: PublicIPAddress['natGateway'];
+		deleteOption?: PublicIPAddress['deleteOption'];
 		provisioningState?: string;
 	};
 };
@@ -2325,9 +2338,21 @@ function armPublicIpToModel(resource: ArmPublicIpResource): PublicIPAddress {
 		id: resource.id ?? '',
 		name: resource.name ?? parseResourceName(resource.id ?? ''),
 		location: resource.location ?? '',
+		tags: resource.tags,
+		extendedLocation: resource.extendedLocation,
+		sku: resource.sku,
+		zones: resource.zones,
 		ipAddress: resource.properties?.ipAddress,
+		publicIPAllocationMethod: resource.properties?.publicIPAllocationMethod,
 		publicIPAddressVersion: resource.properties?.publicIPAddressVersion as PublicIPAddress['publicIPAddressVersion'],
 		ipConfiguration: resource.properties?.ipConfiguration,
+		dnsSettings: resource.properties?.dnsSettings,
+		ddosSettings: resource.properties?.ddosSettings,
+		ipTags: resource.properties?.ipTags,
+		publicIPPrefix: resource.properties?.publicIPPrefix,
+		idleTimeoutInMinutes: resource.properties?.idleTimeoutInMinutes,
+		natGateway: resource.properties?.natGateway,
+		deleteOption: resource.properties?.deleteOption,
 		provisioningState: resource.properties?.provisioningState,
 		properties: resource.properties
 	} as PublicIPAddress & { properties?: ArmPublicIpResource['properties'] };
@@ -2349,6 +2374,7 @@ function mergePublicIpModel(base: PublicIPAddress, fallback: PublicIPAddress): P
 		ipAddress: publicIpAddressValue(base) || publicIpAddressValue(fallback) || undefined,
 		publicIPAddressVersion: base.publicIPAddressVersion ?? fallback.publicIPAddressVersion,
 		ipConfiguration: baseIpConfiguration ?? fallbackIpConfiguration,
+		ddosSettings: fallback.ddosSettings ?? fallbackRaw.properties?.ddosSettings ?? base.ddosSettings ?? baseRaw.properties?.ddosSettings,
 		provisioningState: base.provisioningState ?? fallback.provisioningState,
 		properties: {
 			...(baseRaw.properties ?? {}),
@@ -5979,13 +6005,69 @@ function publicIpDdosStateMatches(
 		ddosProtectionPlanId?: string;
 	}
 ) {
-	const mode = String(publicIp.ddosSettings?.protectionMode ?? '').toLowerCase();
+	const raw = publicIp as PublicIPAddress & { properties?: { ddosSettings?: PublicIPAddress['ddosSettings'] } };
+	const ddosSettings = publicIp.ddosSettings ?? raw.properties?.ddosSettings;
+	const mode = String(ddosSettings?.protectionMode ?? '').toLowerCase();
 	if (options.enable) {
 		const expectedPlanId = normalizeResourceToken(options.ddosProtectionPlanId ?? '');
-		const currentPlanId = normalizeResourceToken(publicIp.ddosSettings?.ddosProtectionPlan?.id ?? '');
+		const currentPlanId = normalizeResourceToken(ddosSettings?.ddosProtectionPlan?.id ?? '');
 		return mode === 'enabled' && (!expectedPlanId || currentPlanId === expectedPlanId);
 	}
-	return mode === 'disabled' || (!mode && !publicIp.ddosSettings?.ddosProtectionPlan?.id);
+	return mode === 'disabled' || (!mode && !ddosSettings?.ddosProtectionPlan?.id);
+}
+
+async function getPublicIpForDdosState(clients: AzureClients, resourceGroup: string, publicIpName: string) {
+	return getPublicIpViaArm(clients, resourceGroup, publicIpName).catch(() =>
+		getPublicIpWithRawFallback(clients, resourceGroup, publicIpName)
+	);
+}
+
+async function waitForPublicIpDdosState(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		publicIpName: string;
+		enable: boolean;
+		ddosProtectionPlanId?: string;
+		progress?: CreateVmProgressReporter;
+		step: string;
+	}
+) {
+	let latest: PublicIPAddress | null = null;
+	let lastMode = '';
+	let lastPlanId = '';
+	let lastError = '';
+	for (let attempt = 1; attempt <= 12; attempt++) {
+		try {
+			latest = await getPublicIpForDdosState(clients, options.resourceGroup, options.publicIpName);
+			const raw = latest as PublicIPAddress & { properties?: { ddosSettings?: PublicIPAddress['ddosSettings'] } };
+			const ddosSettings = latest.ddosSettings ?? raw.properties?.ddosSettings;
+			lastMode = String(ddosSettings?.protectionMode ?? '');
+			lastPlanId = ddosSettings?.ddosProtectionPlan?.id ?? '';
+			if (publicIpDdosStateMatches(latest, options)) return latest;
+		} catch (err) {
+			lastError = conciseProgressError(formatAzureError(err), 500);
+		}
+		await reportCreateVmProgress(
+			options.progress,
+			`${options.step}-confirm`,
+			'running',
+			`等待 Azure 确认公网 IPv4 DDoS 状态 ${attempt}/12`,
+			{
+				publicIpName: options.publicIpName,
+				targetMode: options.enable ? 'Enabled' : 'Disabled',
+				currentMode: lastMode || '-',
+				currentPlanId: lastPlanId || '-',
+				error: lastError || null
+			}
+		);
+		await sleep(2000);
+	}
+	throw new Error(
+		`公网 IPv4 DDoS 状态未按预期生效: publicIp=${options.publicIpName}, target=${
+			options.enable ? 'Enabled' : 'Disabled'
+		}, current=${lastMode || '-'}, plan=${lastPlanId || '-'}${lastError ? `, error=${lastError}` : ''}`
+	);
 }
 
 async function updatePublicIpDdosSettings(
@@ -6001,7 +6083,7 @@ async function updatePublicIpDdosSettings(
 	}
 ) {
 	try {
-		return await clients.network.publicIPAddresses.beginCreateOrUpdateAndWait(
+		await clients.network.publicIPAddresses.beginCreateOrUpdateAndWait(
 			options.resourceGroup,
 			options.publicIpName,
 			cleanPublicIpForDdosUpdate(options.publicIp, {
@@ -6010,12 +6092,11 @@ async function updatePublicIpDdosSettings(
 			}),
 			{ updateIntervalInMs: 3000 }
 		);
+		return await waitForPublicIpDdosState(clients, options);
 	} catch (err) {
-		const latest = await getPublicIpWithRawFallback(
-			clients,
-			options.resourceGroup,
-			options.publicIpName
-		).catch(() => null);
+		const latest = await getPublicIpForDdosState(clients, options.resourceGroup, options.publicIpName).catch(
+			() => null
+		);
 		if (latest && publicIpDdosStateMatches(latest, options)) {
 			await reportCreateVmProgress(
 				options.progress,
@@ -6035,6 +6116,157 @@ async function updatePublicIpDdosSettings(
 	}
 }
 
+async function resolveVmDdosPublicIPv4Target(
+	clients: AzureClients,
+	options: {
+		resourceGroup: string;
+		vmName: string;
+		progress?: CreateVmProgressReporter;
+		actionLabel: string;
+	}
+): Promise<{
+	vmLocation: string;
+	nicResourceGroup: string;
+	nicName: string;
+	nic: NetworkInterface;
+	ipConfig: NetworkInterfaceIPConfiguration;
+	vnetRef: VmVirtualNetworkRef;
+	binding: NicPublicIpBinding;
+	publicIp: PublicIPAddress;
+}> {
+	const { vmLocation, nicResourceGroup, nicName, nic, ipConfig } = await getPrimaryNicAndIPv4Config(
+		clients,
+		options.resourceGroup,
+		options.vmName,
+		options.progress,
+		{ step: 'ddos-inspect-vm' }
+	);
+	const vnetRef = await resolveVmVirtualNetworkRef(clients, {
+		resourceGroup: options.resourceGroup,
+		vmName: options.vmName,
+		nicResourceGroup,
+		ipConfig,
+		progress: options.progress,
+		step: 'ddos-inspect-vm',
+		actionLabel: options.actionLabel
+	});
+	await reportCreateVmProgress(options.progress, 'ddos-inspect-vm', 'success', '已定位 VM 网卡和虚拟网络', {
+		nicName,
+		virtualNetwork: vnetRef.virtualNetworkName,
+		virtualNetworkResourceGroup: vnetRef.resourceGroup,
+		subnet: vnetRef.subnetName || '-',
+		source: vnetRef.source
+	});
+
+	await reportCreateVmProgress(options.progress, 'ddos-public-ip-lookup', 'running', '定位 VM 当前绑定的公网 IPv4 Public IP', {
+		nicName,
+		ipConfigName: ipConfig.name ?? ''
+	});
+	const binding = await resolveCurrentNicIPv4PublicIp(clients, {
+		resourceGroup: options.resourceGroup,
+		vmName: options.vmName,
+		nicResourceGroup,
+		nicName,
+		nic,
+		ipConfig,
+		progress: options.progress,
+		step: 'ddos-public-ip-lookup'
+	});
+	if (!binding?.publicIpName || !binding.publicIpResourceGroup) {
+		throw new Error(`未找到 VM ${options.vmName} 当前绑定的公网 IPv4 Public IP，无法${options.actionLabel}公网 IPv4 DDoS 防护`);
+	}
+	const publicIp = await getPublicIpForDdosState(clients, binding.publicIpResourceGroup, binding.publicIpName);
+	if (isPublicIpResourceIPv6(publicIp)) {
+		throw new Error(`VM ${options.vmName} 当前定位到的是 IPv6 Public IP ${binding.publicIpName}，无法用于公网 IPv4 DDoS 防护`);
+	}
+	const publicIPv4 = publicIpAddressValue(publicIp) || binding.publicIPv4;
+	if (!publicIPv4) {
+		throw new Error(`VM ${options.vmName} 的 Public IP ${binding.publicIpName} 未返回 IPv4 地址，无法${options.actionLabel}公网 IPv4 DDoS 防护`);
+	}
+	await reportCreateVmProgress(options.progress, 'ddos-public-ip-lookup', 'success', '已定位公网 IPv4 Public IP', {
+		publicIpName: binding.publicIpName,
+		resourceGroup: binding.publicIpResourceGroup,
+		publicIPv4,
+		source: binding.source
+	});
+	return {
+		vmLocation,
+		nicResourceGroup,
+		nicName,
+		nic,
+		ipConfig,
+		vnetRef,
+		binding: {
+			...binding,
+			publicIpId: binding.publicIpId || publicIp.id || '',
+			publicIPv4,
+			ipConfigName: binding.ipConfigName || ipConfig.name || ''
+		},
+		publicIp
+	};
+}
+
+async function loadVnetDdosPlanContext(
+	clients: AzureClients,
+	options: {
+		vnetRef: VmVirtualNetworkRef;
+		vmLocation: string;
+	}
+) {
+	const vnet =
+		options.vnetRef.vnet ??
+		(await clients.network.virtualNetworks
+			.get(options.vnetRef.resourceGroup, options.vnetRef.virtualNetworkName)
+			.catch(() => null));
+	return {
+		vnet,
+		existingPlanId: vnet?.ddosProtectionPlan?.id ?? '',
+		location: vnet?.location ?? options.vmLocation
+	};
+}
+
+async function resolveDdosProtectionPlanForPublicIp(
+	clients: AzureClients,
+	options: {
+		vnetRef: VmVirtualNetworkRef;
+		vmLocation: string;
+		publicIp: PublicIPAddress;
+		publicIpResourceGroup: string;
+		vmName: string;
+		progress?: CreateVmProgressReporter;
+	}
+): Promise<DdosProtectionPlan> {
+	const publicIpPlanId = options.publicIp.ddosSettings?.ddosProtectionPlan?.id ?? '';
+	if (publicIpPlanId) {
+		await reportCreateVmProgress(options.progress, 'ddos-plan', 'success', '公网 IPv4 已有关联 DDoS 防护计划，复用现有计划', {
+			planName: parseResourceName(publicIpPlanId),
+			planId: publicIpPlanId
+		});
+		return { id: publicIpPlanId, name: parseResourceName(publicIpPlanId) };
+	}
+
+	const vnetContext = await loadVnetDdosPlanContext(clients, {
+		vnetRef: options.vnetRef,
+		vmLocation: options.vmLocation
+	});
+	if (vnetContext.existingPlanId) {
+		await reportCreateVmProgress(options.progress, 'ddos-plan', 'success', '复用虚拟网络已有 DDoS 防护计划用于公网 IPv4', {
+			planName: parseResourceName(vnetContext.existingPlanId),
+			planId: vnetContext.existingPlanId
+		});
+		return { id: vnetContext.existingPlanId, name: parseResourceName(vnetContext.existingPlanId) };
+	}
+
+	const location = options.publicIp.location || vnetContext.location || options.vmLocation;
+	if (!location) throw new Error('无法确认公网 IPv4 所在区域，不能创建 DDoS 防护计划');
+	return createRequiredDdosProtectionPlanForVm(clients, {
+		resourceGroup: options.publicIpResourceGroup || options.vnetRef.resourceGroup,
+		location,
+		vmName: options.vmName,
+		progress: options.progress
+	});
+}
+
 export async function enableVmDdosProtection(
 	clients: AzureClients,
 	resourceGroup: string,
@@ -6050,108 +6282,51 @@ export async function enableVmDdosProtection(
 	publicIPv4: string;
 	publicIPv4DdosEnabled: boolean;
 }> {
-	await reportCreateVmProgress(progress, 'ddos-inspect-vm', 'running', '读取 VM 网卡、子网和公网 IP 信息', {
+	await reportCreateVmProgress(progress, 'ddos-inspect-vm', 'running', '读取 VM 网卡、子网和公网 IPv4 信息', {
 		resourceGroup,
 		vmName
 	});
-	const { vmLocation, nicResourceGroup, ipConfig } = await getPrimaryNicAndIPv4Config(clients, resourceGroup, vmName);
-	const publicIpId = ipConfig.publicIPAddress?.id ?? '';
-	const vnetRef = await resolveVmVirtualNetworkRef(clients, {
+	const { vmLocation, vnetRef, binding, publicIp } = await resolveVmDdosPublicIPv4Target(clients, {
 		resourceGroup,
 		vmName,
-		nicResourceGroup,
-		ipConfig,
 		progress,
-		step: 'ddos-inspect-vm',
-		actionLabel: '关联 DDoS 防护计划'
+		actionLabel: '开启'
 	});
-	await reportCreateVmProgress(progress, 'ddos-inspect-vm', 'success', '已定位 VM 所属虚拟网络', {
-		virtualNetwork: vnetRef.virtualNetworkName,
-		virtualNetworkResourceGroup: vnetRef.resourceGroup,
-		subnet: vnetRef.subnetName || '-',
-		source: vnetRef.source
-	});
-
-	await reportCreateVmProgress(progress, 'ddos-vnet-load', 'running', '读取虚拟网络当前配置', {
-		virtualNetwork: vnetRef.virtualNetworkName,
-		resourceGroup: vnetRef.resourceGroup
-	});
-	const vnet = await clients.network.virtualNetworks.get(
-		vnetRef.resourceGroup,
-		vnetRef.virtualNetworkName
-	);
-	const vnetLocation = vnet.location ?? vmLocation ?? '';
-	await reportCreateVmProgress(progress, 'ddos-vnet-load', 'success', '虚拟网络配置已读取', {
-		virtualNetwork: vnetRef.virtualNetworkName,
-		location: vnetLocation
+	const plan = await resolveDdosProtectionPlanForPublicIp(clients, {
+		vnetRef,
+		vmLocation,
+		publicIp,
+		publicIpResourceGroup: binding.publicIpResourceGroup,
+		vmName,
+		progress
 	});
 
-	const existingPlanId = vnet.ddosProtectionPlan?.id ?? '';
-	const plan = existingPlanId
-		? { id: existingPlanId, name: parseResourceName(existingPlanId) }
-		: await createRequiredDdosProtectionPlanForVm(clients, {
-				resourceGroup: vnetRef.resourceGroup,
-				location: vnetLocation,
-				vmName,
-				progress
-			});
-	if (existingPlanId) {
-		await reportCreateVmProgress(progress, 'ddos-plan', 'success', '虚拟网络已关联 DDoS 防护计划，复用现有计划', {
-			planName: plan.name ?? parseResourceName(existingPlanId),
-			planId: existingPlanId
-		});
-	}
-
-	await reportCreateVmProgress(progress, 'ddos-vnet-attach', 'running', '关联 DDoS 防护计划到虚拟网络', {
-		virtualNetwork: vnetRef.virtualNetworkName,
+	await reportCreateVmProgress(progress, 'ddos-public-ip', 'running', '开启公网 IPv4 Public IP 的 DDoS 保护模式', {
+		publicIpName: binding.publicIpName,
+		resourceGroup: binding.publicIpResourceGroup,
+		publicIPv4: binding.publicIPv4,
 		planId: plan.id ?? ''
 	});
-	const updatedVnet = await updateVirtualNetworkDdosProtection(clients, {
-		resourceGroup: vnetRef.resourceGroup,
-		virtualNetworkName: vnetRef.virtualNetworkName,
-		vnet,
+	const updatedPublicIp = await updatePublicIpDdosSettings(clients, {
+		resourceGroup: binding.publicIpResourceGroup,
+		publicIpName: binding.publicIpName,
+		publicIp,
 		enable: true,
 		ddosProtectionPlanId: plan.id,
 		progress,
-		step: 'ddos-vnet-attach'
+		step: 'ddos-public-ip'
 	});
-	await reportCreateVmProgress(progress, 'ddos-vnet-attach', 'success', 'DDoS 防护已关联到虚拟网络', {
-		virtualNetwork: updatedVnet.name ?? vnetRef.virtualNetworkName,
-		provisioningState: updatedVnet.provisioningState ?? ''
+	const publicIPv4 = publicIpAddressValue(updatedPublicIp) || binding.publicIPv4;
+	await reportCreateVmProgress(progress, 'ddos-public-ip', 'success', '公网 IPv4 Public IP 已启用 DDoS 保护模式', {
+		publicIpName: binding.publicIpName,
+		ip: publicIPv4 || '-',
+		protectionMode: updatedPublicIp.ddosSettings?.protectionMode ?? '',
+		planId: updatedPublicIp.ddosSettings?.ddosProtectionPlan?.id ?? plan.id ?? ''
 	});
 
-	let publicIPv4 = '';
-	let publicIPv4DdosEnabled = false;
-	if (publicIpId) {
-		const publicIpResourceGroup = parseResourceGroup(publicIpId);
-		const publicIpName = parseResourceName(publicIpId);
-		await reportCreateVmProgress(progress, 'ddos-public-ip', 'running', '开启当前 IPv4 公网 IP 的 DDoS 保护模式', {
-			publicIpName,
-			resourceGroup: publicIpResourceGroup
-		});
-		const publicIp = await getPublicIpWithRawFallback(clients, publicIpResourceGroup, publicIpName);
-		publicIPv4 = publicIpAddressValue(publicIp);
-		const updatedPublicIp = await updatePublicIpDdosSettings(clients, {
-			resourceGroup: publicIpResourceGroup,
-			publicIpName,
-			publicIp,
-			enable: true,
-			ddosProtectionPlanId: plan.id,
-			progress,
-			step: 'ddos-public-ip'
-		});
-		publicIPv4 = publicIpAddressValue(updatedPublicIp) || publicIPv4;
-		publicIPv4DdosEnabled = true;
-		await reportCreateVmProgress(progress, 'ddos-public-ip', 'success', '当前 IPv4 公网 IP 已启用 DDoS 保护模式', {
-			publicIpName,
-			ip: publicIPv4 || '-'
-		});
-	} else {
-		await reportCreateVmProgress(progress, 'ddos-public-ip', 'info', 'VM 未绑定 IPv4 公网 IP，已跳过公网 IP DDoS 设置');
-	}
-
-	await reportCreateVmProgress(progress, 'ddos-complete', 'success', 'VM DDoS 防护开启流程完成', {
+	await reportCreateVmProgress(progress, 'ddos-complete', 'success', '公网 IPv4 DDoS 防护开启流程完成', {
 		vmName,
+		publicIPv4,
 		virtualNetwork: vnetRef.virtualNetworkName,
 		planName: plan.name ?? parseResourceName(plan.id ?? '')
 	});
@@ -6163,7 +6338,7 @@ export async function enableVmDdosProtection(
 		virtualNetworkName: vnetRef.virtualNetworkName,
 		virtualNetworkResourceGroup: vnetRef.resourceGroup,
 		publicIPv4,
-		publicIPv4DdosEnabled
+		publicIPv4DdosEnabled: true
 	};
 }
 
@@ -6182,85 +6357,44 @@ export async function disableVmDdosProtection(
 	publicIPv4: string;
 	publicIPv4DdosEnabled: boolean;
 }> {
-	await reportCreateVmProgress(progress, 'ddos-inspect-vm', 'running', '读取 VM 网卡、子网和公网 IP 信息', {
+	await reportCreateVmProgress(progress, 'ddos-inspect-vm', 'running', '读取 VM 网卡、子网和公网 IPv4 信息', {
 		resourceGroup,
 		vmName
 	});
-	const { vmLocation, nicResourceGroup, ipConfig } = await getPrimaryNicAndIPv4Config(clients, resourceGroup, vmName);
-	const publicIpId = ipConfig.publicIPAddress?.id ?? '';
-	const vnetRef = await resolveVmVirtualNetworkRef(clients, {
+	const { vnetRef, binding, publicIp } = await resolveVmDdosPublicIPv4Target(clients, {
 		resourceGroup,
 		vmName,
-		nicResourceGroup,
-		ipConfig,
 		progress,
-		step: 'ddos-inspect-vm',
-		actionLabel: '关闭 DDoS 防护'
-	});
-	await reportCreateVmProgress(progress, 'ddos-inspect-vm', 'success', '已定位 VM 所属虚拟网络', {
-		virtualNetwork: vnetRef.virtualNetworkName,
-		virtualNetworkResourceGroup: vnetRef.resourceGroup,
-		subnet: vnetRef.subnetName || '-',
-		source: vnetRef.source
+		actionLabel: '关闭'
 	});
 
-	let publicIPv4 = '';
-	if (publicIpId) {
-		const publicIpResourceGroup = parseResourceGroup(publicIpId);
-		const publicIpName = parseResourceName(publicIpId);
-		await reportCreateVmProgress(progress, 'ddos-public-ip', 'running', '关闭当前 IPv4 公网 IP 的 DDoS 保护模式', {
-			publicIpName,
-			resourceGroup: publicIpResourceGroup
-		});
-		const publicIp = await getPublicIpWithRawFallback(clients, publicIpResourceGroup, publicIpName);
-		publicIPv4 = publicIpAddressValue(publicIp);
-		const updatedPublicIp = await updatePublicIpDdosSettings(clients, {
-			resourceGroup: publicIpResourceGroup,
-			publicIpName,
-			publicIp,
-			enable: false,
-			progress,
-			step: 'ddos-public-ip'
-		});
-		publicIPv4 = publicIpAddressValue(updatedPublicIp) || publicIPv4;
-		await reportCreateVmProgress(progress, 'ddos-public-ip', 'success', '当前 IPv4 公网 IP 已关闭 DDoS 保护模式', {
-			publicIpName,
-			ip: publicIPv4 || '-'
-		});
-	} else {
-		await reportCreateVmProgress(progress, 'ddos-public-ip', 'info', 'VM 未绑定 IPv4 公网 IP，已跳过公网 IP DDoS 设置');
-	}
-
-	await reportCreateVmProgress(progress, 'ddos-vnet-load', 'running', '读取虚拟网络当前配置', {
-		virtualNetwork: vnetRef.virtualNetworkName,
-		resourceGroup: vnetRef.resourceGroup
-	});
-	const vnet = await clients.network.virtualNetworks.get(
-		vnetRef.resourceGroup,
-		vnetRef.virtualNetworkName
-	);
-	const existingPlanId = vnet.ddosProtectionPlan?.id ?? '';
+	const existingPlanId = publicIp.ddosSettings?.ddosProtectionPlan?.id ?? '';
 	const existingPlanName = parseResourceName(existingPlanId);
-	await reportCreateVmProgress(progress, 'ddos-vnet-detach', 'running', '从虚拟网络关闭 DDoS 防护计划', {
-		virtualNetwork: vnetRef.virtualNetworkName,
+	await reportCreateVmProgress(progress, 'ddos-public-ip', 'running', '关闭公网 IPv4 Public IP 的 DDoS 保护模式', {
+		publicIpName: binding.publicIpName,
+		resourceGroup: binding.publicIpResourceGroup,
+		publicIPv4: binding.publicIPv4,
 		planId: existingPlanId
 	});
-	const updatedVnet = await updateVirtualNetworkDdosProtection(clients, {
-		resourceGroup: vnetRef.resourceGroup,
-		virtualNetworkName: vnetRef.virtualNetworkName,
-		vnet,
+	const updatedPublicIp = await updatePublicIpDdosSettings(clients, {
+		resourceGroup: binding.publicIpResourceGroup,
+		publicIpName: binding.publicIpName,
+		publicIp,
 		enable: false,
 		progress,
-		step: 'ddos-vnet-detach'
+		step: 'ddos-public-ip'
 	});
-	await reportCreateVmProgress(progress, 'ddos-vnet-detach', 'success', '虚拟网络 DDoS 防护已关闭', {
-		virtualNetwork: updatedVnet.name ?? vnetRef.virtualNetworkName,
-		provisioningState: updatedVnet.provisioningState ?? '',
-		location: updatedVnet.location ?? vmLocation ?? ''
+	const publicIPv4 = publicIpAddressValue(updatedPublicIp) || binding.publicIPv4;
+	await reportCreateVmProgress(progress, 'ddos-public-ip', 'success', '公网 IPv4 Public IP 已关闭 DDoS 保护模式', {
+		publicIpName: binding.publicIpName,
+		ip: publicIPv4 || '-',
+		protectionMode: updatedPublicIp.ddosSettings?.protectionMode ?? '',
+		planId: updatedPublicIp.ddosSettings?.ddosProtectionPlan?.id ?? ''
 	});
 
-	await reportCreateVmProgress(progress, 'ddos-complete', 'success', 'VM DDoS 防护关闭流程完成', {
+	await reportCreateVmProgress(progress, 'ddos-complete', 'success', '公网 IPv4 DDoS 防护关闭流程完成', {
 		vmName,
+		publicIPv4,
 		virtualNetwork: vnetRef.virtualNetworkName,
 		planName: existingPlanName
 	});

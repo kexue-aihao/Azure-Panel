@@ -37,8 +37,8 @@ function publicResult(result: DdosResult, action: DdosAction): EnableDdosPublicR
 		public_ipv4_ddos_enabled: result.publicIPv4DdosEnabled,
 		message:
 			action === 'disable'
-				? `已为 VM ${result.vmName} 关闭 DDoS 防护`
-				: `已为 VM ${result.vmName} 开启 DDoS 防护计划`
+				? `已为 VM ${result.vmName} 的公网 IPv4 关闭 DDoS 防护`
+				: `已为 VM ${result.vmName} 的公网 IPv4 开启 DDoS 防护`
 	};
 }
 

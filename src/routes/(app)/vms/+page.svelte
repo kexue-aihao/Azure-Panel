@@ -1395,8 +1395,8 @@
 		const isDisable = action === 'disable';
 		const ok = confirm(
 			isDisable
-				? `确认关闭 ${vm.name} 的 Azure DDoS 防护吗？如果该 VM 所在虚拟网络还有其他资源，也会受到关闭虚拟网络 DDoS 防护的影响。`
-				: `确认为 ${vm.name} 单独开启 Azure DDoS 防护计划吗？DDoS Protection Plan 可能产生 Azure 官方额外费用。`
+				? `确认关闭 ${vm.name} 当前公网 IPv4 的 Azure DDoS 防护吗？`
+				: `确认为 ${vm.name} 当前公网 IPv4 开启 Azure DDoS 防护吗？DDoS Protection Plan 可能产生 Azure 官方额外费用。`
 		);
 		if (!ok) return;
 		ipActionLoading = `${vm.name}:ddos:${action}`;
@@ -1417,7 +1417,7 @@
 					action
 				}
 			});
-			toast = `${result.message}，VNet=${result.virtual_network_name || '-'}，Plan=${result.ddos_protection_plan_name || '-'}`;
+			toast = `${result.message}，IPv4=${result.public_ipv4 || '-'}，Plan=${result.ddos_protection_plan_name || '-'}`;
 			await loadVms();
 		} catch (err) {
 			const message = err instanceof Error ? err.message : `DDoS 防护${isDisable ? '关闭' : '开启'}失败`;
