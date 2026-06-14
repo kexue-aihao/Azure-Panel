@@ -333,6 +333,7 @@ const COMPUTE_RESOURCE_SKUS_API_VERSION = '2021-07-01';
 const COGNITIVE_SERVICES_API_VERSION = '2024-10-01';
 const CAPACITY_QUOTA_API_VERSION = '2020-10-25';
 const NETWORK_PUBLIC_IP_API_VERSION = '2024-05-01';
+const NETWORK_VIRTUAL_NETWORK_API_VERSION = '2024-05-01';
 export const DEFAULT_PROVIDER_NAMESPACES = [
 	'Microsoft.Compute',
 	'Microsoft.Network',
@@ -2371,6 +2372,15 @@ function publicIpListArmPath(clients: AzureClients, resourceGroup: string) {
 		`/resourceGroups/${encodeURIComponent(resourceGroup)}` +
 		`/providers/Microsoft.Network/publicIPAddresses` +
 		`?api-version=${NETWORK_PUBLIC_IP_API_VERSION}`
+	);
+}
+
+function virtualNetworkArmPath(clients: AzureClients, resourceGroup: string, virtualNetworkName: string) {
+	return (
+		`/subscriptions/${encodeURIComponent(clients.subscriptionId)}` +
+		`/resourceGroups/${encodeURIComponent(resourceGroup)}` +
+		`/providers/Microsoft.Network/virtualNetworks/${encodeURIComponent(virtualNetworkName)}` +
+		`?api-version=${NETWORK_VIRTUAL_NETWORK_API_VERSION}`
 	);
 }
 
@@ -5334,32 +5344,50 @@ function cleanServiceEndpoint(endpoint: NonNullable<Subnet['serviceEndpoints']>[
 	};
 }
 
-function cleanSubnetForVnetUpdate(subnet: Subnet): Subnet {
-	const cleaned: Subnet = {
+function omitUndefinedDeep<T>(value: T): T {
+	if (Array.isArray(value)) {
+		return value
+			.map((item) => omitUndefinedDeep(item))
+			.filter((item) => item !== undefined) as T;
+	}
+	if (value && typeof value === 'object') {
+		const entries = Object.entries(value as Record<string, unknown>)
+			.filter(([, item]) => item !== undefined)
+			.map(([key, item]) => [key, omitUndefinedDeep(item)] as const);
+		return Object.fromEntries(entries) as T;
+	}
+	return value;
+}
+
+function cleanSubnetForVnetUpdate(subnet: Subnet) {
+	return omitUndefinedDeep({
 		name: subnet.name,
-		addressPrefix: subnet.addressPrefix,
-		addressPrefixes: subnet.addressPrefixes,
-		networkSecurityGroup: cleanSubResource(subnet.networkSecurityGroup),
-		routeTable: cleanSubResource(subnet.routeTable),
-		natGateway: cleanSubResource(subnet.natGateway),
-		serviceEndpoints: subnet.serviceEndpoints?.map(cleanServiceEndpoint),
-		serviceEndpointPolicies: cleanSubResourceList(subnet.serviceEndpointPolicies),
-		ipAllocations: cleanSubResourceList(subnet.ipAllocations),
-		delegations: subnet.delegations?.map((delegation) => ({
-			name: delegation.name,
-			serviceName: delegation.serviceName
-		})),
-		privateEndpointNetworkPolicies: subnet.privateEndpointNetworkPolicies,
-		privateLinkServiceNetworkPolicies: subnet.privateLinkServiceNetworkPolicies,
-		applicationGatewayIPConfigurations: cleanSubResourceList(subnet.applicationGatewayIPConfigurations),
-		sharingScope: subnet.sharingScope,
-		defaultOutboundAccess: subnet.defaultOutboundAccess,
-		ipamPoolPrefixAllocations: subnet.ipamPoolPrefixAllocations?.map((allocation) => ({
-			id: allocation.id,
-			numberOfIpAddresses: allocation.numberOfIpAddresses
-		}))
-	};
-	return cleaned;
+		properties: {
+			addressPrefix: subnet.addressPrefix,
+			addressPrefixes: subnet.addressPrefixes,
+			networkSecurityGroup: cleanSubResource(subnet.networkSecurityGroup),
+			routeTable: cleanSubResource(subnet.routeTable),
+			natGateway: cleanSubResource(subnet.natGateway),
+			serviceEndpoints: subnet.serviceEndpoints?.map(cleanServiceEndpoint),
+			serviceEndpointPolicies: cleanSubResourceList(subnet.serviceEndpointPolicies),
+			ipAllocations: cleanSubResourceList(subnet.ipAllocations),
+			delegations: subnet.delegations?.map((delegation) => ({
+				name: delegation.name,
+				properties: {
+					serviceName: delegation.serviceName
+				}
+			})),
+			privateEndpointNetworkPolicies: subnet.privateEndpointNetworkPolicies,
+			privateLinkServiceNetworkPolicies: subnet.privateLinkServiceNetworkPolicies,
+			applicationGatewayIPConfigurations: cleanSubResourceList(subnet.applicationGatewayIPConfigurations),
+			sharingScope: subnet.sharingScope,
+			defaultOutboundAccess: subnet.defaultOutboundAccess,
+			ipamPoolPrefixAllocations: subnet.ipamPoolPrefixAllocations?.map((allocation) => ({
+				id: allocation.id,
+				numberOfIpAddresses: allocation.numberOfIpAddresses
+			}))
+		}
+	});
 }
 
 function cleanVirtualNetworkForDdosUpdate(
@@ -5368,12 +5396,8 @@ function cleanVirtualNetworkForDdosUpdate(
 		enable: boolean;
 		ddosProtectionPlanId?: string;
 	}
-): VirtualNetwork {
-	const cleaned: VirtualNetwork = {
-		id: vnet.id,
-		location: vnet.location,
-		tags: vnet.tags,
-		extendedLocation: vnet.extendedLocation,
+): Record<string, unknown> {
+	const properties: Record<string, unknown> = {
 		addressSpace: vnet.addressSpace,
 		dhcpOptions: vnet.dhcpOptions,
 		flowTimeoutInMinutes: vnet.flowTimeoutInMinutes,
@@ -5386,11 +5410,16 @@ function cleanVirtualNetworkForDdosUpdate(
 		privateEndpointVNetPolicies: vnet.privateEndpointVNetPolicies
 	};
 	if (options.enable && options.ddosProtectionPlanId) {
-		cleaned.ddosProtectionPlan = { id: options.ddosProtectionPlanId };
+		properties.ddosProtectionPlan = { id: options.ddosProtectionPlanId };
 	} else if (!options.enable) {
-		(cleaned as unknown as { ddosProtectionPlan: null }).ddosProtectionPlan = null;
+		properties.ddosProtectionPlan = null;
 	}
-	return cleaned;
+	return omitUndefinedDeep({
+		location: vnet.location,
+		tags: vnet.tags,
+		extendedLocation: vnet.extendedLocation,
+		properties
+	});
 }
 
 function virtualNetworkDdosStateMatches(
@@ -5439,16 +5468,72 @@ async function updateVirtualNetworkDdosProtection(
 		);
 	};
 
-	try {
-		const updated = await clients.network.virtualNetworks.beginCreateOrUpdateAndWait(
-			options.resourceGroup,
-			options.virtualNetworkName,
-			cleanVirtualNetworkForDdosUpdate(options.vnet, {
+	const updateViaArm = async () => {
+		const response = await sendArmPipelineRequest(clients.credential, clients.clientOptions, {
+			method: 'PUT',
+			pathOrUrl: virtualNetworkArmPath(clients, options.resourceGroup, options.virtualNetworkName),
+			body: cleanVirtualNetworkForDdosUpdate(options.vnet, {
 				enable: options.enable,
 				ddosProtectionPlanId: options.ddosProtectionPlanId
-			}),
-			{ updateIntervalInMs: 3000 }
-		);
+			})
+		});
+		if (response.status < 200 || response.status >= 300) {
+			throw new Error(armResponseError(response.status, response.bodyAsText));
+		}
+
+		const asyncOperationUrl = armHeader(response, 'Azure-AsyncOperation');
+		const locationUrl = armHeader(response, 'Location');
+		const requestId = armHeader(response, 'x-ms-request-id');
+		const pollUrl = asyncOperationUrl || locationUrl;
+		if (pollUrl) {
+			await reportCreateVmProgress(
+				options.progress,
+				`${options.step}-polling`,
+				'running',
+				'虚拟网络 DDoS 配置更新中，已获取 Azure 长任务地址',
+				{
+					virtualNetwork: options.virtualNetworkName,
+					requestId: requestId || null,
+					pollMode: asyncOperationUrl ? 'Azure-AsyncOperation' : 'Location'
+				}
+			);
+			for (let polls = 1; polls <= 120; polls++) {
+				await sleep(2000);
+				const pollResponse = await sendArmPipelineRequest(clients.credential, clients.clientOptions, {
+					method: 'GET',
+					pathOrUrl: pollUrl
+				});
+				const payload = parseArmJson(pollResponse.bodyAsText);
+				const status = publicIpLroStatus(payload);
+				await reportCreateVmProgress(
+					options.progress,
+					`${options.step}-polling`,
+					'running',
+					`虚拟网络 DDoS 配置更新中，轮询第 ${polls} 次`,
+					{
+						virtualNetwork: options.virtualNetworkName,
+						status: status || String(pollResponse.status),
+						polls
+					}
+				);
+				if (pollResponse.status < 200 || pollResponse.status >= 300) {
+					throw new Error(`Virtual Network DDoS LRO poll failed: ${armResponseError(pollResponse.status, pollResponse.bodyAsText)}`);
+				}
+				if (status === 'failed' || status === 'canceled' || status === 'cancelled') {
+					throw new Error(`Virtual Network DDoS LRO ${status}: ${armBodySummary(pollResponse.bodyAsText)}`);
+				}
+				if (status === 'succeeded' || status === 'success') break;
+				if (polls === 120) throw new Error('Virtual Network DDoS LRO polling timed out after 120 attempts');
+			}
+		} else if (response.status !== 200 && response.status !== 201) {
+			throw new Error(`Azure 未返回虚拟网络 DDoS 长任务地址: HTTP ${response.status}`);
+		}
+
+		return clients.network.virtualNetworks.get(options.resourceGroup, options.virtualNetworkName);
+	};
+
+	try {
+		const updated = await updateViaArm();
 		return await assertReachedTarget(updated);
 	} catch (err) {
 		const latest = await clients.network.virtualNetworks
